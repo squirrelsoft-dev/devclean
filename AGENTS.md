@@ -7,12 +7,20 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Stack
 
 - Rust binary crate (`devclean`), edition 2024.
-- CLI parsing via `clap` with the `derive` feature (`src/main.rs`). Surface is intentionally minimal (a `Cli` struct with built-in `--version`; no subcommands yet).
+- CLI parsing via `clap` with the `derive` feature (`src/main.rs`). Subcommands are optional (`Option<Subcommand>`); running with no subcommand still prints the placeholder banner.
+- Config is TOML loaded in `src/config.rs` (`serde` + `toml`), cross-platform config dir via the `dirs` crate. A missing file at the *default* path falls back to `Config::default()`, but an explicit `--config` path that does not exist is a hard error (enforced in `main::run_list`, not in `config`). CLI flags merge on top via `Config::apply_overrides`.
 
 ## Build / test
 
 - Build, run, and test commands: see `README.md`.
 - `Cargo.lock` is committed (binary crate); `.gitignore` deliberately omits it.
+
+## Config surface
+
+- User-facing config docs (file location, TOML keys, defaults, CLI flags) live in `README.md`; the resolution logic is `config::default_config_path`.
+- Top-level flags are not `global`, so clap requires them *before* the subcommand (`devclean --force list`, never `devclean list --force`).
+- `--force` and `--dry-run` conflict at the clap layer (`conflicts_with`), so no runtime precedence logic exists or should be added.
+- `devclean list` is the only observable product command today; discovery/classification/cleaning are separate issues.
 
 ## Maintaining this file
 
