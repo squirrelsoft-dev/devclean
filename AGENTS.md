@@ -11,10 +11,8 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Build / test
 
-- Build: `cargo build`
-- Test: `cargo test`
-- Run: `cargo run -- --version`
-- `Cargo.lock` is committed (binary crate).
+- Build, run, and test commands: see `README.md`.
+- `Cargo.lock` is committed (binary crate); `.gitignore` deliberately omits it.
 
 ## Maintaining this file
 
