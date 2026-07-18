@@ -6,12 +6,32 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+static ISOLATED_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// An empty directory standing in for the developer's home, shared by every
+/// child process this file spawns. Without it `config::default_config_path`
+/// resolves against the real `HOME`/`XDG_CONFIG_HOME`, so a developer who
+/// happens to have a `devclean/config.toml` would silently change what these
+/// tests assert — and a malformed one would fail them for unrelated reasons.
+fn isolated_home() -> &'static Path {
+    ISOLATED_HOME.get_or_init(|| {
+        let mut d = std::env::temp_dir();
+        d.push(format!("devclean-safelist-cli-home-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    })
+}
 
 fn devclean() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_devclean"));
+    let home = isolated_home();
+    cmd.env("HOME", home);
+    cmd.env("XDG_CONFIG_HOME", home.join(".config"));
+    cmd
 }
 
 fn unique_dir(label: &str) -> PathBuf {
@@ -28,8 +48,9 @@ fn unique_dir(label: &str) -> PathBuf {
 }
 
 /// Run `devclean safelist <path>` inside `cwd`, returning the trimmed stdout.
-/// No HOME manipulation is needed: the safelist subcommand only reads the
-/// platform default config file, not any per-folder ignore files.
+/// The child runs against [`isolated_home`], so the platform default config
+/// path resolves inside an empty directory rather than the developer's real
+/// home.
 fn run_in(cwd: &Path, path: &str) -> (bool, String) {
     let result = devclean()
         .current_dir(cwd)
@@ -80,8 +101,8 @@ fn safelist_subcommand_reports_safe_and_not_safe() {
 
 #[test]
 fn safelist_subcommand_with_default_config_falls_back_on_missing_file() {
-    // No `~/.config/devclean/config.toml` in the temp environment — we just
-    // want the default, which carries the full built-in set.
+    // The isolated home has no `devclean/config.toml`, so this genuinely
+    // exercises the missing-default-file fallback: the built-in set, whole.
     let root = unique_dir("default");
 
     let (ok, out) = run_in(&root, "target");
@@ -110,6 +131,51 @@ fn safelist_subcommand_with_explicit_config_uses_additions() {
     assert_eq!(out.trim_end_matches('\n'), "target: safe");
 
     let _ = std::fs::remove_file(&cfg_path);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn safelist_subcommand_with_malformed_pattern_reports_an_error() {
+    // A bad glob in the user's `safe_delete` is a config mistake, so it must
+    // surface as `devclean: <error>` + a non-zero exit like every other config
+    // problem — never as a panic with a backtrace.
+    let root = unique_dir("malformed");
+    let cfg_path = root.join("devclean.toml");
+    std::fs::write(&cfg_path, "safe_delete = [\"[z-a]\"]\n").unwrap();
+
+    let (ok, out) = run_in_with(
+        &root,
+        &["--config", cfg_path.to_str().unwrap()],
+        "node_modules",
+    );
+    assert!(!ok, "{out}");
+    assert!(out.contains("devclean: "), "{out}");
+    assert!(!out.contains("panicked"), "{out}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn safelist_subcommand_reports_a_directory_only_pattern_by_path_kind() {
+    // The subcommand must stat the path rather than assuming it is a
+    // directory: a user's `build/`-style pattern should not report a regular
+    // file of the same name as safe to delete.
+    let root = unique_dir("dir-only");
+    let cfg_path = root.join("devclean.toml");
+    std::fs::write(&cfg_path, "safe_delete = [\"**/artifacts/\"]\n").unwrap();
+    let cfg_str = cfg_path.to_str().unwrap();
+
+    std::fs::write(root.join("artifacts"), b"not a directory\n").unwrap();
+    let (ok, out) = run_in_with(&root, &["--config", cfg_str], "artifacts");
+    assert!(ok, "{out}");
+    assert_eq!(out.trim_end_matches('\n'), "artifacts: not-safe");
+
+    std::fs::remove_file(root.join("artifacts")).unwrap();
+    std::fs::create_dir(root.join("artifacts")).unwrap();
+    let (ok, out) = run_in_with(&root, &["--config", cfg_str], "artifacts");
+    assert!(ok, "{out}");
+    assert_eq!(out.trim_end_matches('\n'), "artifacts: safe");
+
     let _ = std::fs::remove_dir_all(&root);
 }
 

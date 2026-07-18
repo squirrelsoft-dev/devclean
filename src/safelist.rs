@@ -77,7 +77,6 @@ pub struct SafeSet {
     matcher: IgnoreSet,
 }
 
-#[allow(dead_code)]
 impl SafeSet {
     /// Build a set from the built-in defaults plus every pattern in the
     /// caller's loaded `Config`'s `safe_delete`. The user's entries are
@@ -87,7 +86,14 @@ impl SafeSet {
     /// it may be any directory the process can reach, but only the paths
     /// handed to [`is_safe_to_delete`](Self::is_safe_to_delete) are
     /// interpreted relative to it.
-    pub fn from_config(project_root: &Path, cfg: &Config) -> Self {
+    ///
+    /// A malformed pattern in `safe_delete` (e.g. the reversed range
+    /// `[z-a]`) is a user-config error, not a bug: it is returned as an `Err`
+    /// so the caller can report it like any other config problem.
+    pub fn from_config(
+        project_root: &Path,
+        cfg: &Config,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::merge(project_root, BUILT_IN_DEFAULTS, &cfg.safe_delete)
     }
 
@@ -97,7 +103,15 @@ impl SafeSet {
     /// so they match at any depth. `project_root` anchors the resulting
     /// matcher for the in-memory layer (`is_ignored_path` resolves the path
     /// against it).
-    pub fn merge(project_root: &Path, built_in: &[&str], user: &[String]) -> Self {
+    ///
+    /// Errors when any pattern fails to compile as a gitignore glob. The
+    /// built-ins are known-good, so in practice this only fires on
+    /// user-supplied entries.
+    pub fn merge(
+        project_root: &Path,
+        built_in: &[&str],
+        user: &[String],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut patterns: Vec<String> = Vec::with_capacity(built_in.len() + user.len());
         for p in built_in {
             patterns.push(p.to_string());
@@ -107,24 +121,27 @@ impl SafeSet {
         }
         let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
         let specs: Vec<(&Path, &[&str])> = vec![(Path::new(PROJECT_ROOT_EMPTY), &pattern_refs[..])];
-        let matcher = IgnoreSet::from_layers(project_root, &specs).unwrap();
-        SafeSet { patterns, matcher }
+        let matcher = IgnoreSet::from_layers(project_root, &specs)?;
+        Ok(SafeSet { patterns, matcher })
     }
 
     /// Number of patterns in this set. Useful for display (e.g.
     /// `--dry-run` / diagnostic tooling).
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.patterns.len()
     }
 
     /// Returns `true` when no patterns are active — i.e. the set was built
     /// against an empty built-in slice and an empty user slice.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.patterns.is_empty()
     }
 
     /// Every pattern currently active in this set (built-in plus
     /// user-supplied), in built-in-first order.
+    #[allow(dead_code)]
     pub fn patterns(&self) -> &[String] {
         &self.patterns
     }
@@ -137,6 +154,12 @@ impl SafeSet {
     /// `is_dir` selects directory-only patterns (those with a trailing `/`);
     /// pass `true` when the path is a directory or its kind is unknown, since
     /// the catalog patterns are all about directories.
+    ///
+    /// Prefer [`is_safe`](Self::is_safe) when the caller has not already
+    /// determined the path's kind: forcing `is_dir = true` for a path that is
+    /// really a file makes a user's directory-only pattern (`build/`) report
+    /// a plain file named `build` as safe to delete.
+    #[allow(dead_code)]
     pub fn is_safe_to_delete(&self, rel_path: &Path, is_dir: bool) -> bool {
         self.matcher.is_ignored_path(rel_path, is_dir)
     }
@@ -162,7 +185,7 @@ mod tests {
     const PROJECT_ROOT: &str = "testroot";
 
     fn set(built_in: &[&str], user: &[String]) -> SafeSet {
-        SafeSet::merge(p(PROJECT_ROOT), built_in, user)
+        SafeSet::merge(p(PROJECT_ROOT), built_in, user).unwrap()
     }
 
     /// Every built-in pattern matches itself (as a directory) at the root, at
@@ -249,5 +272,31 @@ mod tests {
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
         assert!(!s.is_safe_to_delete(p("anything"), true));
+    }
+
+    /// A malformed user pattern is a reportable error, not a panic: it comes
+    /// straight from the user's config, so it has to travel the same path as
+    /// every other config problem. Note that the gitignore glob parser is
+    /// lenient about most junk (`[unclosed` compiles as a literal) — a
+    /// reversed character range and a dangling `\` are the reliable triggers.
+    #[test]
+    fn malformed_user_pattern_is_an_error() {
+        for bad in ["[z-a]", "\\"] {
+            let user = vec![bad.to_string()];
+            assert!(
+                SafeSet::merge(p(PROJECT_ROOT), BUILT_IN_DEFAULTS, &user).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    /// A directory-only user pattern must not match a regular file of the
+    /// same name. This is the invariant that forcing `is_dir = true` breaks.
+    #[test]
+    fn directory_only_pattern_does_not_match_a_file() {
+        let user = vec!["**/artifacts/".to_string()];
+        let s = set(BUILT_IN_DEFAULTS, &user);
+        assert!(s.is_safe_to_delete(p("artifacts"), true));
+        assert!(!s.is_safe_to_delete(p("artifacts"), false));
     }
 }
