@@ -4,9 +4,10 @@ Development environment cleanup CLI (scaffold).
 
 This is an initial, minimal Rust CLI skeleton. Product behavior (discovery,
 classification, cleaning) is not yet implemented; the binary currently loads its
-configuration and can print the resolved config via `devclean list`, and can
-answer whether a path is protected by `.devcleanignore` rules via
-`devclean ignore`.
+configuration and can print the resolved config via `devclean list`, answer
+whether a path is protected by `.devcleanignore` rules via `devclean ignore`,
+and answer whether a path is in the safe-to-delete catalog via
+`devclean safelist`.
 
 ## Build
 
@@ -78,6 +79,25 @@ relative to the current directory or absolute inside it; a path outside the
 project root is an error rather than a reported "not-ignored".
 Discovery and cleaning are separate, not-yet-implemented features.
 
+## Safe-to-delete catalog
+
+devclean keeps a catalog of paths that are safe to auto-delete — the ones a
+cleaning run may remove without asking. `devclean safelist <path>` reports
+whether a given path is in it. The catalog is:
+
+- **Built-in defaults** — compiled into `src/safelist.rs` as `BUILT_IN_DEFAULTS` (a non-exhaustive list of common build/cache dirs/files: `node_modules`, `target`, `.next`, `.turbo`, `dist`, `build`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.gradle`, `bin/obj`, `out`, `coverage`, `.nuxt`, `.svelte-kit`, `.cache`, `.parcel-cache`).
+- **Extension via `Config::safe_delete`** — user-supplied gitignore-style globs are appended (not replaced) to the built-in set. Patterns behave like gitignore globs anchored at the project root: each matches the named dir at any depth (e.g. `**/node_modules`), and matching a directory covers everything beneath it via the `ignore` crate's parent-match semantics.
+- **Intended consumer** — the not-yet-implemented cleaning engine, which will remove matched paths without asking for approval. Nothing deletes anything today.
+- **Observable hook** — `devclean safelist <path>` is the minimal diagnostic for the catalog; discovery and cleaning are separate, not-yet-implemented features.
+
+A path is reported `safe` or `not-safe`, interpreted relative to the current
+directory (treated as the project root); a path outside that root is an error
+rather than a reported "not-safe". Directory-only patterns (a trailing `/`) are
+matched against the path's actual kind on disk, so a plain file named `build`
+is not reported safe by a `build/` pattern.
+
+See `src/safelist.rs` for the implementation; `tests/safelist_cli.rs` for integration tests of the subcommand.
+
 ## Configuration
 
 devclean reads a TOML config file from the platform config dir
@@ -91,7 +111,7 @@ falling back to defaults.
 ```toml
 # ~/.config/devclean/config.toml
 workspace_roots = ["/home/me/code", "/home/me/work"]
-safe_delete = ["node_modules", "target"]
+safe_delete = ["**/my_build_artifact"]   # added to the built-ins, not a replacement
 max_depth = 4
 project_markers = [".git", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "pom.xml", "build.gradle", "*.csproj"]
 default_mode = "interactive"   # or "force"
@@ -100,7 +120,8 @@ default_mode = "interactive"   # or "force"
 Defaults:
 
 - `workspace_roots` — `[]`
-- `safe_delete` — `[]`
+- `safe_delete` — `[]` (extra patterns *added* to the built-in catalog; see
+  "Safe-to-delete catalog" above, which applies even when this is empty)
 - `max_depth` — `4`
 - `project_markers` — the list shown above
 - `default_mode` — `interactive`
@@ -112,6 +133,7 @@ Flags are top-level and must be given *before* the subcommand:
 ```sh
 devclean [FLAGS] list            # print the resolved config
 devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
+devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)

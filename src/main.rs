@@ -1,5 +1,6 @@
 mod config;
 mod ignore;
+mod safelist;
 
 use std::path::PathBuf;
 
@@ -49,6 +50,17 @@ enum Command {
         /// Path to test, relative to the current directory.
         path: String,
     },
+    /// Debug helper: report whether a path is safe to delete according to the
+    /// loaded `safe_delete` catalog (built-ins plus any `Config::safe_delete`
+    /// additions).
+    ///
+    /// Loads the platform default config (respecting `--config`) and prints
+    /// `safe` / `not-safe` for the given path, interpreted relative to the
+    /// current directory. Discovery/cleaning are separate issues.
+    Safelist {
+        /// Path to test, relative to the current directory.
+        path: String,
+    },
 }
 
 fn main() {
@@ -70,6 +82,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Command::Safelist { path }) => {
+            if let Err(e) = run_safelist(&cli, path) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -82,10 +100,45 @@ fn cli_overrides(cli: &Cli) -> CliOverrides {
     }
 }
 
-fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    // A path the user typed explicitly must exist: silently falling back to
-    // defaults would turn a typo into a plausible-looking run against the wrong
-    // settings. Only the default location is allowed to be absent.
+/// Resolve `p` to a path relative to `root`, rejecting anything that is not
+/// answerable against a project-anchored rule set.
+///
+/// Rules are anchored at the project root, so a path outside it cannot be
+/// answered. Reporting a negative result for one would be a false negative in
+/// the exact place a false negative is most dangerous — the caller would read
+/// it as "not protected" / "safe to delete".
+fn project_relative<'a>(
+    root: &std::path::Path,
+    p: &'a std::path::Path,
+) -> Result<&'a std::path::Path, Box<dyn std::error::Error>> {
+    let rel = match p.strip_prefix(root) {
+        Ok(rel) => rel,
+        Err(_) if p.is_relative() => p,
+        Err(_) => {
+            return Err(format!(
+                "path is outside the project root {}: {}",
+                root.display(),
+                p.display()
+            )
+            .into());
+        }
+    };
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("path escapes the project root: {}", p.display()).into());
+    }
+    Ok(rel)
+}
+
+/// Resolve and load the config for this invocation, returning the path it was
+/// read from (if any) alongside the loaded config.
+///
+/// A path the user typed explicitly must exist: silently falling back to
+/// defaults would turn a typo into a plausible-looking run against the wrong
+/// settings. Only the default location is allowed to be absent.
+fn load_cli_config(cli: &Cli) -> Result<(Option<PathBuf>, Config), Box<dyn std::error::Error>> {
     if let Some(path) = &cli.config
         && !path.is_file()
     {
@@ -93,11 +146,15 @@ fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config_path = cli.config.clone().or_else(config::default_config_path);
-
     let cfg = match &config_path {
         Some(path) => Config::load_or_default(path)?,
         None => Config::default(),
     };
+    Ok((config_path, cfg))
+}
+
+fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (config_path, cfg) = load_cli_config(cli)?;
     let overrides = cli_overrides(cli);
     let cfg = cfg.apply_overrides(&overrides);
 
@@ -131,28 +188,7 @@ fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let set = ignore::IgnoreSet::load(&root)?;
     let p = std::path::Path::new(path);
-
-    // Rules are anchored at the project root, so a path outside it cannot be
-    // answered. Reporting "not-ignored" for one would be a false negative in
-    // the exact place a false negative is most dangerous.
-    let rel = match p.strip_prefix(&root) {
-        Ok(rel) => rel,
-        Err(_) if p.is_relative() => p,
-        Err(_) => {
-            return Err(format!(
-                "path is outside the project root {}: {}",
-                root.display(),
-                p.display()
-            )
-            .into());
-        }
-    };
-    if rel
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(format!("path escapes the project root: {}", p.display()).into());
-    }
+    let rel = project_relative(&root, p)?;
 
     let ignored = set.is_ignored(rel);
     println!(
@@ -160,5 +196,23 @@ fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         path,
         if ignored { "ignored" } else { "not-ignored" }
     );
+    Ok(())
+}
+
+/// `devclean safelist <path>`: load the default config (or `--config`), build
+/// the safe-to-delete set from built-ins plus the loaded `safe_delete`, and
+/// report whether `path` is safe to delete. Minimal observable hook for the
+/// catalog; discovery/cleaning are separate issues.
+fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::current_dir()?;
+    let p = std::path::Path::new(path);
+    let rel = project_relative(&root, p)?;
+
+    let (_config_path, cfg) = load_cli_config(cli)?;
+
+    let set = safelist::SafeSet::from_config(&root, &cfg)?;
+    let safe = set.is_safe(rel);
+
+    println!("{}: {}", path, if safe { "safe" } else { "not-safe" });
     Ok(())
 }
