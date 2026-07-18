@@ -4,7 +4,9 @@ Development environment cleanup CLI (scaffold).
 
 This is an initial, minimal Rust CLI skeleton. Product behavior (discovery,
 classification, cleaning) is not yet implemented; the binary currently loads its
-configuration and can print the resolved config via `devclean list`.
+configuration and can print the resolved config via `devclean list`, and can
+answer whether a path is protected by `.devcleanignore` rules via
+`devclean ignore`.
 
 ## Build
 
@@ -66,11 +68,14 @@ build/
 There is a small debug helper to inspect the loaded rules:
 
 ```sh
-devclean ignore path/to/check   # prints "ignored" or "not-ignored"
+$ devclean ignore path/to/check
+path/to/check: ignored
 ```
 
-It loads the global file plus every `.devcleanignore` under the current
-directory and tests the given path (relative to the current directory).
+It treats the current directory as the project root, loads the global file plus
+every `.devcleanignore` beneath it, and tests the given path. The path may be
+relative to the current directory or absolute inside it; a path outside the
+project root is an error rather than a reported "not-ignored".
 Discovery and cleaning are separate, not-yet-implemented features.
 
 ## Configuration
@@ -106,6 +111,7 @@ Flags are top-level and must be given *before* the subcommand:
 
 ```sh
 devclean [FLAGS] list            # print the resolved config
+devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)
