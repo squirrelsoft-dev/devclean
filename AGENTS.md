@@ -22,6 +22,23 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `--force` and `--dry-run` conflict at the clap layer (`conflicts_with`), so no runtime precedence logic exists or should be added.
 - `devclean list` is the only observable product command today; discovery/classification/cleaning are separate issues.
 
+## Ignore matcher
+
+- `.devcleanignore` matching lives in `src/ignore.rs` (`IgnoreSet`), built on the
+  `ignore` crate (same gitignore engine ripgrep uses). Two scopes: a global
+  `~/.devcleanignore` anchored at the project root, plus per-folder
+  `.devcleanignore` files found by walking the project tree; deepest layer wins
+  (gitignore precedence). All anchors are stored *relative to the project root*;
+  `is_ignored_path(rel_path, is_dir)` takes a project-root-relative path.
+- A line that is blank or starts with `#` is a comment. `!` re-includes.
+- A matched path (incl. `!` whitelist) is "protected": `is_ignored == true` is the
+  signal cleaning must never act on it.
+- `devclean ignore <path>` is the minimal debug hook for the matcher; it loads
+  rules for the current directory. Integration tests in `tests/ignore_cli.rs`
+  override `HOME` so the real global file is never read.
+- `IgnoreSet::load_with(root, global)` is the test entry point that injects the
+  global file; `load` resolves the real `~/.devcleanignore` via `dirs::home_dir`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

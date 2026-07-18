@@ -9,3 +9,4 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "5"
+ignore = "0.4"

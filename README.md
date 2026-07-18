@@ -25,6 +25,53 @@ cargo run -- list
 cargo test
 ```
 
+## `.devcleanignore`
+
+devclean honors gitignore-style ignore files in two scopes:
+
+- **Global** — `~/.devcleanignore` applies to every project. Its patterns are
+  anchored at the project root (like git's `core.excludesfile`).
+- **Per-folder** — a `.devcleanignore` file inside a project tree applies to
+  the subtree rooted at its own directory, at any depth.
+
+Patterns use gitignore semantics: `*` and `**` globs, a leading `/` that
+anchors to the ignore file's directory, a trailing `/` for directory-only
+matches, and `!` to re-include a previously excluded path. Blank lines and
+lines starting with `#` are ignored.
+
+Precedence follows gitignore: the closest (deepest, most-specific)
+`.devcleanignore` wins, layered on top of the global file. A path matched by an
+ignore rule (including a `!` whitelist) is **protected** — cleaning never
+removes it.
+
+Example `~/.devcleanignore`:
+
+```gitignore
+# global: never touch these anywhere in a project
+.DS_Store
+*.swp
+/secrets
+```
+
+A per-folder `<project>/sub/.devcleanignore`:
+
+```gitignore
+# ignore this subtree's build output
+build/
+# ...but keep one debug log
+!debug.log
+```
+
+There is a small debug helper to inspect the loaded rules:
+
+```sh
+devclean ignore path/to/check   # prints "ignored" or "not-ignored"
+```
+
+It loads the global file plus every `.devcleanignore` under the current
+directory and tests the given path (relative to the current directory).
+Discovery and cleaning are separate, not-yet-implemented features.
+
 ## Configuration
 
 devclean reads a TOML config file from the platform config dir

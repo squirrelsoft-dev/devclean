@@ -1,4 +1,5 @@
 mod config;
+mod ignore;
 
 use std::path::PathBuf;
 
@@ -39,6 +40,15 @@ struct Cli {
 enum Command {
     /// Print the resolved configuration (workspace roots, max_depth, default_mode).
     List,
+    /// Debug helper: report whether a path is ignored by the loaded `.devcleanignore` rules.
+    ///
+    /// Loads the global `~/.devcleanignore` plus every `.devcleanignore` under the
+    /// current directory and prints `ignored` / `not-ignored` for the given path
+    /// (interpreted relative to the current directory).
+    Ignore {
+        /// Path to test, relative to the current directory.
+        path: String,
+    },
 }
 
 fn main() {
@@ -50,6 +60,12 @@ fn main() {
         }
         Some(Command::List) => {
             if let Err(e) = run_list(&cli) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Ignore { path }) => {
+            if let Err(e) = run_ignore(path) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -105,5 +121,23 @@ fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         overrides.dry_run, overrides.force, overrides.verbose
     );
 
+    Ok(())
+}
+
+/// `devclean ignore <path>`: load the ignore set for the current directory and
+/// print whether `path` is ignored. Minimal observable hook for the ignore
+/// matcher; discovery/cleaning are separate issues.
+fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::current_dir()?;
+    let set = ignore::IgnoreSet::load(&root)?;
+    let p = std::path::Path::new(path);
+    let rel = p.strip_prefix(&root).unwrap_or(p);
+    let is_dir = rel.is_dir();
+    let ignored = set.is_ignored_path(rel, is_dir);
+    println!(
+        "{}: {}",
+        path,
+        if ignored { "ignored" } else { "not-ignored" }
+    );
     Ok(())
 }
