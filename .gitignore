@@ -1,0 +1,4 @@
+# Rust build output
+/target
+
+# Keep Cargo.lock committed for this binary crate.
