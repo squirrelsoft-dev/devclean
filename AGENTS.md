@@ -48,6 +48,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   override `HOME` so the real global file is never read.
 - `IgnoreSet::load_with(root, global)` is the test entry point that injects the
   global file; `load` resolves the real `~/.devcleanignore` via `dirs::home_dir`.
+  `from_layers(project_root, layers)` builds a set without reading ignore files;
+  it takes a root for the same reason `load` does, so `is_ignored` stats the
+  right place. Only `empty()` is root-less, and it ignores nothing.
 
 ## Maintaining this file
 

@@ -58,8 +58,9 @@ struct Entry {
 /// `root` is the absolute project root the set was loaded for. It is only used
 /// to resolve the project-root-relative paths handed to [`IgnoreSet::is_ignored`]
 /// when stat-ing them, so matching stays independent of the process's current
-/// directory. Sets built without filesystem context (see [`IgnoreSet::empty`]
-/// and [`IgnoreSet::from_layers`]) leave it empty.
+/// directory. Every constructor that can produce layers requires one;
+/// [`IgnoreSet::empty`] leaves it unset, which is harmless because a set with
+/// no layers ignores nothing regardless of the path's kind.
 #[derive(Debug, Clone, Default)]
 pub struct IgnoreSet {
     root: PathBuf,
@@ -97,8 +98,7 @@ impl IgnoreSet {
         global: Option<&Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut set = IgnoreSet::empty();
-        set.root = std::path::absolute(project_root)
-            .unwrap_or_else(|_| project_root.to_path_buf());
+        set.root = absolute_root(project_root);
 
         // Global layer, anchored at the project root (like core.excludesfile).
         if let Some(g) = global
@@ -121,13 +121,22 @@ impl IgnoreSet {
 
     /// Build an `IgnoreSet` directly from in-memory `(anchor_dir, patterns)`
     /// pairs. Patterns use gitignore syntax. `anchor_dir` is interpreted
-    /// relative to the project root (use the empty path for the project root
+    /// relative to `project_root` (use the empty path for the project root
     /// itself). The first pair is the weakest layer; later pairs override
     /// earlier ones. Intended for tests and for callers that assemble ignore
-    /// rules without filesystem I/O.
+    /// rules without reading ignore files.
+    ///
+    /// `project_root` plays the same role as in [`IgnoreSet::load`] and need
+    /// not exist: no I/O happens here, but [`IgnoreSet::is_ignored`] resolves
+    /// against it later, so passing the wrong root makes directory-only rules
+    /// (`build/`) stat the wrong place.
     #[allow(dead_code)]
-    pub fn from_layers(layers: &[(&Path, &[&str])]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_layers(
+        project_root: &Path,
+        layers: &[(&Path, &[&str])],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut set = IgnoreSet::empty();
+        set.root = absolute_root(project_root);
         for (root, patterns) in layers {
             let mut b = GitignoreBuilder::new(Path::new(""));
             for line in *patterns {
@@ -185,6 +194,9 @@ impl IgnoreSet {
     /// file. Prefer [`IgnoreSet::is_ignored_path`] when the caller already
     /// knows the kind.
     pub fn is_ignored(&self, rel_path: &Path) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
         let is_dir = self.root.join(rel_path).is_dir();
         self.is_ignored_path(rel_path, is_dir)
     }
@@ -195,6 +207,14 @@ impl IgnoreSet {
     pub fn layer_count(&self) -> usize {
         self.entries.len()
     }
+}
+
+/// Resolve a project root to an absolute path without touching the
+/// filesystem, so stats in [`IgnoreSet::is_ignored`] cannot drift with the
+/// process's current directory. Falls back to the path as given when it cannot
+/// be made absolute (an empty path, or no readable cwd).
+fn absolute_root(project_root: &Path) -> PathBuf {
+    std::path::absolute(project_root).unwrap_or_else(|_| project_root.to_path_buf())
 }
 
 /// Compile a `.devcleanignore`-style file into a `Gitignore`. The matcher is
@@ -311,9 +331,16 @@ mod tests {
         Path::new(s)
     }
 
+    /// Layers rooted at a project root that is never stat-ed: these tests call
+    /// `is_ignored_path` with an explicit `is_dir`. Use `layers_rooted` when
+    /// the test exercises `is_ignored`.
     fn layers(specs: &[(&str, &[&str])]) -> IgnoreSet {
+        layers_rooted(p("."), specs)
+    }
+
+    fn layers_rooted(project_root: &Path, specs: &[(&str, &[&str])]) -> IgnoreSet {
         let mapped: Vec<(&Path, &[&str])> = specs.iter().map(|(r, ps)| (p(r), *ps)).collect();
-        IgnoreSet::from_layers(&mapped).unwrap()
+        IgnoreSet::from_layers(project_root, &mapped).unwrap()
     }
 
     fn unique_dir(label: &str) -> PathBuf {
@@ -521,6 +548,26 @@ mod tests {
 
         let set = IgnoreSet::load_with(&root, None).unwrap();
         assert!(set.is_ignored(p("build")));
+    }
+
+    #[test]
+    fn from_layers_stats_relative_to_its_project_root() {
+        // Same cwd-independence guarantee as the `load` path: a set assembled
+        // in memory must still resolve directory-only rules against the root
+        // it was given, not against the test process's cwd.
+        let root = unique_dir("from-layers-stat");
+        fs::create_dir_all(root.join("build")).unwrap();
+
+        let set = layers_rooted(&root, &[(ROOT, &["build/"])]);
+        assert!(set.is_ignored(p("build")));
+        assert!(!set.is_ignored(p("src")));
+    }
+
+    #[test]
+    fn empty_set_never_ignores_regardless_of_root() {
+        let set = IgnoreSet::empty();
+        assert!(!set.is_ignored(p("build")));
+        assert!(!set.is_ignored(p("anything/at/all")));
     }
 
     #[test]
