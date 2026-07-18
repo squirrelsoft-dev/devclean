@@ -7,12 +7,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Stack
 
 - Rust binary crate (`devclean`), edition 2024.
-- CLI parsing via `clap` with the `derive` feature (`src/main.rs`). Surface is intentionally minimal (a `Cli` struct with built-in `--version`; no subcommands yet).
+- CLI parsing via `clap` with the `derive` feature (`src/main.rs`). Subcommands are optional (`Option<Subcommand>`); running with no subcommand still prints the placeholder banner.
+- Config is TOML loaded in `src/config.rs` (`serde` + `toml`), cross-platform config dir via the `dirs` crate. Missing config file falls back to `Config::default()`; CLI flags merge on top via `Config::apply_overrides`.
 
 ## Build / test
 
 - Build, run, and test commands: see `README.md`.
 - `Cargo.lock` is committed (binary crate); `.gitignore` deliberately omits it.
+
+## Config surface
+
+- Config file location: platform config dir + `devclean` (see `config::default_config_path`).
+- `devclean list` prints the resolved config (the only observable product command today); discovery/classification/cleaning are separate issues and not implemented here.
 
 ## Maintaining this file
 

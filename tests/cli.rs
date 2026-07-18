@@ -1,7 +1,24 @@
+use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn devclean() -> Command {
     Command::new(env!("CARGO_BIN_EXE_devclean"))
+}
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn write_config(contents: &str) -> String {
+    let mut dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    dir.push(format!(
+        "devclean-cli-test-{}-{}.toml",
+        std::process::id(),
+        n
+    ));
+    let mut f = std::fs::File::create(&dir).unwrap();
+    f.write_all(contents.as_bytes()).unwrap();
+    dir.to_string_lossy().to_string()
 }
 
 const BANNER: &str = "devclean - development environment cleanup CLI (scaffold)";
@@ -38,4 +55,59 @@ fn unknown_argument_is_rejected() {
     let out = devclean().arg("--bogus").output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected argument"));
+}
+
+#[test]
+fn list_prints_defaults_when_no_config() {
+    let cfg = write_config("");
+    let out = devclean()
+        .args(["--config", &cfg, "list"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&cfg);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("max_depth: 4"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("default_mode: interactive"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("workspace_roots:"), "stdout: {stdout}");
+    assert!(stdout.contains("(none)"), "stdout: {stdout}");
+}
+
+#[test]
+fn list_reflects_config_file_and_cli_overrides() {
+    let toml =
+        "workspace_roots = [\"/from/config\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n";
+    let cfg = write_config(toml);
+    let out = devclean()
+        .args([
+            "--config",
+            &cfg,
+            "--workspace",
+            "/from/cli",
+            "--force",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&cfg);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("max_depth: 6"), "stdout: {stdout}");
+    // CLI --force overrides config interactive.
+    assert!(stdout.contains("default_mode: force"), "stdout: {stdout}");
+    // Both config and CLI workspace roots appear (append semantics).
+    assert!(stdout.contains("- /from/config"), "stdout: {stdout}");
+    assert!(stdout.contains("- /from/cli"), "stdout: {stdout}");
+    assert!(stdout.contains("force=true"), "stdout: {stdout}");
 }
