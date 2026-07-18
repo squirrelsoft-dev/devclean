@@ -265,6 +265,20 @@ mod tests {
         assert!(s.is_safe_to_delete(p("target"), true));
     }
 
+    /// `patterns()` is the "list the active catalog" accessor, so its order is
+    /// part of the contract: built-ins first, then the user's additions in the
+    /// order they appear in `safe_delete`. Callers label entries by index
+    /// (built-in vs. user), so a reordering here would mislabel them.
+    #[test]
+    fn patterns_lists_built_ins_first_then_user_additions() {
+        let user = vec!["**/first_add".to_string(), "**/second_add".to_string()];
+        let s = set(BUILT_IN_DEFAULTS, &user);
+
+        assert_eq!(s.patterns().len(), BUILT_IN_DEFAULTS.len() + user.len());
+        assert_eq!(&s.patterns()[..BUILT_IN_DEFAULTS.len()], BUILT_IN_DEFAULTS);
+        assert_eq!(&s.patterns()[BUILT_IN_DEFAULTS.len()..], &user[..]);
+    }
+
     /// An empty built-in list plus an empty user list yields an empty set.
     #[test]
     fn empty_set_safe() {
