@@ -29,7 +29,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `~/.devcleanignore` anchored at the project root, plus per-folder
   `.devcleanignore` files found by walking the project tree; deepest layer wins
   (gitignore precedence). All anchors are stored *relative to the project root*;
-  `is_ignored_path(rel_path, is_dir)` takes a project-root-relative path.
+  `is_ignored_path(rel_path, is_dir)` takes a project-root-relative path and
+  returns `false` for an absolute one.
+- Sharp edge: `is_ignored_path` strips the layer anchor itself, so every layer's
+  `Gitignore` **must** be built with an empty root (`GitignoreBuilder::new(Path::new(""))`).
+  Passing the anchor to the builder makes the `ignore` crate strip it a second
+  time, and a rule anchored at `sub` then also matches `sub/sub/...`.
+- Matching uses `matched_path_or_any_parents`, so a protected directory protects
+  its whole subtree (`build/` covers `build/out.o`). Callers need not prune during
+  a walk. `is_ignored(rel)` stats against the stored project root, not the cwd.
+- The load-time walk prunes `.git` only. Do not prune `node_modules`/`target`: a
+  `.devcleanignore` inside one is how a user pins something cleaning would remove.
 - A line that is blank or starts with `#` is a comment. `!` re-includes.
 - A matched path (incl. `!` whitelist) is "protected": `is_ignored == true` is the
   signal cleaning must never act on it.

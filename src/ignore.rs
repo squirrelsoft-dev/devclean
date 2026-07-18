@@ -21,10 +21,19 @@
 //! `.devcleanignore` in `<root>/sub`). Matching a path therefore reduces to
 //! "strip the layer's anchor, then run gitignore matching on the remainder",
 //! which keeps the matcher pure and side-effect-free apart from reading ignore
-//! files at load time.
+//! files at load time. Because the anchor is stripped here, every layer's
+//! `Gitignore` is built with an *empty* root — letting the `ignore` crate strip
+//! the anchor a second time would make a rule anchored at `sub` also match
+//! `sub/sub/...`.
 //!
-//! Cross-platform path separators are normalized: callers may pass paths with
-//! either `/` or `\`; internally everything is matched with `/`.
+//! A path is ignored when it matches directly **or when any of its parent
+//! directories matches**, so protecting `build/` protects everything under it.
+//! Callers therefore do not have to prune during a top-down walk the way git
+//! does.
+//!
+//! On Windows, callers may pass paths with either `/` or `\`; separators are
+//! normalized to `/` before matching. On Unix a backslash is a legal filename
+//! character and is left alone.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,8 +54,15 @@ struct Entry {
 /// Entries are stored outermost-first (global, then shallowest local, ...,
 /// deepest local). Matching iterates innermost-first so the most specific
 /// layer takes precedence, exactly like gitignore.
+///
+/// `root` is the absolute project root the set was loaded for. It is only used
+/// to resolve the project-root-relative paths handed to [`IgnoreSet::is_ignored`]
+/// when stat-ing them, so matching stays independent of the process's current
+/// directory. Sets built without filesystem context (see [`IgnoreSet::empty`]
+/// and [`IgnoreSet::from_layers`]) leave it empty.
 #[derive(Debug, Clone, Default)]
 pub struct IgnoreSet {
+    root: PathBuf,
     entries: Vec<Entry>,
 }
 
@@ -55,6 +71,7 @@ impl IgnoreSet {
     /// for callers that construct sets incrementally.
     pub fn empty() -> Self {
         IgnoreSet {
+            root: PathBuf::new(),
             entries: Vec::new(),
         }
     }
@@ -80,10 +97,12 @@ impl IgnoreSet {
         global: Option<&Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut set = IgnoreSet::empty();
+        set.root = std::path::absolute(project_root)
+            .unwrap_or_else(|_| project_root.to_path_buf());
 
         // Global layer, anchored at the project root (like core.excludesfile).
         if let Some(g) = global
-            && let Some(gi) = build_matcher(Path::new(""), g)?
+            && let Some(gi) = build_matcher(g)?
         {
             set.entries.push(Entry {
                 root: PathBuf::new(),
@@ -110,7 +129,7 @@ impl IgnoreSet {
     pub fn from_layers(layers: &[(&Path, &[&str])]) -> Result<Self, Box<dyn std::error::Error>> {
         let mut set = IgnoreSet::empty();
         for (root, patterns) in layers {
-            let mut b = GitignoreBuilder::new(root);
+            let mut b = GitignoreBuilder::new(Path::new(""));
             for line in *patterns {
                 b.add_line(Some(root.to_path_buf()), line)?;
             }
@@ -128,19 +147,29 @@ impl IgnoreSet {
     /// `rel_path` is interpreted relative to the project root the set was
     /// loaded for. `is_dir` selects directory-only patterns (those with a
     /// trailing `/`); pass `false` when the path is a file or its kind is
-    /// unknown. Separators are normalized to `/` before matching.
+    /// unknown. On Windows, separators are normalized to `/` before matching.
+    ///
+    /// A path matches a layer when the path itself matches or when any of its
+    /// parent directories (up to that layer's anchor) matches, so a rule like
+    /// `build/` also covers `build/out.o`.
     ///
     /// Layers are consulted innermost-first; the first layer that produces a
     /// definitive `Ignore` or `Whitelist` (`!`) result wins, and no further
     /// layers are consulted. If no layer matches, the path is not ignored.
+    ///
+    /// An absolute `rel_path` violates the relative-path contract and is
+    /// reported as not ignored rather than matched against the wrong anchors.
     pub fn is_ignored_path(&self, rel_path: &Path, is_dir: bool) -> bool {
         let normalized = normalize_separators(rel_path);
+        if normalized.has_root() {
+            return false;
+        }
         for entry in self.entries.iter().rev() {
             let rel = match strip_root(&entry.root, &normalized) {
                 Some(r) => r,
                 None => continue,
             };
-            match entry.gi.matched(rel, is_dir) {
+            match entry.gi.matched_path_or_any_parents(rel, is_dir) {
                 ignore::Match::None => continue,
                 ignore::Match::Ignore(_) => return true,
                 ignore::Match::Whitelist(_) => return false,
@@ -150,12 +179,13 @@ impl IgnoreSet {
     }
 
     /// Convenience wrapper around [`IgnoreSet::is_ignored_path`] that stats
-    /// `rel_path` to determine whether it is a directory. If the path cannot
-    /// be stat-ed it is treated as a file. Prefer [`IgnoreSet::is_ignored_path`]
-    /// when the caller already knows the kind.
-    #[allow(dead_code)]
+    /// `rel_path` to determine whether it is a directory. The stat resolves
+    /// against the project root the set was loaded for, not the process's
+    /// current directory. If the path cannot be stat-ed it is treated as a
+    /// file. Prefer [`IgnoreSet::is_ignored_path`] when the caller already
+    /// knows the kind.
     pub fn is_ignored(&self, rel_path: &Path) -> bool {
-        let is_dir = rel_path.is_dir();
+        let is_dir = self.root.join(rel_path).is_dir();
         self.is_ignored_path(rel_path, is_dir)
     }
 
@@ -167,16 +197,14 @@ impl IgnoreSet {
     }
 }
 
-/// Compile a `.devcleanignore`-style file into a `Gitignore` anchored at
-/// `root` (a path relative to the project root; the empty path anchors at the
-/// project root). Returns `Ok(None)` when the file is empty of patterns (blank
-/// lines and comments only) so callers can skip storing a no-op layer.
-fn build_matcher(
-    root: &Path,
-    file: &Path,
-) -> Result<Option<Gitignore>, Box<dyn std::error::Error>> {
+/// Compile a `.devcleanignore`-style file into a `Gitignore`. The matcher is
+/// built with an empty root because [`IgnoreSet::is_ignored_path`] strips the
+/// layer's anchor itself; giving the builder the anchor too would strip it
+/// twice. Returns `Ok(None)` when the file is empty of patterns (blank lines
+/// and comments only) so callers can skip storing a no-op layer.
+fn build_matcher(file: &Path) -> Result<Option<Gitignore>, Box<dyn std::error::Error>> {
     let text = fs::read_to_string(file)?;
-    let mut b = GitignoreBuilder::new(root);
+    let mut b = GitignoreBuilder::new(Path::new(""));
     let mut saw_pattern = false;
     for raw in text.lines() {
         let line = raw.trim();
@@ -195,8 +223,15 @@ fn build_matcher(
 /// Recursively collect every `.devcleanignore` under `dir` (starting at
 /// `base`, the project root), recording each with its anchor as a path
 /// relative to `base`. Results are pushed in shallowest-first order (pre-order
-/// traversal). Symlinks are not followed; unreadable subdirectories are
-/// skipped rather than failing the walk.
+/// traversal). Symlinks are not followed; unreadable subdirectories and
+/// unreadable individual entries are skipped rather than failing the walk.
+///
+/// `.git` directories are pruned: they never hold user ignore rules and are
+/// the single largest source of wasted stats in a real repository. Heavy build
+/// directories (`node_modules`, `target`, ...) are deliberately *not* pruned —
+/// a `.devcleanignore` inside one is exactly how a user pins something that
+/// cleaning would otherwise remove, so skipping them would silently drop
+/// protection.
 fn collect_local_ignore_files(
     base: &Path,
     dir: &Path,
@@ -208,7 +243,7 @@ fn collect_local_ignore_files(
             .strip_prefix(base)
             .unwrap_or(Path::new(""))
             .to_path_buf();
-        if let Some(gi) = build_matcher(&root, &ignore_file)? {
+        if let Some(gi) = build_matcher(&ignore_file)? {
             out.push(Entry { root, gi });
         }
     }
@@ -218,12 +253,15 @@ fn collect_local_ignore_files(
         Err(_) => return Ok(()),
     };
     for entry in read {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
         };
-        if ft.is_dir() && !ft.is_symlink() {
+        if ft.is_dir() && !ft.is_symlink() && entry.file_name() != ".git" {
             collect_local_ignore_files(base, &entry.path(), out)?;
         }
     }
@@ -240,10 +278,19 @@ fn strip_root<'a>(root: &Path, path: &'a Path) -> Option<&'a Path> {
     path.strip_prefix(root).ok()
 }
 
-/// Normalize path separators to `/` for gitignore matching, regardless of
-/// platform. Backslashes (Windows) become forward slashes.
+/// Normalize path separators to `/` for gitignore matching.
+///
+/// Windows accepts `\` as a separator, so rewrite it. On Unix a backslash is a
+/// legal filename character — rewriting it there would make a file literally
+/// named `a\b` match a rule for `a/b` — so the path is passed through as-is.
+#[cfg(windows)]
 fn normalize_separators(path: &Path) -> PathBuf {
     PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(not(windows))]
+fn normalize_separators(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -321,7 +368,8 @@ mod tests {
         let set = layers(&[(ROOT, &["/foo"])]);
         assert!(set.is_ignored_path(p("foo"), false));
         assert!(!set.is_ignored_path(p("a/foo"), false));
-        assert!(!set.is_ignored_path(p("foo/bar"), false));
+        // `foo/bar` lives under the protected `foo`, so it is protected too.
+        assert!(set.is_ignored_path(p("foo/bar"), false));
     }
 
     #[test]
@@ -330,6 +378,37 @@ mod tests {
         assert!(set.is_ignored_path(p("build"), true));
         assert!(set.is_ignored_path(p("a/build"), true));
         assert!(!set.is_ignored_path(p("build"), false));
+    }
+
+    #[test]
+    fn contents_of_ignored_directory_are_ignored() {
+        // The cleaning engine consumes is_ignored as "never touch this", so a
+        // protected directory must protect everything beneath it.
+        let set = layers(&[(ROOT, &["build/", "node_modules"])]);
+        assert!(set.is_ignored_path(p("build/out.o"), false));
+        assert!(set.is_ignored_path(p("build/deep/nested/out.o"), false));
+        assert!(set.is_ignored_path(p("a/build/out.o"), false));
+        assert!(set.is_ignored_path(p("node_modules/pkg/index.js"), false));
+        assert!(!set.is_ignored_path(p("src/main.rs"), false));
+    }
+
+    #[test]
+    fn nested_layer_anchor_is_not_stripped_twice() {
+        // `/foo` in <root>/sub anchors to `sub` only. Stripping the anchor
+        // twice would reduce sub/sub/foo to foo and wrongly match it.
+        let set = layers(&[(ROOT, &[]), (SUB, &["/foo"])]);
+        assert!(set.is_ignored_path(p("sub/foo"), false));
+        assert!(!set.is_ignored_path(p("sub/sub/foo"), false));
+
+        let deep = layers(&[(ROOT, &[]), ("a/b", &["/x"])]);
+        assert!(deep.is_ignored_path(p("a/b/x"), false));
+        assert!(!deep.is_ignored_path(p("a/b/a/b/x"), false));
+    }
+
+    #[test]
+    fn absolute_paths_are_not_matched() {
+        let set = layers(&[(ROOT, &["*.log"])]);
+        assert!(!set.is_ignored_path(p("/tmp/debug.log"), false));
     }
 
     #[test]
@@ -379,11 +458,21 @@ mod tests {
         assert!(!set.is_ignored_path(p("sub/deep/foo"), false));
     }
 
+    #[cfg(windows)]
     #[test]
     fn backslash_separators_normalized() {
         let set = layers(&[(ROOT, &["a/b"])]);
         assert!(set.is_ignored_path(p("a\\b"), false));
         assert!(set.is_ignored_path(p("a/b"), false));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn backslash_is_a_literal_filename_character() {
+        // On Unix `a\b` is a single file name, not `a` containing `b`.
+        let set = layers(&[(ROOT, &["a/b"])]);
+        assert!(set.is_ignored_path(p("a/b"), false));
+        assert!(!set.is_ignored_path(p("a\\b"), false));
     }
 
     #[test]
@@ -419,6 +508,27 @@ mod tests {
         let set = IgnoreSet::load_with(&root, None).unwrap();
         assert_eq!(set.layer_count(), 0);
         assert!(!set.is_ignored_path(p("anything"), false));
+    }
+
+    #[test]
+    fn is_ignored_stats_relative_to_the_project_root() {
+        // The test process's cwd is the crate directory, never this temp root,
+        // so a cwd-relative stat would report `build` as a file and the
+        // directory-only rule would not fire.
+        let root = unique_dir("stat");
+        write_file(&root, ".devcleanignore", "build/\n");
+        fs::create_dir_all(root.join("build")).unwrap();
+
+        let set = IgnoreSet::load_with(&root, None).unwrap();
+        assert!(set.is_ignored(p("build")));
+    }
+
+    #[test]
+    fn load_prunes_git_directories() {
+        let root = unique_dir("git");
+        write_file(&root, ".git/.devcleanignore", "*.log\n");
+        let set = IgnoreSet::load_with(&root, None).unwrap();
+        assert_eq!(set.layer_count(), 0);
     }
 
     #[test]

@@ -37,7 +37,8 @@ devclean honors gitignore-style ignore files in two scopes:
 Patterns use gitignore semantics: `*` and `**` globs, a leading `/` that
 anchors to the ignore file's directory, a trailing `/` for directory-only
 matches, and `!` to re-include a previously excluded path. Blank lines and
-lines starting with `#` are ignored.
+lines starting with `#` are ignored. Matching a directory also covers
+everything inside it, so `build/` protects `build/out.o` too.
 
 Precedence follows gitignore: the closest (deepest, most-specific)
 `.devcleanignore` wins, layered on top of the global file. A path matched by an

@@ -131,9 +131,30 @@ fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let set = ignore::IgnoreSet::load(&root)?;
     let p = std::path::Path::new(path);
-    let rel = p.strip_prefix(&root).unwrap_or(p);
-    let is_dir = rel.is_dir();
-    let ignored = set.is_ignored_path(rel, is_dir);
+
+    // Rules are anchored at the project root, so a path outside it cannot be
+    // answered. Reporting "not-ignored" for one would be a false negative in
+    // the exact place a false negative is most dangerous.
+    let rel = match p.strip_prefix(&root) {
+        Ok(rel) => rel,
+        Err(_) if p.is_relative() => p,
+        Err(_) => {
+            return Err(format!(
+                "path is outside the project root {}: {}",
+                root.display(),
+                p.display()
+            )
+            .into());
+        }
+    };
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("path escapes the project root: {}", p.display()).into());
+    }
+
+    let ignored = set.is_ignored(rel);
     println!(
         "{}: {}",
         path,
