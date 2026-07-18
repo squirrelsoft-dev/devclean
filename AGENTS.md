@@ -20,40 +20,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - User-facing config docs (file location, TOML keys, defaults, CLI flags) live in `README.md`; the resolution logic is `config::default_config_path`.
 - Top-level flags are not `global`, so clap requires them *before* the subcommand (`devclean --force list`, never `devclean list --force`).
 - `--force` and `--dry-run` conflict at the clap layer (`conflicts_with`), so no runtime precedence logic exists or should be added.
-- `devclean list` is the only observable product command today (`devclean ignore` is a debug hook, see below); discovery/classification/cleaning are separate issues.
+- `devclean list` is the only observable product command today (`devclean ignore` is a debug hook for the matcher, documented in `README.md`); discovery/classification/cleaning are separate issues.
 
 ## Ignore matcher
 
-- User-facing `.devcleanignore` docs (scopes, pattern syntax, precedence, the
-  `devclean ignore` helper) live in `README.md`; the notes below are the
-  implementation sharp edges only.
-- `.devcleanignore` matching lives in `src/ignore.rs` (`IgnoreSet`), built on the
-  `ignore` crate (same gitignore engine ripgrep uses). Two scopes: a global
-  `~/.devcleanignore` anchored at the project root, plus per-folder
-  `.devcleanignore` files found by walking the project tree; deepest layer wins
-  (gitignore precedence). All anchors are stored *relative to the project root*;
-  `is_ignored_path(rel_path, is_dir)` takes a project-root-relative path and
-  returns `false` for an absolute one.
-- Sharp edge: `is_ignored_path` strips the layer anchor itself, so every layer's
-  `Gitignore` **must** be built with an empty root (`GitignoreBuilder::new(Path::new(""))`).
-  Passing the anchor to the builder makes the `ignore` crate strip it a second
-  time, and a rule anchored at `sub` then also matches `sub/sub/...`.
-- Matching uses `matched_path_or_any_parents`, so a protected directory protects
-  its whole subtree (`build/` covers `build/out.o`). Callers need not prune during
-  a walk. `is_ignored(rel)` stats against the stored project root, not the cwd.
-- The load-time walk prunes `.git` only. Do not prune `node_modules`/`target`: a
-  `.devcleanignore` inside one is how a user pins something cleaning would remove.
-- A line that is blank or starts with `#` is a comment. `!` re-includes.
-- A matched path (incl. `!` whitelist) is "protected": `is_ignored == true` is the
-  signal cleaning must never act on it.
-- `devclean ignore <path>` is the minimal debug hook for the matcher; it loads
-  rules for the current directory. Integration tests in `tests/ignore_cli.rs`
-  override `HOME` so the real global file is never read.
-- `IgnoreSet::load_with(root, global)` is the test entry point that injects the
-  global file; `load` resolves the real `~/.devcleanignore` via `dirs::home_dir`.
-  `from_layers(project_root, layers)` builds a set without reading ignore files;
-  it takes a root for the same reason `load` does, so `is_ignored` stats the
-  right place. Only `empty()` is root-less, and it ignores nothing.
+- `.devcleanignore` is gitignore semantics, not a bespoke format: a global
+  `~/.devcleanignore` plus per-folder files, deepest layer winning. Reach for
+  gitignore behavior when in doubt rather than inventing devclean-specific rules.
+- `is_ignored == true` means **protected**: cleaning must never act on that path.
+  This is the matcher's whole contract with the not-yet-written cleaning engine.
+- Owners: `README.md` for scopes, pattern syntax, precedence, and the
+  `devclean ignore` helper; the `src/ignore.rs` module docs and rustdoc for the
+  implementation sharp edges and constructor contracts.
 
 ## Maintaining this file
 
