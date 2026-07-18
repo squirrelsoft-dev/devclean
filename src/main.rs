@@ -60,7 +60,6 @@ fn main() {
 fn cli_overrides(cli: &Cli) -> CliOverrides {
     CliOverrides {
         workspace: cli.workspace.clone(),
-        config: cli.config.clone(),
         force: cli.force,
         dry_run: cli.dry_run,
         verbose: cli.verbose,
@@ -68,18 +67,20 @@ fn cli_overrides(cli: &Cli) -> CliOverrides {
 }
 
 fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = cli
-        .config
-        .clone()
-        .or_else(config::default_config_path)
-        .unwrap_or_else(|| PathBuf::from("devclean"));
+    let config_path = cli.config.clone().or_else(config::default_config_path);
 
-    let cfg = Config::load_or_default(&config_path)?;
+    let cfg = match &config_path {
+        Some(path) => Config::load_or_default(path)?,
+        None => Config::default(),
+    };
     let overrides = cli_overrides(cli);
     let cfg = cfg.apply_overrides(&overrides);
 
     println!("devclean resolved config:");
-    println!("  config file: {}", config_path.display());
+    match &config_path {
+        Some(path) => println!("  config file: {}", path.display()),
+        None => println!("  config file: (none)"),
+    }
     println!("  default_mode: {}", cfg.default_mode);
     println!("  max_depth: {}", cfg.max_depth);
     println!("  workspace_roots:");

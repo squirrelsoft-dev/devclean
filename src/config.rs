@@ -80,8 +80,6 @@ impl Default for Config {
 pub struct CliOverrides {
     /// Extra workspace roots appended to the config's `workspace_roots`.
     pub workspace: Vec<String>,
-    /// Alternate config file path (consumed before loading; not applied here).
-    pub config: Option<PathBuf>,
     /// When set, forces `default_mode = Force`.
     pub force: bool,
     /// Dry-run flag (runtime behavior; echoed by `list`).
@@ -91,16 +89,14 @@ pub struct CliOverrides {
 }
 
 impl Config {
-    /// Load config from a TOML file. Missing file -> `Ok(None)`. Parse errors
-    /// are propagated.
+    /// Load config from a TOML file. Anything that is not a readable regular
+    /// file (missing path, or a directory sitting at the config location) ->
+    /// `Ok(None)`. Parse errors are propagated.
     pub fn load(path: &Path) -> Result<Option<Config>, Box<dyn std::error::Error>> {
-        if !path.exists() {
+        if !path.is_file() {
             return Ok(None);
         }
         let text = fs::read_to_string(path)?;
-        if text.trim().is_empty() {
-            return Ok(Some(Config::default()));
-        }
         let cfg: Config = toml::from_str(&text)?;
         Ok(Some(cfg))
     }
@@ -225,6 +221,17 @@ max_depth = 2
         let cfg = Config::load(&f).unwrap().unwrap();
         assert_eq!(cfg, Config::default());
         cleanup(&f);
+    }
+
+    #[test]
+    fn directory_at_config_path_falls_back_to_default() {
+        let mut dir = std::env::temp_dir();
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        dir.push(format!("devclean-test-dir-{}-{}", std::process::id(), n));
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(Config::load(&dir).unwrap(), None);
+        assert_eq!(Config::load_or_default(&dir).unwrap(), Config::default());
+        let _ = fs::remove_dir(&dir);
     }
 
     #[test]
