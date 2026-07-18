@@ -19,7 +19,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Force mode: delete without prompting (overrides config `default_mode`).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "dry_run")]
     force: bool,
 
     /// Dry-run: show what would be deleted without deleting.
@@ -67,6 +67,15 @@ fn cli_overrides(cli: &Cli) -> CliOverrides {
 }
 
 fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // A path the user typed explicitly must exist: silently falling back to
+    // defaults would turn a typo into a plausible-looking run against the wrong
+    // settings. Only the default location is allowed to be absent.
+    if let Some(path) = &cli.config
+        && !path.is_file()
+    {
+        return Err(format!("config file not found: {}", path.display()).into());
+    }
+
     let config_path = cli.config.clone().or_else(config::default_config_path);
 
     let cfg = match &config_path {

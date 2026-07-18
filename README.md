@@ -28,13 +28,15 @@ cargo test
 ## Configuration
 
 devclean reads a TOML config file from the platform config dir
-(`~/.config/devclean` on Linux, `~/Library/Application Support/devclean` on
-macOS, `%APPDATA%\devclean` on Windows). Anything that is not a readable regular
-file at that path — a missing file, or a directory — is not an error: built-in
-defaults are used.
+(`~/.config/devclean/config.toml` on Linux,
+`~/Library/Application Support/devclean/config.toml` on macOS,
+`%APPDATA%\devclean\config.toml` on Windows). A missing file at that default
+location is not an error: built-in defaults are used. A path you pass explicitly
+with `--config` must exist — devclean exits non-zero rather than silently
+falling back to defaults.
 
 ```toml
-# ~/.config/devclean
+# ~/.config/devclean/config.toml
 workspace_roots = ["/home/me/code", "/home/me/work"]
 safe_delete = ["node_modules", "target"]
 max_depth = 4
@@ -58,11 +60,13 @@ Flags are top-level and must be given *before* the subcommand:
 devclean [FLAGS] list            # print the resolved config
 
   --workspace <path>             # append a workspace root (repeatable)
-  --config <path>                # alternate config file
+  --config <path>                # alternate config file (must exist)
   --force                        # force mode (overrides default_mode)
   --dry-run                      # show what would be deleted
   --verbose                      # verbose output
 ```
+
+`--force` and `--dry-run` are mutually exclusive; passing both is an error.
 
 For example:
 

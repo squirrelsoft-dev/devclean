@@ -1,9 +1,13 @@
 //! Configuration loading and merging for devclean.
 //!
-//! Config is read from a TOML file (default location: the platform config dir,
-//! e.g. `~/.config/devclean` on Linux, `~/Library/Application Support/devclean`
-//! on macOS, `%APPDATA%\\devclean` on Windows). A missing file is not an error:
-//! built-in defaults are used. CLI flags override the loaded config.
+//! Config is read from a TOML file under the platform config dir, e.g.
+//! `~/.config/devclean/config.toml` on Linux,
+//! `~/Library/Application Support/devclean/config.toml` on macOS,
+//! `%APPDATA%\\devclean\\config.toml` on Windows. A missing file at that
+//! *default* location is not an error: built-in defaults are used. A path the
+//! user passed explicitly via `--config` is required to exist; that check lives
+//! in `main::run_list`, since this module has no notion of where a path came
+//! from. CLI flags override the loaded config.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -120,10 +124,14 @@ impl Config {
 }
 
 /// Return the default config file path for this platform, e.g.
-/// `~/.config/devclean` on Linux. Returns `None` if the platform config dir
-/// cannot be determined.
+/// `~/.config/devclean/config.toml` on Linux. Returns `None` if the platform
+/// config dir cannot be determined.
+///
+/// The file lives *inside* a `devclean` directory rather than being an
+/// extensionless `devclean` file directly under the config dir: the latter
+/// collides with the directory users and other tools expect to create there.
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("devclean"))
+    dirs::config_dir().map(|d| d.join("devclean").join("config.toml"))
 }
 
 #[cfg(test)]
@@ -315,7 +323,7 @@ default_mode = "interactive"
         // Smoke test: on dev hosts this should resolve to something non-empty.
         // We only assert the structure, not a specific platform path.
         if let Some(p) = default_config_path() {
-            assert!(p.ends_with("devclean"));
+            assert!(p.ends_with("devclean/config.toml"));
         }
     }
 }

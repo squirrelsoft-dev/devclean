@@ -81,6 +81,35 @@ fn list_prints_defaults_when_no_config() {
 }
 
 #[test]
+fn explicit_missing_config_is_an_error() {
+    let mut missing = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    missing.push(format!(
+        "devclean-cli-absent-{}-{}.toml",
+        std::process::id(),
+        n
+    ));
+    let out = devclean()
+        .args(["--config", &missing.to_string_lossy(), "list"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("config file not found"), "stderr: {stderr}");
+}
+
+#[test]
+fn force_and_dry_run_are_mutually_exclusive() {
+    let out = devclean()
+        .args(["--force", "--dry-run", "list"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot be used with"), "stderr: {stderr}");
+}
+
+#[test]
 fn list_reflects_config_file_and_cli_overrides() {
     let toml =
         "workspace_roots = [\"/from/config\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n";
