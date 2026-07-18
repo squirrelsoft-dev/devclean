@@ -17,8 +17,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Config surface
 
-- Config file location: platform config dir + `devclean` (see `config::default_config_path`).
-- `devclean list` prints the resolved config (the only observable product command today); discovery/classification/cleaning are separate issues and not implemented here.
+- User-facing config docs (file location, TOML keys, defaults, CLI flags) live in `README.md`; the resolution logic is `config::default_config_path`.
+- Top-level flags are not `global`, so clap requires them *before* the subcommand (`devclean --force list`, never `devclean list --force`).
+- `devclean list` is the only observable product command today; discovery/classification/cleaning are separate issues.
 
 ## Maintaining this file
 

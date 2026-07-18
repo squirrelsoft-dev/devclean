@@ -29,8 +29,9 @@ cargo test
 
 devclean reads a TOML config file from the platform config dir
 (`~/.config/devclean` on Linux, `~/Library/Application Support/devclean` on
-macOS, `%APPDATA%\devclean` on Windows). A missing config file is not an error:
-built-in defaults are used.
+macOS, `%APPDATA%\devclean` on Windows). Anything that is not a readable regular
+file at that path — a missing file, or a directory — is not an error: built-in
+defaults are used.
 
 ```toml
 # ~/.config/devclean
@@ -51,11 +52,20 @@ Defaults:
 
 ### CLI flags (override config)
 
+Flags are top-level and must be given *before* the subcommand:
+
 ```sh
-devclean --workspace <path>      # append a workspace root (repeatable)
-devclean --config <path>         # alternate config file
-devclean --force                 # force mode (overrides default_mode)
-devclean --dry-run               # show what would be deleted
-devclean --verbose              # verbose output
-devclean list                   # print the resolved config
+devclean [FLAGS] list            # print the resolved config
+
+  --workspace <path>             # append a workspace root (repeatable)
+  --config <path>                # alternate config file
+  --force                        # force mode (overrides default_mode)
+  --dry-run                      # show what would be deleted
+  --verbose                      # verbose output
+```
+
+For example:
+
+```sh
+devclean --config ./devclean.toml --workspace ~/code --force list
 ```
