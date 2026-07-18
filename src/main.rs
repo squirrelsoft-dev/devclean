@@ -1,5 +1,6 @@
 mod config;
 mod ignore;
+mod safelist;
 
 use std::path::PathBuf;
 
@@ -49,6 +50,17 @@ enum Command {
         /// Path to test, relative to the current directory.
         path: String,
     },
+    /// Debug helper: report whether a path is safe to delete according to the
+    /// loaded `safe_delete` catalog (built-ins plus any `Config::safe_delete`
+    /// additions).
+    ///
+    /// Loads the platform default config (respecting `--config`) and prints
+    /// `safe` / `not-safe` for the given path, interpreted relative to the
+    /// current directory. Discovery/cleaning are separate issues.
+    Safelist {
+        /// Path to test, relative to the current directory.
+        path: String,
+    },
 }
 
 fn main() {
@@ -66,6 +78,12 @@ fn main() {
         }
         Some(Command::Ignore { path }) => {
             if let Err(e) = run_ignore(path) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Safelist { path }) => {
+            if let Err(e) = run_safelist(&cli, path) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -160,5 +178,57 @@ fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         path,
         if ignored { "ignored" } else { "not-ignored" }
     );
+    Ok(())
+}
+
+/// `devclean safelist <path>`: load the default config (or `--config`), build
+/// the safe-to-delete set from built-ins plus the loaded `safe_delete`, and
+/// report whether `path` is safe to delete. Minimal observable hook for the
+/// catalog; discovery/cleaning are separate issues.
+fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::current_dir()?;
+    let p = std::path::Path::new(path);
+
+    // Same anchoring invariant as the ignore subcommand: the safelist is a
+    // per-project catalog, and a path outside the project root cannot be
+    // answered without guessing.
+    let rel = match p.strip_prefix(&root) {
+        Ok(rel) => rel,
+        Err(_) if p.is_relative() => p,
+        Err(_) => {
+            return Err(format!(
+                "path is outside the project root {}: {}",
+                root.display(),
+                p.display()
+            )
+            .into());
+        }
+    };
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("path escapes the project root: {}", p.display()).into());
+    }
+
+    // A path the user typed explicitly must exist: silently falling back to
+    // defaults would turn a typo into a plausible-looking run against the
+    // wrong settings. Only the default location is allowed to be absent.
+    if let Some(cfg_path) = &cli.config
+        && !cfg_path.is_file()
+    {
+        return Err(format!("config file not found: {}", cfg_path.display()).into());
+    }
+
+    let config_path = cli.config.clone().or_else(config::default_config_path);
+    let cfg = match &config_path {
+        Some(path) => config::Config::load_or_default(path)?,
+        None => config::Config::default(),
+    };
+
+    let set = safelist::SafeSet::from_config(&root, &cfg);
+    let safe = set.is_safe_to_delete(rel, true);
+
+    println!("{}: {}", path, if safe { "safe" } else { "not-safe" });
     Ok(())
 }

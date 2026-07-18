@@ -78,6 +78,17 @@ relative to the current directory or absolute inside it; a path outside the
 project root is an error rather than a reported "not-ignored".
 Discovery and cleaning are separate, not-yet-implemented features.
 
+## Safe-to-delete catalog
+
+`devclean safelist <path>` prints whether a path is safe to auto-delete, without surfacing for approval. The catalog is:
+
+- **Built-in defaults** — compiled into `src/safelist.rs` as `BUILT_IN_DEFAULTS` (a non-exhaustive list of common build/cache dirs/files: `node_modules`, `target`, `.next`, `.turbo`, `dist`, `build`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.gradle`, `bin/obj`, `out`, `coverage`, `.nuxt`, `.svelte-kit`, `.cache`, `.parcel-cache`).
+- **Extension via `Config::safe_delete`** — user-supplied gitignore-style globs are appended (not replaced) to the built-in set. Patterns behave like gitignore globs anchored at the project root: each matches the named dir at any depth (e.g. `**/node_modules`), and matching a directory covers everything beneath it via the `ignore` crate's parent-match semantics.
+- **Used by the cleaning engine (#7)** — auto-removes matched paths without user approval.
+- **Observable hook** — `devclean safelist <path>` is the minimal diagnostic for the catalog; discovery/cleaning are separate issues.
+
+See `src/safelist.rs` for the implementation; `tests/safelist_cli.rs` for integration tests of the subcommand.
+
 ## Configuration
 
 devclean reads a TOML config file from the platform config dir

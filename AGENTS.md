@@ -22,6 +22,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `--force` and `--dry-run` conflict at the clap layer (`conflicts_with`), so no runtime precedence logic exists or should be added.
 - `devclean list` is the only observable product command today (`devclean ignore` is a debug hook for the matcher, documented in `README.md`); discovery/classification/cleaning are separate issues.
 
+## Safe-to-delete catalog
+
+- Location: `src/safelist.rs` (`BUILT_IN_DEFAULTS` const, `SafeSet::merge`), tests in `tests/safelist_cli.rs`.
+- Matching semantics: each pattern is a gitignore glob anchored at the project root (no leading `/`); matches the directory name at any depth (e.g. `**/node_modules`), and via the `ignore` crate's parent-match, covering everything beneath each matched directory.
+- `safe_delete` in `Config` extends (not replaces) the built-in list.
+
 ## Ignore matcher
 
 - `.devcleanignore` is gitignore semantics, not a bespoke format: a global
