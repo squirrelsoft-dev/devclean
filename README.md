@@ -4,7 +4,9 @@ Development environment cleanup CLI (scaffold).
 
 This is an initial, minimal Rust CLI skeleton. Product behavior (discovery,
 classification, cleaning) is not yet implemented; the binary currently loads its
-configuration and can print the resolved config via `devclean list`.
+configuration and can print the resolved config via `devclean list`, and can
+answer whether a path is protected by `.devcleanignore` rules via
+`devclean ignore`.
 
 ## Build
 
@@ -24,6 +26,57 @@ cargo run -- list
 ```sh
 cargo test
 ```
+
+## `.devcleanignore`
+
+devclean honors gitignore-style ignore files in two scopes:
+
+- **Global** — `~/.devcleanignore` applies to every project. Its patterns are
+  anchored at the project root (like git's `core.excludesfile`).
+- **Per-folder** — a `.devcleanignore` file inside a project tree applies to
+  the subtree rooted at its own directory, at any depth.
+
+Patterns use gitignore semantics: `*` and `**` globs, a leading `/` that
+anchors to the ignore file's directory, a trailing `/` for directory-only
+matches, and `!` to re-include a previously excluded path. Blank lines and
+lines starting with `#` are ignored. Matching a directory also covers
+everything inside it, so `build/` protects `build/out.o` too.
+
+Precedence follows gitignore: the closest (deepest, most-specific)
+`.devcleanignore` wins, layered on top of the global file. A path matched by an
+ignore rule (including a `!` whitelist) is **protected** — cleaning never
+removes it.
+
+Example `~/.devcleanignore`:
+
+```gitignore
+# global: never touch these anywhere in a project
+.DS_Store
+*.swp
+/secrets
+```
+
+A per-folder `<project>/sub/.devcleanignore`:
+
+```gitignore
+# ignore this subtree's build output
+build/
+# ...but keep one debug log
+!debug.log
+```
+
+There is a small debug helper to inspect the loaded rules:
+
+```sh
+$ devclean ignore path/to/check
+path/to/check: ignored
+```
+
+It treats the current directory as the project root, loads the global file plus
+every `.devcleanignore` beneath it, and tests the given path. The path may be
+relative to the current directory or absolute inside it; a path outside the
+project root is an error rather than a reported "not-ignored".
+Discovery and cleaning are separate, not-yet-implemented features.
 
 ## Configuration
 
@@ -58,6 +111,7 @@ Flags are top-level and must be given *before* the subcommand:
 
 ```sh
 devclean [FLAGS] list            # print the resolved config
+devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)

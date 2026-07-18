@@ -20,7 +20,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - User-facing config docs (file location, TOML keys, defaults, CLI flags) live in `README.md`; the resolution logic is `config::default_config_path`.
 - Top-level flags are not `global`, so clap requires them *before* the subcommand (`devclean --force list`, never `devclean list --force`).
 - `--force` and `--dry-run` conflict at the clap layer (`conflicts_with`), so no runtime precedence logic exists or should be added.
-- `devclean list` is the only observable product command today; discovery/classification/cleaning are separate issues.
+- `devclean list` is the only observable product command today (`devclean ignore` is a debug hook for the matcher, documented in `README.md`); discovery/classification/cleaning are separate issues.
+
+## Ignore matcher
+
+- `.devcleanignore` is gitignore semantics, not a bespoke format: a global
+  `~/.devcleanignore` plus per-folder files, deepest layer winning. Reach for
+  gitignore behavior when in doubt rather than inventing devclean-specific rules.
+- `is_ignored == true` means **protected**: cleaning must never act on that path.
+  This is the matcher's whole contract with the not-yet-written cleaning engine.
+- Owners: `README.md` for scopes, pattern syntax, precedence, and the
+  `devclean ignore` helper; the `src/ignore.rs` module docs and rustdoc for the
+  implementation sharp edges and constructor contracts.
 
 ## Maintaining this file
 
