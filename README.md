@@ -2,11 +2,13 @@
 
 Development environment cleanup CLI (scaffold).
 
-The binary loads configuration, discovers projects, and classifies their git
-state. The current surface covers discovery (`devclean discovery`),
-classification (`devclean classification`), protection via `.devcleanignore`
-(`devclean ignore`), and the safe-to-delete catalog (`devclean safelist`);
-cleaning and the interactive flow are separate, not-yet-implemented features.
+The binary loads configuration, discovers projects, classifies their git
+state, and cleans the cleanable ones. The current surface covers discovery
+(`devclean discovery`), classification (`devclean classification`),
+protection via `.devcleanignore` (`devclean ignore`), the safe-to-delete
+catalog (`devclean safelist`), and a non-destructive cleaning preview
+(`devclean clean`); the interactive approval flow is a separate,
+not-yet-implemented feature (#8).
 
 ## Build
 
@@ -43,9 +45,11 @@ lines starting with `#` are ignored. Matching a directory also covers
 everything inside it, so `build/` protects `build/out.o` too.
 
 Precedence follows gitignore: the closest (deepest, most-specific)
-`.devcleanignore` wins, layered on top of the global file. A path matched by an
-ignore rule (including a `!` whitelist) is **protected** — cleaning never
-removes it.
+`.devcleanignore` wins, layered on top of the global file. A path matched by
+an ignore rule is **protected** — cleaning never removes it. A `!` pattern
+**un-protects** (re-includes) a path an earlier rule excluded, per gitignore
+semantics: a `!`-whitelisted path is NOT protected and is eligible for
+cleaning (subject to the safe-list and approval rules below).
 
 Example `~/.devcleanignore`:
 
@@ -76,7 +80,49 @@ It treats the current directory as the project root, loads the global file plus
 every `.devcleanignore` beneath it, and tests the given path. The path may be
 relative to the current directory or absolute inside it; a path outside the
 project root is an error rather than a reported "not-ignored".
-Cleaning is a separate, not-yet-implemented feature.
+
+## Cleaning
+
+devclean cleans each **cleanable** (status-5) project by enumerating its
+untracked items, classifying each, surfacing the ambiguous ones for approval,
+then deleting via `git clean -xfd -e <exclusion globs>` — mirroring the
+original zshrc approach (build an exclusion list, run `git clean`).
+
+Each untracked item is classified into one of three classes:
+
+| class        | condition                       | outcome              |
+|--------------|---------------------------------|----------------------|
+| `protected`  | `.devcleanignore` match         | never removed        |
+| `safe`       | safe-to-delete catalog match    | auto-removed         |
+| `surfaced`   | everything else                 | per-project approval |
+
+Untracked items are enumerated *without* git's `--exclude-standard`, so
+project-gitignored build junk like `node_modules`/`target/` stays visible —
+devclean exists to clean it, and `.devcleanignore` is the sole judge of
+protection. The exclusion list passed to `git clean -e` is built from every
+protected item plus every surfaced item the user does **not** approve; safe
+items and approved surfaced items are left un-excluded so `git clean` deletes
+them. An absolute path on the cleaning path is treated as **protected**
+(fail-safe toward not-deleting, never fail-open).
+
+Flags:
+
+- `--force` — auto-approve every surfaced item (no prompting).
+- `--dry-run` — compute and print what would be deleted; delete nothing.
+
+The interactive per-item approval flow is a separate issue (#8); until it
+lands, `devclean clean` is a **non-destructive debug hook** that enumerates
+each cleanable project and prints each untracked item's classification and
+whether it would be deleted (with `--force` toggling the verdict for surfaced
+items), without deleting anything.
+
+```sh
+$ devclean clean              # dry-run preview for each cleanable project
+$ devclean --force clean      # show verdicts as if every surfaced item were approved
+```
+
+See `src/clean.rs` for the implementation (the `clean` / `dry_run` /
+`build_exclusions` API is the seam the interactive flow (#8) will drive).
 
 ## Safe-to-delete catalog
 
@@ -86,8 +132,10 @@ whether a given path is in it. The catalog is:
 
 - **Built-in defaults** — compiled into `src/safelist.rs` as `BUILT_IN_DEFAULTS` (a non-exhaustive list of common build/cache dirs/files: `node_modules`, `target`, `.next`, `.turbo`, `dist`, `build`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.gradle`, `bin/obj`, `out`, `coverage`, `.nuxt`, `.svelte-kit`, `.cache`, `.parcel-cache`).
 - **Extension via `Config::safe_delete`** — user-supplied gitignore-style globs are appended (not replaced) to the built-in set. Patterns behave like gitignore globs anchored at the project root: each matches the named dir at any depth (e.g. `**/node_modules`), and matching a directory covers everything beneath it via the `ignore` crate's parent-match semantics.
-- **Intended consumer** — the not-yet-implemented cleaning engine, which will remove matched paths without asking for approval. Nothing deletes anything today.
-- **Observable hook** — `devclean safelist <path>` is the minimal diagnostic for the catalog; cleaning is a separate, not-yet-implemented feature.
+- **Intended consumer** — the cleaning engine, which removes matched paths
+  without asking for approval. See "Cleaning" above.
+- **Observable hook** — `devclean safelist <path>` is the minimal diagnostic
+  for the catalog.
 
 A path is reported `safe` or `not-safe`, interpreted relative to the current
 directory (treated as the project root); a path outside that root is an error
@@ -152,8 +200,8 @@ devclean --workspace ~/code classification
 ```
 
 See `src/classify.rs` for the git-plumbing logic and status precedence;
-`tests/classification_cli.rs` for integration tests. Cleaning (#7) and the
-interactive flow (#8) are separate issues.
+`tests/classification_cli.rs` for integration tests. The interactive approval
+flow (#8) is a separate issue.
 
 ## Configuration
 
@@ -193,6 +241,7 @@ devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
 devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
 devclean [FLAGS] discovery       # see "Discovery" above
 devclean [FLAGS] classification  # see "Classification" above
+devclean [FLAGS] clean           # see "Cleaning" above (non-destructive preview)
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)

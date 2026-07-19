@@ -1,4 +1,5 @@
 mod classify;
+mod clean;
 mod config;
 mod discovery;
 mod ignore;
@@ -74,6 +75,12 @@ enum Command {
     /// sorted by status. Status 5 is the only cleanable state; status 1..4
     /// each signal that cleaning must wait. See issue #6 for the full spec.
     Classification,
+    /// Debug helper: clean each cleanable project in dry-run mode, printing
+    /// what each project would delete (protected items excluded, safe items
+    /// auto-deleted, surfaced items auto-approved via --force, or each one
+    /// listed for display in dry-run). Does not actually delete anything in
+    /// dry-run. See issue #7 for the full spec.
+    Clean,
 }
 
 fn main() {
@@ -109,6 +116,12 @@ fn main() {
         }
         Some(Command::Classification) => {
             if let Err(e) = run_classification(&cli) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Clean) => {
+            if let Err(e) = run_clean(&cli) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -305,6 +318,101 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     for (path, status) in &rows {
         println!("  [{}] {path} -> {}", status.rank(), status.label());
+    }
+    Ok(())
+}
+
+/// `devclean clean`: a non-destructive preview hook. For each cleanable
+/// (status-5) project, enumerate untracked items, classify each one, and
+/// print its classification plus whether it would be deleted. Nothing is
+/// deleted — the interactive approval flow is issue #8, and this hook never
+/// invokes `git clean`'s deletion. `--force` only toggles the displayed
+/// verdict for surfaced items (would-delete vs. keep), it does not trigger
+/// deletion. Mirrors the original zshrc approach at the enumeration/classify
+/// layer; the deletion layer (`clean::clean`) is the seam #8 will drive.
+fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (_config_path, cfg) = load_cli_config(cli)?;
+    let cfg = cfg.apply_overrides(&cli_overrides(cli));
+
+    let projects = discovery::discover(&cfg)?;
+    if projects.is_empty() {
+        println!("clean: no projects found");
+        return Ok(());
+    }
+
+    for d in &projects {
+        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
+            Ok(set) => set,
+            Err(e) => {
+                eprintln!(
+                    "warning: {}: skipped, could not load .devcleanignore: {e}",
+                    d.path.display()
+                );
+                continue;
+            }
+        };
+        let status = classify::classify(&d.path, &ignore_set);
+        if status != classify::Status::Cleanable {
+            if cli.verbose {
+                println!(
+                    "{}: {} (not cleanable, skipping)",
+                    d.path.display(),
+                    status.label(),
+                );
+            }
+            continue;
+        }
+        let safe_set = match safelist::SafeSet::from_config(&d.path, &cfg) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "warning: {}: skipped, could not build safe-to-delete set: {e}",
+                    d.path.display()
+                );
+                continue;
+            }
+        };
+        // The CLI hook is a non-destructive preview: it enumerates and
+        // classifies each cleanable project's untracked items and prints
+        // what `git clean` would delete, without deleting anything. The
+        // interactive approval flow is issue #8; `--force` here only changes
+        // the displayed verdict for surfaced items (would-be-deleted vs.
+        // surfaces-for-approval), it does not trigger deletion in this hook.
+        let items = match clean::dry_run(&d.path, &ignore_set, &safe_set) {
+            Ok(items) => items,
+            Err(e) => {
+                eprintln!("warning: {}: clean failed: {e}", d.path.display());
+                continue;
+            }
+        };
+        println!("clean (dry-run): {}", d.path.display());
+        if items.is_empty() {
+            println!("  (no untracked items)");
+            continue;
+        }
+        for item in &items {
+            let would_delete = match item.classification {
+                clean::Classification::Protected => false,
+                clean::Classification::Safe => true,
+                clean::Classification::Surfaced => cli.force,
+            };
+            let label = match item.classification {
+                clean::Classification::Protected => "protected",
+                clean::Classification::Safe => "safe-to-delete",
+                clean::Classification::Surfaced => "surfaced",
+            };
+            println!(
+                "  {}{} [{}]{}",
+                item.rel_path.display(),
+                if item.is_dir { "/" } else { "" },
+                label,
+                if would_delete {
+                    " (would delete)"
+                } else {
+                    " (keep)"
+                },
+            );
+        }
     }
     Ok(())
 }
