@@ -49,12 +49,18 @@
 //!
 //! ## Granularity
 //!
-//! Untracked items are enumerated via `git ls-files --others --directory
-//! --no-empty-directory -z` (without `--exclude-standard`, deliberately —
-//! build junk like `node_modules`/`target/` is gitignored by the *project*,
-//! but devclean exists to clean it, so gitignored files must stay visible;
-//! the `.devcleanignore` matcher is the sole judge of protection). Each
-//! entry is a relative path; directories end with `/`.
+//! Untracked items are enumerated via `git ls-files --others --directory -z`
+//! (without `--exclude-standard`, deliberately — build junk like
+//! `node_modules`/`target/` is gitignored by the *project*, but devclean
+//! exists to clean it, so gitignored files must stay visible; the
+//! `.devcleanignore` matcher is the sole judge of protection). Each entry is
+//! a relative path; directories end with `/`. Empty untracked directories
+//! are enumerated too (no `--no-empty-directory`): an empty dir is
+//! classified like any other item — a `.devcleanignore`-matching empty dir
+//! is `Protected` (excluded, never deleted), a safe-list empty dir is
+//! `Safe`, and any other empty dir is `Surfaced` for approval. Omitting
+//! empty dirs from classification would let `git clean -xfd` delete them
+//! without an exclusion, violating the safety contract.
 //!
 //! A directory entry is tested against the matcher as a directory first.
 //! If the directory itself is protected, it is recorded once as `Protected`
@@ -63,9 +69,11 @@
 //! is recorded once as `Safe`. Otherwise the directory is **not** protected
 //! nor safe as a whole, so it is re-listed at file granularity and each file
 //! is classified individually — so content patterns (e.g. `*.js`) inside an
-//! untracked directory still protect the files they match. This is the
-//! resolution of issue #6's review fix: `--directory`-only enumeration would
-//! under-granularity content patterns.
+//! untracked directory still protect the files they match. If that
+//! re-listing is empty (the directory is untracked and empty), the directory
+//! itself is recorded as `Surfaced` so it still gets an exclusion (and is
+//! not silently deleted). This is the resolution of issue #6's review fix:
+//! `--directory`-only enumeration would under-granularity content patterns.
 //!
 //! ## Deferred findings from #3 (resolved here)
 //!
@@ -215,37 +223,33 @@ fn git_cmd(project_path: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Enumerate untracked items for `project_path` and classify each one.
 ///
-/// Runs `git ls-files --others --directory --no-empty-directory -z` (no
-/// `--exclude-standard`: gitignored-by-project build junk must stay visible
-/// so devclean can clean it; `.devcleanignore` is the sole protection judge).
+/// Runs `git ls-files --others --directory -z` (no `--exclude-standard`:
+/// gitignored-by-project build junk must stay visible so devclean can clean
+/// it; `.devcleanignore` is the sole protection judge). Empty untracked
+/// directories are included (no `--no-empty-directory`) so they are
+/// classified like any other item rather than silently deleted by
+/// `git clean -xfd`.
 ///
 /// Per-item precedence:
 /// 1. absolute path → `Protected` (fail-safe, never deleted);
 /// 2. `.devcleanignore` match → `Protected`;
 /// 3. directory that is not protected and not safe → recurse into its files
-///    so content patterns (e.g. `*.js`) still match each file inside;
+///    so content patterns (e.g. `*.js`) still match each file inside; if the
+///    directory is empty (no files to recurse into), record the directory
+///    itself as `Surfaced` so it still gets an exclusion;
 /// 4. safe-to-delete catalog match → `Safe`;
 /// 5. otherwise → `Surfaced`.
 ///
 /// A protected directory is recorded once (parent-match semantics protect its
 /// contents; one exclusion covers the whole tree). A safe directory is
-/// recorded once. A neither-protected-nor-safe directory is expanded to its
-/// file-level items.
+/// recorded once. A neither-protected-nor-safe non-empty directory is
+/// expanded to its file-level items; an empty one is recorded as `Surfaced`.
 pub fn enumerate_untracked(
     project_path: &Path,
     ignore_set: &IgnoreSet,
     safe_set: &SafeSet,
 ) -> Result<Vec<CleanItem>, Box<dyn std::error::Error>> {
-    let output = git_cmd(
-        project_path,
-        &[
-            "ls-files",
-            "--others",
-            "--directory",
-            "--no-empty-directory",
-            "-z",
-        ],
-    )?;
+    let output = git_cmd(project_path, &["ls-files", "--others", "--directory", "-z"])?;
 
     let mut items: Vec<CleanItem> = Vec::new();
     for entry in output.split('\0').filter(|e| !e.is_empty()) {
@@ -276,7 +280,10 @@ pub fn enumerate_untracked(
 
         // 3. Directory not protected: check safe-list at directory granularity;
         //    if safe, record once. Otherwise recurse to file granularity so
-        //    content patterns inside the untracked directory still apply.
+        //    content patterns inside the untracked directory still apply. An
+        //    empty untracked directory recurses to nothing — record it as
+        //    `Surfaced` so it still gets an exclusion (and is not silently
+        //    deleted by `git clean -xfd`).
         if is_dir {
             if safe_set.is_safe_to_delete(&rel_path, true) {
                 items.push(CleanItem {
@@ -287,7 +294,15 @@ pub fn enumerate_untracked(
                 continue;
             }
             let sub_items = enumerate_subtree_files(project_path, &rel_path, ignore_set, safe_set)?;
-            items.extend(sub_items);
+            if sub_items.is_empty() {
+                items.push(CleanItem {
+                    rel_path,
+                    is_dir,
+                    classification: Classification::Surfaced,
+                });
+            } else {
+                items.extend(sub_items);
+            }
             continue;
         }
 
@@ -827,5 +842,103 @@ mod tests {
         // Safe and surfaced removed.
         assert!(!root.join("target").exists());
         assert!(!root.join("ambiguous.tmp").exists());
+    }
+
+    /// An empty untracked directory matching `.devcleanignore` is classified
+    /// `Protected` (excluded, never deleted) — not silently removed by
+    /// `git clean -xfd`. Empty dirs flow through the same classification as
+    /// other items (the empty-dir-unclassified-deletion safety fix).
+    #[test]
+    fn empty_devcleanignored_directory_is_protected() {
+        let root = fixture("empty_protected_dir");
+        write_file(
+            &root,
+            ".devcleanignore",
+            "keepempty/
+",
+        );
+        git_run(&root, &["add", ".devcleanignore"]);
+        git_run(&root, &["commit", "-m", "ignore rules"]);
+        fs::create_dir_all(root.join("keepempty")).unwrap();
+
+        let ignore_set = IgnoreSet::load(&root).unwrap();
+        let items = enumerate_untracked(&root, &ignore_set, &safe_set(&root)).unwrap();
+
+        assert!(
+            items.iter().any(|i| {
+                i.classification == Classification::Protected
+                    && i.is_dir
+                    && i.rel_path.to_string_lossy() == "keepempty"
+            }),
+            "empty protected dir should be classified Protected: {:?}",
+            items,
+        );
+    }
+
+    /// An empty untracked directory that is neither protected nor safe is
+    /// classified `Surfaced` (needs approval) — not silently deleted. Without
+    /// approval it is kept (excluded).
+    #[test]
+    fn empty_untracked_directory_is_surfaced_and_kept_without_approval() {
+        let root = fixture("empty_surfaced_dir");
+        fs::create_dir_all(root.join("emptyjunk")).unwrap();
+
+        let ignore_set = IgnoreSet::load(&root).unwrap();
+        let safe = safe_set(&root);
+        let items = enumerate_untracked(&root, &ignore_set, &safe).unwrap();
+
+        assert!(
+            items.iter().any(|i| {
+                i.classification == Classification::Surfaced
+                    && i.is_dir
+                    && i.rel_path.to_string_lossy() == "emptyjunk"
+            }),
+            "empty untracked dir should be classified Surfaced: {:?}",
+            items,
+        );
+
+        // Non-force, no approvals: the empty dir is kept (excluded).
+        let surfaced = clean(&root, &ignore_set, &safe, &[], false, false).unwrap();
+        assert!(
+            surfaced
+                .iter()
+                .any(|i| i.rel_path.to_string_lossy() == "emptyjunk"),
+            "empty dir should still need approval: {surfaced:?}"
+        );
+        assert!(
+            root.join("emptyjunk").is_dir(),
+            "un-approved empty dir must not be deleted"
+        );
+    }
+
+    /// End-to-end empty-dir safety: `clean` with `force = true` removes an
+    /// empty surfaced directory but keeps an empty `.devcleanignore`-protected
+    /// directory.
+    #[test]
+    fn clean_force_keeps_empty_protected_dir_removes_empty_surfaced_dir() {
+        let root = fixture("empty_dir_e2e");
+        write_file(
+            &root,
+            ".devcleanignore",
+            "keepempty/
+",
+        );
+        git_run(&root, &["add", ".devcleanignore"]);
+        git_run(&root, &["commit", "-m", "ignore rules"]);
+        fs::create_dir_all(root.join("keepempty")).unwrap();
+        fs::create_dir_all(root.join("emptyjunk")).unwrap();
+
+        let ignore_set = IgnoreSet::load(&root).unwrap();
+        let safe = safe_set(&root);
+        clean(&root, &ignore_set, &safe, &[], true, false).unwrap();
+
+        assert!(
+            root.join("keepempty").is_dir(),
+            "empty protected dir must survive git clean"
+        );
+        assert!(
+            !root.join("emptyjunk").exists(),
+            "empty surfaced dir should be removed in force mode"
+        );
     }
 }
