@@ -28,8 +28,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use crate::clean::CleanItem;
 use crate::clean::Classification;
+use crate::clean::CleanItem;
 
 /// Compute the total on-disk size of each deletable item for `project_path`.
 ///
@@ -113,11 +113,7 @@ fn file_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 // Permission-denied (or similar) — count as 0.
-                eprintln!(
-                    "warning: {}: could not read: {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("warning: {}: could not read: {}", path.display(), e);
                 return Ok(0);
             }
         }
@@ -146,11 +142,7 @@ fn directory_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "warning: {}: could not walk: {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("warning: {}: could not walk: {}", path.display(), e);
                 // Count the rest of this subtree as 0.
                 continue;
             }
@@ -273,11 +265,8 @@ mod tests {
         write_file(&root, "target/app.bin", payload);
         // Symlink points at itself (or any target) — we only count the link
         // itself, not the target's full tree.
-        std::os::unix::fs::symlink(
-            &root.join("target/app.bin"),
-            &root.join("target/link.bin"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(&root.join("target/app.bin"), &root.join("target/link.bin"))
+            .unwrap();
 
         let items = vec![CleanItem {
             rel_path: PathBuf::from("target/link.bin"),
@@ -371,6 +360,9 @@ mod tests {
     #[test]
     fn format_size_is_human_readable() {
         let s = format_size(12345678);
-        assert!(s.contains("MB") || s.contains("KB") || s.contains("GB"), "unexpected: {s}");
+        assert!(
+            s.contains("MB") || s.contains("KB") || s.contains("GB"),
+            "unexpected: {s}"
+        );
     }
 }

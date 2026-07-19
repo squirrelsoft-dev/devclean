@@ -76,7 +76,12 @@ pub fn color(text: &str, style: OwoStyle, emit_colors: Option<bool>) -> String {
 ///
 /// The path is printed as-is (no styling, no escaping) — path strings don't
 /// gain a semantic meaning that colors should attach.
-pub fn format_project_row(path: &Path, status: Status, emit_colors: Option<bool>, size: Option<&str>) -> String {
+pub fn format_project_row(
+    path: &Path,
+    status: Status,
+    emit_colors: Option<bool>,
+    size: Option<&str>,
+) -> String {
     let label_style = status_style(status);
     let label = color(status.label(), label_style, emit_colors);
     let reason = status_reason(status);
@@ -160,7 +165,12 @@ mod tests {
     /// Each formatted row contains the project path and status label.
     #[test]
     fn project_row_contains_every_field() {
-        let row = format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_false(), None);
+        let row = format_project_row(
+            Path::new("/tmp/project"),
+            Status::Cleanable,
+            emit_false(),
+            None,
+        );
         assert!(row.contains("/tmp/project"), "row: {row}");
         assert!(row.contains("cleanable"), "row: {row}");
     }
@@ -170,8 +180,12 @@ mod tests {
     /// (bold green) is the cleanable indicator, not a repeated word.
     #[test]
     fn label_repeating_reason_is_suppressed() {
-        let cleanable =
-            format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_false(), None);
+        let cleanable = format_project_row(
+            Path::new("/tmp/project"),
+            Status::Cleanable,
+            emit_false(),
+            None,
+        );
         assert_eq!(
             cleanable.matches("cleanable").count(),
             1,
@@ -179,7 +193,8 @@ mod tests {
         );
         assert!(!cleanable.contains("(cleanable)"), "row: {cleanable}");
 
-        let clean = format_project_row(Path::new("/tmp/project"), Status::Clean, emit_false(), None);
+        let clean =
+            format_project_row(Path::new("/tmp/project"), Status::Clean, emit_false(), None);
         assert_eq!(clean.matches("clean").count(), 1, "row: {clean}");
         assert!(!clean.contains("(clean)"), "row: {clean}");
     }
@@ -195,7 +210,12 @@ mod tests {
     /// Plain output when `emit_colors = Some(false)` — no ANSI escape codes.
     #[test]
     fn plain_output_when_not_tty() {
-        let row = format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_false(), None);
+        let row = format_project_row(
+            Path::new("/tmp/project"),
+            Status::Cleanable,
+            emit_false(),
+            None,
+        );
         assert!(
             !row.contains("\x1b["),
             "plain output should contain no escape codes: {row:?}"
@@ -210,7 +230,12 @@ mod tests {
     /// Color output when `emit_colors = Some(true)` — ANSI escape codes present.
     #[test]
     fn colored_output_when_tty() {
-        let row = format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_true(), None);
+        let row = format_project_row(
+            Path::new("/tmp/project"),
+            Status::Cleanable,
+            emit_true(),
+            None,
+        );
         assert!(
             row.contains("\x1b["),
             "colored output should contain escape codes: {row:?}"
@@ -221,11 +246,16 @@ mod tests {
     /// fragment contains an escape sequence that colors it.
     #[test]
     fn dirty_statuses_get_warm_colors() {
-        let no_git = format_project_row(Path::new("/tmp/project"), Status::NoGit, emit_true(), None);
+        let no_git =
+            format_project_row(Path::new("/tmp/project"), Status::NoGit, emit_true(), None);
         assert!(no_git.contains("\x1b["), "no-git is red: {no_git:?}");
 
-        let no_remote =
-            format_project_row(Path::new("/tmp/project"), Status::NoRemote, emit_true(), None);
+        let no_remote = format_project_row(
+            Path::new("/tmp/project"),
+            Status::NoRemote,
+            emit_true(),
+            None,
+        );
         assert!(
             no_remote.contains("\x1b["),
             "no-remote is yellow: {no_remote:?}"
@@ -235,8 +265,12 @@ mod tests {
     /// Each clean status gets a cool color (green).
     #[test]
     fn clean_statuses_get_cool_colors() {
-        let cleanable =
-            format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_true(), None);
+        let cleanable = format_project_row(
+            Path::new("/tmp/project"),
+            Status::Cleanable,
+            emit_true(),
+            None,
+        );
         assert!(
             cleanable.contains("\x1b["),
             "cleanable is green+bold: {cleanable:?}"
@@ -273,7 +307,12 @@ mod tests {
     /// would see it. A relative path is printed as-is.
     #[test]
     fn project_row_prints_as_displayed() {
-        let row = format_project_row(Path::new("my/project"), Status::Cleanable, emit_false(), None);
+        let row = format_project_row(
+            Path::new("my/project"),
+            Status::Cleanable,
+            emit_false(),
+            None,
+        );
         assert!(
             row.contains("my/project"),
             "row prints the path as given: {row}"
