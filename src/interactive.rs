@@ -11,7 +11,7 @@
 //!
 //! | flag            | all-cleanup prompt | per-item prompts | per-project prompt | execute?
 //! |-----------------|-------------------|------------------|--------------------|--------|
-//! | interactive     | yes → y/n         | yes → keep/dep   | yes → clean?       | yes if approved
+//! | interactive     | yes → y/n         | yes → delete/keep | yes → clean?      | yes if approved
 //! | --force         | no                | no               | no                 | yes
 //! | --dry-run       | no                | no               | no                 | no
 //! | --force --dry-run | no              | no               | no                 | no (show)
@@ -24,14 +24,14 @@
 //!    no (or EOF / --force / --dry-run), exit without touching any project:
 //!    no further prompts are shown and every result comes back unapproved.
 //! 3. **Per-project loop** (in sorted order, each cleanable):
-//!     a. enumerate untracked items (dry-run);
-//!     b. print the project path and the list of each item that would be
-//!        deleted;
-//!     c. for each `Surfaced` item: prompt keep or delete; record approval;
-//!     d. prompt per-project confirmation ("Clean <path>? (y/n)"); record
-//!        approval;
-//!     e. if approved (or --force): execute `git clean -xfd -e <globs>`;
-//!        if --dry-run: print the report only.
+//!    a. enumerate untracked items (dry-run);
+//!    b. print the project path and the list of each item that would be
+//!    deleted;
+//!    c. for each `Surfaced` item: prompt keep or delete; record approval;
+//!    d. prompt per-project confirmation ("Clean <path>? (y/n)"); record
+//!    approval;
+//!    e. if approved (or --force): execute `git clean -xfd -e <globs>`;
+//!    if --dry-run: print the report only.
 //! 4. **Zero cleanable** — summary, exit 0, no prompts.
 //!
 //! ## Approval contract
@@ -55,7 +55,7 @@ use std::io::BufRead;
 use std::path::PathBuf;
 
 use crate::classify::Status;
-use crate::clean::{CleanItem, Classification};
+use crate::clean::{Classification, CleanItem};
 
 /// Pre-computed inputs for the interactive flow: the discovered projects
 /// already classified and sorted, the flags, and the per-project items
@@ -124,7 +124,7 @@ fn would_delete(item: &CleanItem, force: bool, approved: &[PathBuf]) -> bool {
 fn read_line<R: BufRead>(reader: &mut R) -> Option<String> {
     let mut buf = String::new();
     match reader.read_line(&mut buf) {
-        Ok(n) if n == 0 => None,
+        Ok(0) => None,
         Ok(_) => {
             let trimmed = buf.trim();
             if trimmed.is_empty() {
@@ -148,21 +148,13 @@ fn read_line<R: BufRead>(reader: &mut R) -> Option<String> {
 ///
 /// A single "y" is accepted; anything else (including blank lines and EOF)
 /// is "no". The prompt is plain text, no colors, no fancy rendering.
-pub fn collect_all_approval<R: BufRead>(
-    reader: &mut R,
-    num_cleanable: usize,
-) -> bool {
+pub fn collect_all_approval<R: BufRead>(reader: &mut R, num_cleanable: usize) -> bool {
     if num_cleanable == 0 {
         return false;
     }
-    let question = format!(
-        "Clean the {num_cleanable} cleanable projects? (y/n)",
-    );
+    let question = format!("Clean the {num_cleanable} cleanable projects? (y/n)",);
     eprintln!("? {question}");
-    match read_line(reader) {
-        Some(answer) if answer.eq_ignore_ascii_case("y") => true,
-        _ => false,
-    }
+    matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
 }
 
 /// Print the pre-approval report for one project: its path and every
@@ -211,10 +203,8 @@ pub fn collect_each_item<R: BufRead>(
             item.rel_path.display(),
             if item.is_dir { "/" } else { "" },
         );
-        let approved = match read_line(reader) {
-            Some(answer) if answer.eq_ignore_ascii_case("y") => true,
-            _ => false,
-        };
+        let approved =
+            matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"));
         approvals.push((item.rel_path.clone(), approved));
     }
     approvals
@@ -228,15 +218,9 @@ pub fn collect_project_approval<R: BufRead>(
     reader: &mut R,
     project_path: &std::path::Path,
 ) -> bool {
-    let question = format!(
-        "Clean {}? (y/n)",
-        project_path.display(),
-    );
+    let question = format!("Clean {}? (y/n)", project_path.display(),);
     eprintln!("? {question}");
-    match read_line(reader) {
-        Some(answer) if answer.eq_ignore_ascii_case("y") => true,
-        _ => false,
-    }
+    matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
 }
 
 /// Drive the full interactive flow. Returns each cleanable project's result
@@ -262,10 +246,7 @@ pub fn collect_project_approval<R: BufRead>(
 /// Zero cleanable → short-circuits before prompting: the summary is printed
 /// by the caller (see `main::run_clean`); this function returns the (empty)
 /// list of results.
-pub fn run<R: BufRead>(
-    inputs: InteractiveFlowInputs,
-    reader: &mut R,
-) -> Vec<ProjectResult> {
+pub fn run<R: BufRead>(inputs: InteractiveFlowInputs, reader: &mut R) -> Vec<ProjectResult> {
     let num_cleanable = inputs.per_project_items.len();
     let interactive = !inputs.force && !inputs.dry_run;
 
@@ -350,8 +331,8 @@ pub fn run<R: BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clean::CleanItem;
     use crate::classify::Status;
+    use crate::clean::CleanItem;
     use std::io::BufReader;
 
     fn make_item(rel: &str, classification: Classification, is_dir: bool) -> CleanItem {
@@ -372,10 +353,7 @@ mod tests {
         }
     }
 
-    fn run_with_answers(
-        inputs: InteractiveFlowInputs,
-        answers: &str,
-    ) -> Vec<ProjectResult> {
+    fn run_with_answers(inputs: InteractiveFlowInputs, answers: &str) -> Vec<ProjectResult> {
         let reader = BufReader::new(answers.as_bytes());
         let mut r = reader;
         run(inputs, &mut r)
@@ -395,7 +373,7 @@ mod tests {
         // One cleanable project consuming four answers: the all-cleanup
         // prompt, one per surfaced item (b.tmp, c.tmp), and the per-project
         // confirmation.
-        let all = format!("y\ny\ny\ny\n");
+        let all = "y\ny\ny\ny\n".to_string();
         let results = run_with_answers(inputs, &all);
         assert_eq!(results.len(), 1);
         assert!(results[0].project_approved);
@@ -424,7 +402,7 @@ mod tests {
         let inputs = inputs_for(&items, false, false);
         // Answers: all-cleanup "y", a.tmp "n" (kept), b.tmp "y" (delete),
         // per-project "y".
-        let all = format!("y\nn\ny\ny\n");
+        let all = "y\nn\ny\ny\n".to_string();
         let results = run_with_answers(inputs, &all);
         assert!(results[0].project_approved);
         assert!(results[0].would_delete.contains(&PathBuf::from("b.tmp")));
@@ -511,7 +489,7 @@ mod tests {
         let inputs = inputs_for(&items, false, false);
         // No per-item prompts (target is Safe, not Surfaced); the
         // per-project prompt reads the second answer.
-        let all = format!("y\nn\n");
+        let all = "y\nn\n".to_string();
         let results = run_with_answers(inputs, &all);
         // Per-project answer "n" → not approved despite all-cleanup "y".
         assert!(!results[0].project_approved);
@@ -529,7 +507,7 @@ mod tests {
         ];
         let inputs = inputs_for(&items, false, false);
         // Answers: all-cleanup "y", b.tmp "y", per-project "y".
-        let all = format!("y\ny\ny\n");
+        let all = "y\ny\ny\n".to_string();
         let results = run_with_answers(inputs, &all);
         let would_delete: Vec<&PathBuf> = results[0].would_delete.iter().collect();
         assert!(would_delete.contains(&&PathBuf::from("target")));
@@ -546,7 +524,7 @@ mod tests {
             make_item("b/path", Classification::Surfaced, false),
         ];
         let inputs = inputs_for(&items, false, false);
-        let all = format!("y\ny\ny\n");
+        let all = "y\ny\ny\n".to_string();
         let results = run_with_answers(inputs, &all);
         let would_delete: Vec<&PathBuf> = results[0].would_delete.iter().collect();
         assert!(would_delete.contains(&&PathBuf::from("a/path")));
@@ -558,7 +536,7 @@ mod tests {
     fn each_project_path_preserved_each_result() {
         let items = vec![make_item("target", Classification::Safe, true)];
         let inputs = inputs_for(&items, false, false);
-        let all = format!("y\ny\ny\n");
+        let all = "y\ny\ny\n".to_string();
         let results = run_with_answers(inputs, &all);
         assert_eq!(results[0].path, PathBuf::from("/tmp/project"));
         assert_eq!(results[0].status, Status::Cleanable);

@@ -368,7 +368,10 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // For each cleanable project, keep its index into `all_projects` (for
     // the ignore set) and the safe set built here, so execution below does
     // not rebuild or re-find either.
-    println!("clean: {} project(s) — sorted by status", all_projects.len());
+    println!(
+        "clean: {} project(s) — sorted by status",
+        all_projects.len()
+    );
     let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
     let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
     for (idx, (path, status, ignore_set)) in all_projects.iter().enumerate() {
@@ -421,7 +424,10 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // process's stdin (locked, buffered for line reads). The flow itself
     // owns the decision state machine; the CLI hook owns the I/O plumbing.
     let inputs = interactive::InteractiveFlowInputs {
-        all_projects: all_projects.iter().map(|(p, s, _)| (p.clone(), *s)).collect(),
+        all_projects: all_projects
+            .iter()
+            .map(|(p, s, _)| (p.clone(), *s))
+            .collect(),
         per_project_items: cleanable_items,
         force: cli.force,
         dry_run: cli.dry_run,
@@ -439,7 +445,11 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "clean {}: {} — {}",
             r.path.display(),
-            if r.project_approved { "approved" } else { "skipped" },
+            if r.project_approved {
+                "approved"
+            } else {
+                "skipped"
+            },
             r.status.label()
         );
         for item in &r.items {
@@ -449,7 +459,11 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 clean::Classification::Surfaced => "surfaced",
             };
             let verdict = if r.would_delete.contains(&item.rel_path) {
-                if will_execute { " (deleting)" } else { " (would delete)" }
+                if will_execute {
+                    " (deleting)"
+                } else {
+                    " (would delete)"
+                }
             } else if cli.dry_run
                 && !cli.force
                 && item.classification == clean::Classification::Surfaced
@@ -475,25 +489,18 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             // deletes them; Protected and unapproved Surfaced items are
             // excluded. The approvals are the Surfaced entries of the
             // would-delete list.
-            let approved: Vec<PathBuf> = r.would_delete
+            let approved: Vec<PathBuf> = r
+                .would_delete
                 .iter()
                 .filter(|p| {
                     r.items.iter().any(|i| {
-                        i.rel_path == **p
-                            && i.classification == clean::Classification::Surfaced
+                        i.rel_path == **p && i.classification == clean::Classification::Surfaced
                     })
                 })
                 .cloned()
                 .collect();
             let ignore_set = &all_projects[*idx].2;
-            match clean::clean(
-                &r.path,
-                ignore_set,
-                safe_set,
-                &approved,
-                cli.force,
-                false,
-            ) {
+            match clean::clean(&r.path, ignore_set, safe_set, &approved, cli.force, false) {
                 Ok(_) => {
                     println!(
                         "clean {}: deleted {} item(s)",
@@ -502,10 +509,7 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 Err(e) => {
-                    eprintln!(
-                        "clean {}: failed: {e}",
-                        r.path.display()
-                    );
+                    eprintln!("clean {}: failed: {e}", r.path.display());
                 }
             }
         }

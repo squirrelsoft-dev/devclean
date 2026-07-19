@@ -174,7 +174,13 @@ fn clean_force_dry_run_auto_approves_each_item() {
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    let out = run(["--force", "--dry-run", "--config", config.to_str().unwrap(), "clean"]);
+    let out = run([
+        "--force",
+        "--dry-run",
+        "--config",
+        config.to_str().unwrap(),
+        "clean",
+    ]);
 
     assert!(
         out.contains("would delete"),

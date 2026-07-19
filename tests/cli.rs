@@ -104,8 +104,10 @@ fn force_and_dry_run_used_together_run_clean() {
     // combined flags exercise the clean flow without finding anything.
     let each_dir = std::env::temp_dir().join("devclean-cli-test-each");
     std::fs::create_dir_all(&each_dir).unwrap();
-    let toml =
-        &format!("workspace_roots = [\"{}\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n", each_dir.to_str().unwrap());
+    let toml = &format!(
+        "workspace_roots = [\"{}\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n",
+        each_dir.to_str().unwrap()
+    );
     let cfg = write_config(toml);
     let out = devclean()
         .args(["--force", "--dry-run", "--config", &cfg, "clean"])
