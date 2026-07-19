@@ -2,11 +2,11 @@
 
 Development environment cleanup CLI (scaffold).
 
-The binary loads configuration, discovers projects, classifies them, and
-cleanes them. The current surface covers discovery (`devclean discover`),
-protection via `.devcleanignore` (`devclean ignore`), and the safe-to-delete
-catalog (`devclean safelist`); classification and interactive flow are
-separate issues.
+The binary loads configuration and discovers projects. The current surface
+covers discovery (`devclean discovery`), protection via `.devcleanignore`
+(`devclean ignore`), and the safe-to-delete catalog (`devclean safelist`);
+classification, cleaning, and the interactive flow are separate,
+not-yet-implemented features.
 
 ## Build
 
@@ -127,7 +127,7 @@ Defaults:
 
 ### Discovery
 
-`devclean discover` walks each configured `workspace_root` up to `max_depth`
+`devclean discovery` walks each configured `workspace_root` up to `max_depth`
 and reports every folder that contains one of the configured `project_markers`
 (.git, package.json, Cargo.toml, go.mod, pyproject.toml, pom.xml,
 build.gradle, *.csproj, or any user-supplied additions). Each discovered
@@ -135,8 +135,8 @@ path is absolute. See `src/discovery.rs` for the nesting rule (every marker
 is a candidate project; nested projects within max_depth are all reported).
 
 ```
-devclean discover              # prints detected projects for workspace roots
-devclean discover --json       # machine-readable output
+devclean discovery                        # uses workspace_roots from config
+devclean --workspace ~/code discovery     # override the roots from the CLI
 ```
 
 ### CLI flags (override config)
@@ -147,6 +147,7 @@ Flags are top-level and must be given *before* the subcommand:
 devclean [FLAGS] list            # print the resolved config
 devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
 devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
+devclean [FLAGS] discovery       # see "Discovery" above
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)

@@ -236,6 +236,7 @@ fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>>
 /// separate issues.
 fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
+    let cfg = cfg.apply_overrides(&cli_overrides(cli));
 
     let projects = discovery::discover(&cfg)?;
     if projects.is_empty() {
