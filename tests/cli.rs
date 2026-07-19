@@ -26,9 +26,15 @@ const BANNER: &str = "devclean - development environment cleanup CLI (scaffold)"
 /// Each subcommand is optional — the default run executes the clean flow
 /// without a subcommand. This test confirms no-args triggers the clean flow
 /// (which, with no config, prints "clean: no projects found" and exits 0).
+/// `HOME`/`XDG_CONFIG_HOME` are overridden so the run never picks up the
+/// developer's real config (whose workspace roots would yield projects).
 #[test]
 fn no_args_runs_the_default_clean_flow() {
-    let out = devclean().output().unwrap();
+    let out = devclean()
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     // With no workspace roots configured and no --config, discovery yields
@@ -111,9 +117,11 @@ fn explicit_missing_config_is_an_error() {
 }
 
 #[test]
-fn force_and_dry_run_each_conflicts_with_each_other() {
-    // Each flag is `conflicts_with` each other at the clap layer — only one
-    // may be passed per invocation. The test confirms the clap error.
+fn force_and_dry_run_combine_as_force_preview() {
+    // `--force --dry-run` is a valid combination (the #8 invariant): it
+    // previews the force run. This test only confirms clap accepts both
+    // flags together; the preview semantics are covered by
+    // `clean_force_dry_run_auto_approves_each_item` in tests/clean_cli.rs.
     let each_dir = std::env::temp_dir().join("devclean-cli-test-each");
     std::fs::create_dir_all(&each_dir).unwrap();
     let toml = &format!(
@@ -127,12 +135,11 @@ fn force_and_dry_run_each_conflicts_with_each_other() {
         .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
         .output()
         .unwrap();
-    // Clap error: each flag conflicts_with each other.
-    assert!(!out.status.success(), "each flag should conflict: stderr: {}", String::from_utf8_lossy(&out.stderr));
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_file(&cfg);
     assert!(
-        stderr.contains("cannot be used with") || stderr.contains("conflicts_with") || stderr.contains("unexpected argument"),
-        "stderr should show clap conflict: {stderr:?}"
+        out.status.success(),
+        "the flags must combine: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 

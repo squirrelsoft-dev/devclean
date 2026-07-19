@@ -3,14 +3,15 @@
 //! Owns everything about how each line of output reads — labels, ranks,
 //! color coding per status, the cleanable indicator, and the TTY-vs-piped
 //! color gate. Colors appear only when stdout is a TTY; piped or redirected
-//! stdout gets plain text.
+//! stdout gets plain text, and setting `NO_COLOR` (any value) or
+//! `CLICOLOR=0` disables color even on a TTY.
 //!
-//! Each formatted row follows the shape `[rank] path — label (reason)`.
-//! The label is color-coded per status so the most-needs-attention rows
-//! stand out (dirty statuses in warm tones, cleanable/clean in cool tones).
-//! The cleanable indicator (" (cleanable)") is appended for each status-5
-//! row so the reader can immediately tell which projects are subjects of
-//! the cleaning flow.
+//! Each formatted row follows the shape `[rank] path — label (reason)`,
+//! with the reason omitted when it would merely repeat the label
+//! (cleanable/clean rows). The label is color-coded per status so the
+//! most-needs-attention rows stand out (dirty statuses in warm tones,
+//! cleanable/clean in cool tones); the bold-green label is the cleanable
+//! indicator, marking which projects are subjects of the cleaning flow.
 //!
 //! The `emit_colors` flag lets the formatting functions be unit-tested
 //! without needing a real TTY — tests pass `Some(true)` to capture color
@@ -21,6 +22,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 use crate::classify::Status;
+use crate::interactive::status_reason;
 
 /// Whether stdout is a TTY. Used as the runtime gate for color emission:
 /// if stdout is a TTY, each formatted line is colored; otherwise plain.
@@ -28,13 +30,27 @@ pub fn is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
+/// Runtime color gate: colored only on a TTY, and only when neither
+/// `NO_COLOR` (any value, per the no-color.org convention) nor `CLICOLOR=0`
+/// asks for plain output.
+fn color_enabled() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var_os("CLICOLOR").is_some_and(|v| v == "0") {
+        return false;
+    }
+    is_tty()
+}
+
 /// Color `text` with `style`, gated by `emit_colors`.
 ///
-/// When `emit_colors` is `None`, uses `is_tty()` (the runtime gate).
-/// When `Some(false)` or `Some(true)` uses that directly — the way unit
-/// tests verify color behavior without needing a real TTY.
+/// When `emit_colors` is `None`, uses the runtime gate (TTY plus the
+/// `NO_COLOR`/`CLICOLOR` conventions). When `Some(false)` or `Some(true)`
+/// uses that directly — the way unit tests verify color behavior without
+/// needing a real TTY.
 pub fn color(text: &str, style: OwoStyle, emit_colors: Option<bool>) -> String {
-    let emit = emit_colors.unwrap_or_else(|| is_tty());
+    let emit = emit_colors.unwrap_or_else(color_enabled);
     if emit {
         format!("{}", text.style(style))
     } else {
@@ -43,13 +59,13 @@ pub fn color(text: &str, style: OwoStyle, emit_colors: Option<bool>) -> String {
 }
 
 /// Format one row of the sorted project listing:
-/// `[rank] <path> — <label> (<reason>)`.
+/// `[rank] <path> — <label> (<reason>)`, with the reason omitted when it
+/// would merely repeat the label (cleanable/clean rows).
 ///
 /// The label is color-coded per status (warm for dirty, cool for clean) so
-/// the most-needs-attention rows stand out at a glance.
-///
-/// Each cleanable row gets a trailing `(cleanable)` indicator so the reader
-/// can tell which projects are subjects of the interactive clean flow.
+/// the most-needs-attention rows stand out at a glance; the bold-green
+/// label is the cleanable indicator, marking which projects are subjects
+/// of the interactive clean flow.
 ///
 /// The path is printed as-is (no styling, no escaping) — path strings don't
 /// gain a semantic meaning that colors should attach.
@@ -57,22 +73,16 @@ pub fn format_project_row(path: &Path, status: Status, emit_colors: Option<bool>
     let label_style = status_style(status);
     let label = color(status.label(), label_style, emit_colors);
     let reason = status_reason(status);
-    let mut row = format!(
-        "  [{}] {} — {} ({})",
-        status.rank(),
-        path.display(),
-        label,
-        reason,
-    );
-    if status == Status::Cleanable {
-        row.push_str(" (cleanable)");
+    let mut row = format!("  [{}] {} — {}", status.rank(), path.display(), label);
+    if reason != status.label() {
+        row.push_str(&format!(" ({reason})"));
     }
     row
 }
 
 /// Format a summary line for the sorted listing: "listing: N projects, sorted by status".
 ///
-/// Plain text — no color needed for the summary header.
+/// Bold when colors are emitted, plain otherwise.
 pub fn format_summary(count: usize, emit_colors: Option<bool>) -> String {
     let header = format!(
         "listing: {} project(s), sorted by status",
@@ -84,20 +94,6 @@ pub fn format_summary(count: usize, emit_colors: Option<bool>) -> String {
 // ---------------------------------------------------------------------------
 // Private helpers — keep them as-is so the formatter stays color-agnostic.
 // ---------------------------------------------------------------------------
-
-/// Human-readable reason string for each status. Plain text — owned by the
-/// formatter rather than the `Status` type, so the classifying module
-/// stays color-agnostic.
-fn status_reason(status: Status) -> &'static str {
-    match status {
-        Status::NoGit => "not git-initialized",
-        Status::NoRemote => "no remote configured",
-        Status::Unpushed => "has unpushed commits",
-        Status::Wip => "uncommitted work in progress",
-        Status::Cleanable => "cleanable",
-        Status::Clean => "clean",
-    }
-}
 
 /// Style for each status label, color-coded per status.
 ///
@@ -132,25 +128,32 @@ mod tests {
         Some(false)
     }
 
-    /// Each formatted row contains the project path, status label, and reason.
+    /// Each formatted row contains the project path and status label.
     #[test]
     fn project_row_contains_every_field() {
         let row = format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_false());
         assert!(row.contains("/tmp/project"), "row: {row}");
         assert!(row.contains("cleanable"), "row: {row}");
-        assert!(row.contains("cleanable"), "reason: {row}");
     }
 
-    /// Each cleanable row gets the cleanable indicator.
+    /// The status word appears exactly once per row: the cleanable and clean
+    /// reasons merely repeat the label, so they are suppressed — the color
+    /// (bold green) is the cleanable indicator, not a repeated word.
     #[test]
-    fn cleanable_row_has_indicator() {
-        let row = format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_false());
-        assert!(row.contains("(cleanable)"), "row: {row}");
+    fn label_repeating_reason_is_suppressed() {
+        let cleanable =
+            format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_false());
+        assert_eq!(cleanable.matches("cleanable").count(), 1, "row: {cleanable}");
+        assert!(!cleanable.contains("(cleanable)"), "row: {cleanable}");
+
+        let clean = format_project_row(Path::new("/tmp/project"), Status::Clean, emit_false());
+        assert_eq!(clean.matches("clean").count(), 1, "row: {clean}");
+        assert!(!clean.contains("(clean)"), "row: {clean}");
     }
 
-    /// Non-cleanable rows are formatted with their reason, not the indicator.
+    /// Non-cleanable rows are formatted with their reason.
     #[test]
-    fn non_cleanable_row_has_reason_not_indicator() {
+    fn non_cleanable_row_has_reason() {
         let row = format_project_row(Path::new("/tmp/project"), Status::NoGit, emit_false());
         assert!(row.contains("not git-initialized"), "row: {row}");
         assert!(!row.contains("(cleanable)"), "row: {row}");

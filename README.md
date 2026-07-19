@@ -52,20 +52,20 @@ Each flag is top-level and must be given *before* the subcommand:
 
 ```sh
 devclean [FLAGS] list              # list projects + statuses
-    devclean [FLAGS] clean          # interactive clean flow (destructive)
-    devclean [FLAGS] config         # print the resolved config
+devclean [FLAGS] clean             # interactive clean flow (destructive)
+devclean [FLAGS] config            # print the resolved config
 
-  --workspace <path>              # append a workspace root (repeatable)
-  --config <path>                 # alternate config file (must exist)
-  --force                         # skip each prompt, auto-approve each surfaced item (destructive)
-  --dry-run                       # show each item's fate, delete nothing
-  --verbose                       # verbose output
-  --version                       # print the crate version
+  --workspace <path>               # append a workspace root (repeatable)
+  --config <path>                  # alternate config file (must exist)
+  --force                          # skip each prompt, auto-approve each surfaced item (destructive)
+  --dry-run                        # show each item's fate, delete nothing
+  --verbose                        # verbose output
+  --version                        # print the crate version
 ```
 
-`--force` and `--dry-run` each `conflicts_with` each other at the clap
-layer — only one may be passed per invocation. Runtime precedence lives in
-one place each: `dry_run` alone gates execution, `force` alone gates
+`--force` and `--dry-run` may be combined: `--force --dry-run` previews the
+force run without deleting. Runtime precedence lives in one place each:
+`dry_run` alone gates execution, `force` alone gates
 prompting/auto-approval.
 
 For each cleanable project, `devclean clean` enumerates untracked items,
@@ -80,6 +80,7 @@ $ devclean list                  # read-only project listing
 $ devclean clean                 # destructive interactive flow
 $ devclean --force clean         # DESTRUCTIVE: each prompt skipped
 $ devclean --dry-run clean       # preview only; each item printed
+$ devclean --force --dry-run clean  # preview of the force run; deletes nothing
 $ devclean --verbose clean       # verbose output
 $ devclean --version             # crate version (devclean 0.1.0)
 ```
@@ -88,25 +89,14 @@ See `src/main.rs` for the CLI surface and `src/output.rs` for the
 formatting; `src/clean.rs` for the deletion engine and
 `src/interactive.rs` for the approval state machine.
 
-## Build
+### Colors
 
-```sh
-cargo build
-```
-
-## Run
-
-```sh
-cargo run -- --version
-cargo run -- list
-cargo run -- clean
-```
-
-## Test
-
-```sh
-cargo test
-```
+Output is colored when stdout is a TTY and plain when piped or redirected.
+Setting the `NO_COLOR` environment variable (to any value) or `CLICOLOR=0`
+disables color even on a TTY. Known limitation: devclean emits standard ANSI
+escapes and does not enable virtual-terminal processing on legacy Windows
+conhost (plain `cmd.exe`), where colored output may render as escape
+sequences — modern Windows Terminal, macOS, and Linux terminals are fine.
 
 ## `.devcleanignore`
 
@@ -193,20 +183,22 @@ would be deleted *before* asking anything, prompting per surfaced item
 approved items. Answering "n" (or EOF) to the first prompt exits without
 touching anything.
 
-Flags (each `conflicts_with` each other at the clap layer — only one
-per invocation):
+Flags:
 
 - `--force` — **destructive**: skip every prompt and clean all cleanable
   projects, auto-approving every surfaced item.
 - `--dry-run` — non-destructive preview: print each item's fate and
   delete nothing. Safe items are shown as `would delete`; surfaced items as
-  `would prompt` (a real interactive run asks about them).
+  `would prompt` (a real interactive run asks about them). Combined with
+  `--force` it previews the force run: every non-protected item is shown as
+  `would delete`, and still nothing is deleted.
 - `--verbose` — verbose output (extra diagnostic lines).
 
 ```sh
 $ devclean clean                    # interactive: report, approve, then delete
 $ devclean --dry-run clean          # preview only; deletes nothing
 $ devclean --force clean            # DESTRUCTIVE: each prompt skipped
+$ devclean --force --dry-run clean  # preview of the force run; deletes nothing
 $ devclean --verbose clean          # verbose output
 ```
 
@@ -334,25 +326,25 @@ Defaults:
 Each flag is top-level and must be given *before* the subcommand:
 
 ```sh
-devclean [FLAGS] list            # read-only: each project's git status
-    devclean [FLAGS] config       # print the resolved config (preserved)
-    devclean [FLAGS] clean        # destructive: interactive flow, each prompt
-    devclean [FLAGS] discovery    # each project with markers
-    devclean [FLAGS] classification # each project classified, sorted
-    devclean [FLAGS] ignore <path> # see `.devcleanignore` above
-    devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
+devclean [FLAGS] list              # read-only: each project's git status
+devclean [FLAGS] config            # print the resolved config (preserved)
+devclean [FLAGS] clean             # destructive: interactive flow, each prompt
+devclean [FLAGS] discovery         # each project with markers
+devclean [FLAGS] classification    # each project classified, sorted
+devclean [FLAGS] ignore <path>     # see `.devcleanignore` above
+devclean [FLAGS] safelist <path>   # see "Safe-to-delete catalog" above
 
-  --workspace <path>             # append a workspace root (repeatable)
-  --config <path>                # alternate config file (must exist)
-  --force                        # each prompt skipped, each surfaced item auto-approved (destructive)
-  --dry-run                      # each item's fate printed, nothing deleted
-  --verbose                      # verbose output
-  --version                      # crate version (each build)
+  --workspace <path>               # append a workspace root (repeatable)
+  --config <path>                  # alternate config file (must exist)
+  --force                          # each prompt skipped, each surfaced item auto-approved (destructive)
+  --dry-run                        # each item's fate printed, nothing deleted
+  --verbose                        # verbose output
+  --version                        # crate version (each build)
 ```
 
-Each of `--force` and `--dry-run` is `conflicts_with` each other at the clap
-layer — only one may be passed per invocation. Runtime precedence lives in
-one place each: `dry_run` alone gates execution, `force` alone gates
+`--force` and `--dry-run` may be combined: `--force --dry-run` previews the
+force run without deleting. Runtime precedence lives in one place each:
+`dry_run` alone gates execution, `force` alone gates
 prompting/auto-approval.
 
 For example:

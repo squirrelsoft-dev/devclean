@@ -32,13 +32,13 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Force mode: skip all prompts, auto-approve each surfaced item.
-    /// Destructive: deletes on approval.
-    #[arg(long, conflicts_with = "dry_run")]
+    /// Destructive: deletes on approval. Combined with --dry-run it
+    /// previews the force run without deleting.
+    #[arg(long)]
     force: bool,
 
     /// Dry-run: show what would be deleted without deleting.
-    /// Conflicts with --force at the clap layer — use one or the other.
-    #[arg(long, conflicts_with = "force")]
+    #[arg(long)]
     dry_run: bool,
 
     /// Verbose output.
@@ -234,9 +234,8 @@ fn run_config(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// by severity (most-needs-attention first). Read-only — no cleaning.
 ///
 /// Each row uses the formatted shape `[rank] path — label (reason)` with
-/// color coding per status. Each cleanable row gets a trailing `(cleanable)`
-/// indicator so the reader can tell which projects are subjects of the
-/// interactive clean flow.
+/// color coding per status. Cleanable rows carry a bold-green label so the
+/// reader can tell which projects are subjects of the interactive clean flow.
 fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));
@@ -266,8 +265,8 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     rows.sort_by_key(|&(_, status)| status);
 
-    // Gated on TTY — plain when piped, colored on a TTY. The color crate is
-    // already in Cargo.toml; `output::color_runtime` delegates to it.
+    // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
+    // lets `output::color` fall back to its runtime gate.
     println!(
         "{}",
         output::format_summary(rows.len(), None)
@@ -384,14 +383,6 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `devclean clean`: the interactive cleaning flow (issue #8).
-///
-/// Sorts every discovered project by status, reports each non-cleanable one
-/// with a one-line reason, and lists each cleanable one. For each cleanable
-/// project, enumerates untracked items, prompts about each `Surfaced` item,
-/// prompts about the project itself, then executes `git clean` if approved.
-/// `--force` skips every prompt and auto-approves each surfaced item. `--dry-run`
-/// shows what would be deleted, deletes nothing, skips prompts.
 /// `devclean clean` (and the default run with no subcommand): the interactive
 /// cleaning flow (issue #8). Sorts every discovered project by status, reports
 /// each non-cleanable one with a one-line reason, and lists each cleanable one.
@@ -400,7 +391,7 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// `Surfaced` item, prompts about the project itself, then executes `git
 /// clean` if approved. `--force` skips every prompt and auto-approves each
 /// surfaced item; `--dry-run` shows what would be deleted, deletes nothing,
-/// skips prompts.
+/// skips prompts; `--force --dry-run` previews the force run.
 ///
 /// Destructive: `devclean clean` deletes files on approval or under `--force`.
 /// Only one subcommand runs the deletion; the default run runs it too.
