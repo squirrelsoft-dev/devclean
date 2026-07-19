@@ -247,8 +247,10 @@ whether a given path is in it. The catalog is:
 
 - **Built-in defaults** — compiled into `src/safelist.rs` as `BUILT_IN_DEFAULTS` (a non-exhaustive list of common build/cache dirs/files: `node_modules`, `target`, `.next`, `.turbo`, `dist`, `build`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.gradle`, `bin/obj`, `out`, `coverage`, `.nuxt`, `.svelte-kit`, `.cache`, `.parcel-cache`).
 - **Extension via `Config::safe_delete`** — user-supplied gitignore-style globs are appended (not replaced) to the built-in set. Patterns behave like gitignore globs anchored at the project root: each matches the named dir at any depth (e.g. `**/node_modules`), and matching a directory covers everything beneath it via the `ignore` crate's parent-match semantics.
-- **Intended consumer** — the cleaning engine, which removes matched paths
-  without asking for approval. See "Cleaning" above.
+- **Intended consumers** — the cleaning engine, which removes matched paths
+  without asking for approval (see "Cleaning" above), and the discovery walk,
+  which derives its descent-prune set from the same catalog (see "Discovery"
+  below).
 - **Observable hook** — `devclean safelist <path>` is the minimal diagnostic
   for the catalog.
 

@@ -289,13 +289,13 @@ fn artifact_fixture(label: &str) -> PathBuf {
     std::fs::create_dir_all(ws.join("myproject/.git")).unwrap();
     std::process::Command::new("git")
         .arg("-C")
-        .arg(&ws.join("myproject"))
+        .arg(ws.join("myproject"))
         .arg("init")
         .status()
         .unwrap();
     std::process::Command::new("git")
         .arg("-C")
-        .arg(&ws.join("myproject"))
+        .arg(ws.join("myproject"))
         .arg("config")
         .arg("user.email")
         .arg("test@test.dev")
@@ -303,7 +303,7 @@ fn artifact_fixture(label: &str) -> PathBuf {
         .unwrap();
     std::process::Command::new("git")
         .arg("-C")
-        .arg(&ws.join("myproject"))
+        .arg(ws.join("myproject"))
         .arg("config")
         .arg("user.name")
         .arg("Test")
@@ -312,7 +312,7 @@ fn artifact_fixture(label: &str) -> PathBuf {
     write_file(&ws.join("myproject"), "main.rs", "fn main() {}");
     std::process::Command::new("git")
         .arg("-C")
-        .arg(&ws.join("myproject"))
+        .arg(ws.join("myproject"))
         .arg("add")
         .arg("main.rs")
         .status()

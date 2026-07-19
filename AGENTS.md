@@ -27,6 +27,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - The catalog reuses the `.devcleanignore` gitignore matcher rather than its own glob logic, so pattern semantics are the ignore matcher's semantics. Extend the catalog by editing `BUILT_IN_DEFAULTS` in `src/safelist.rs`, never by adding a second matching path.
 - `safe_delete` in `Config` **extends** (never replaces) the built-in list. This is the contract users rely on; the regression test is `config_addition_is_recognized_as_safe` in `src/safelist.rs`.
+- The catalog is also discovery's single source of truth for artifact-directory descent pruning (`discovery::build_prune_set` — single-segment `**/<name>` or bare-name entries only); never add a second hardcoded artifact list. Semantics owner: `src/discovery.rs` module docs.
 - Owners: `README.md` for the user-facing catalog and the `devclean safelist` helper; `src/safelist.rs` module docs and rustdoc for matching semantics and constructor contracts. Unit tests live in `src/safelist.rs`, CLI-level tests in `tests/safelist_cli.rs`.
 
 ## Ignore matcher

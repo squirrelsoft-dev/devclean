@@ -41,7 +41,9 @@ const PROJECT_ROOT_EMPTY: &str = "";
 /// Non-exhaustive by design — users extend the list via `Config::safe_delete`
 /// (see module docs for semantics). Adding or trimming entries here is fine,
 /// but remember each one must be a gitignore glob that behaves correctly with
-/// the `ignore` crate's `matched_path_or_any_parents` matcher.
+/// the `ignore` crate's `matched_path_or_any_parents` matcher. Discovery also
+/// derives its descent-prune set from this catalog — single-segment `**/<name>`
+/// entries are not walked at all (see `discovery::build_prune_set`).
 pub const BUILT_IN_DEFAULTS: &[&str] = &[
     "**/node_modules",
     "**/target",
