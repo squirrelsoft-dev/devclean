@@ -266,8 +266,15 @@ fn has_ancestor_git(dir: &Path, root: &Path) -> bool {
 /// For each marker kind:
 /// - Literal: compare the basename string.
 /// - Glob: compile once per call site, not per file (the MarkerSet caches).
+///
+/// `.git` wins over every other marker when a folder contains both: the
+/// nesting rule (issue #15) keys on whether the matched marker is `.git`, so
+/// the choice must not depend on `read_dir`'s platform-specific entry order —
+/// a nested git repo that also carries e.g. a `package.json` is still a
+/// separate project.
 fn find_marker_in<'a>(dir: &Path, markers: &'a MarkerSet) -> Option<&'a str> {
     let read = fs::read_dir(dir).ok()?;
+    let mut first: Option<&'a str> = None;
     for entry in read {
         let entry = match entry {
             Ok(e) => e,
@@ -276,10 +283,15 @@ fn find_marker_in<'a>(dir: &Path, markers: &'a MarkerSet) -> Option<&'a str> {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if let Some(m) = markers.matches(name_str.as_ref()) {
-            return Some(m);
+            if m == ".git" {
+                return Some(m);
+            }
+            if first.is_none() {
+                first = Some(m);
+            }
         }
     }
-    None
+    first
 }
 
 #[cfg(test)]
@@ -493,6 +505,27 @@ mod tests {
         let names: Vec<_> = results.iter().map(|r| r.marker.as_str()).collect();
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], ".git");
+    }
+
+    #[test]
+    fn nested_git_with_other_marker_still_separate_project() {
+        // A nested repo that carries BOTH `.git` and another marker (e.g. a
+        // vendored JS repo with a package.json) must still be reported as a
+        // separate project, regardless of which marker read_dir yields first.
+        let root = tmp_root("nested_git_dual");
+        mkfixture(&root, ".git", "root repo");
+        let sub = root.join("vendored");
+        fs::create_dir_all(&sub).unwrap();
+        mkfixture(&sub, "package.json", "{}");
+        mkfixture(&sub, ".git", "nested repo");
+        let cfg = mkconfig(&root, &["package.json", ".git"], 2);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 2);
+        let nested = results
+            .iter()
+            .find(|r| r.path == sub)
+            .expect("nested repo must be reported");
+        assert_eq!(nested.marker, ".git");
     }
 
     #[test]
