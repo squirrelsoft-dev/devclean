@@ -72,6 +72,10 @@ fn git_in(root: &Path, args: &[&str]) {
 /// and an initial tracked file. Returns nothing; callers build on top.
 fn init_repo_with_commit(root: &Path) {
     git_in(root, &["init"]);
+    // Pin the branch name so the fixture does not depend on the ambient
+    // `init.defaultBranch`; `add_pushed_remote` assumes `main`. `symbolic-ref`
+    // works on every git version, unlike `init -b`.
+    git_in(root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     git_in(root, &["config", "user.email", "test@test.dev"]);
     git_in(root, &["config", "user.name", "Test"]);
     std::fs::write(root.join("initial.txt"), "initial").unwrap();

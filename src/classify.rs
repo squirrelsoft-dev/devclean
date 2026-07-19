@@ -135,14 +135,23 @@ fn status_no_git(project_path: &Path) -> bool {
 /// Status 2: git repo with no remote configured.
 ///
 /// Runs `git remote -v`. An empty output means no remotes are configured. A
-/// failed exit code means the project is not a git repo (already caught by
-/// status 1, but callers can invoke this branch defensively for any project
-/// that has a `.git` directory — including submodules or subtrees).
+/// failed exit code means git could not read the repo at all — the project is
+/// not a git repo (already caught by status 1, but callers can invoke this
+/// branch defensively), git is missing from `PATH`, or the repo is unreadable.
+/// That case still reports `no-remote`, which is fail-safe because `no-remote`
+/// is never cleanable, but it warns on stderr so the operator can tell a
+/// genuinely remote-less repo apart from a git that never ran.
 fn status_no_remote(project_path: &Path) -> bool {
     let output = git_cmd(project_path, &["remote", "-v"]);
     match output {
-        Ok(out) => out.stdout.trim().is_empty(),
-        Err(_) => true, // not a git repo — treat as no-remote for classification purposes
+        Ok(out) => out.trim().is_empty(),
+        Err(e) => {
+            eprintln!(
+                "warning: {}: could not read remotes, reporting as no-remote: {e}",
+                project_path.display()
+            );
+            true
+        }
     }
 }
 
@@ -167,12 +176,10 @@ fn status_unpushed(project_path: &Path) -> bool {
         return false;
     }
 
-    // Try to find the current branch. If HEAD is detached, we still need to
-    // know whether there are local commits sitting anywhere.
-    let _head_ref = git_cmd(project_path, &["rev-parse", "--abbrev-ref", "HEAD"]);
-
     // Try to find the upstream tracking branch. If `@{u}` fails, there is no
-    // upstream; that alone qualifies as unpushed when local commits exist.
+    // upstream; that alone qualifies as unpushed when local commits exist. A
+    // detached HEAD has no upstream, so it falls out of this branch as
+    // unpushed without needing a separate check.
     let upstream = git_cmd(project_path, &["rev-parse", "@{u}"]);
     let upstream_exists = upstream.is_ok();
 
@@ -189,7 +196,7 @@ fn status_unpushed(project_path: &Path) -> bool {
         let unpushed = git_cmd(project_path, &["rev-list", "@{u}..HEAD", "--"]);
         // `rev-list` returns 0 even when the range is empty; we check stdout.
         match unpushed {
-            Ok(out) => !out.stdout.trim().is_empty(),
+            Ok(out) => !out.trim().is_empty(),
             Err(_) => true, // error reading = unpushed (nothing pushed)
         }
     } else {
@@ -214,7 +221,7 @@ fn status_wip(project_path: &Path) -> bool {
     let output = git_cmd(project_path, &["status", "--porcelain"]);
     match output {
         Ok(out) => {
-            for line in out.stdout.lines() {
+            for line in out.lines() {
                 // Porcelain status columns are always two characters, like
                 // ` M`, ` M`, `MM`, `??`, ` D`, `A `, etc. Untracked lines
                 // are `??` only; everything else is a tracked-file change.
@@ -246,21 +253,50 @@ fn status_wip(project_path: &Path) -> bool {
 /// - If ANY untracked path is **not** devcleanignored → Cleanable.
 /// - If ALL untracked paths are devcleanignored (or there are none) → Clean.
 ///
+/// Three `ls-files` flags are load-bearing and must stay:
+///
+/// - `-z` emits NUL-separated raw paths. Without it git quotes and C-escapes
+///   any path with non-ASCII or special characters (`café.txt` arrives as
+///   `"caf\303\251.txt"`), which matches no devcleanignore pattern, and a path
+///   containing a newline splits into several bogus entries. Either one
+///   silently reports a protected path as cleanable.
+/// - `--directory` collapses a wholly-untracked directory to one entry
+///   (`node_modules/`) instead of recursing into every file beneath it. The
+///   common `Clean` case — everything devcleanignored — is exactly the worst
+///   case for the recursive form, since no entry short-circuits the loop.
+/// - `--no-empty-directory` keeps `--directory` from newly surfacing empty
+///   untracked directories, which the recursive form never reported at all.
+///
+/// The trailing `/` that `--directory` puts on directory entries tells us the
+/// entry's kind, so we call `is_ignored_path` directly and skip the stat that
+/// `is_ignored` would do per entry.
+///
 /// Precedence: this branch is only reached after status 1..4 all fail, so the
 /// repo is already committed+pushed and has no uncommitted tracked changes.
 fn status_cleanable(project_path: &Path, ignore_set: &IgnoreSet) -> bool {
-    let output = git_cmd(project_path, &["ls-files", "--others"]);
-    let untracked_lines = match output {
-        Ok(out) => out.stdout,
+    let output = git_cmd(
+        project_path,
+        &[
+            "ls-files",
+            "--others",
+            "--directory",
+            "--no-empty-directory",
+            "-z",
+        ],
+    );
+    let untracked = match output {
+        Ok(out) => out,
         Err(_) => return false, // not a git repo (covered by status 1)
     };
 
     let mut has_non_ignored = false;
-    for line in untracked_lines.lines() {
-        let rel = Path::new(line);
-        // Each line from `ls-files --others` is a path relative to the project
-        // root. Test it against the ignore set (not the project .gitignore).
-        if !ignore_set.is_ignored(rel) {
+    for entry in untracked.split('\0').filter(|e| !e.is_empty()) {
+        // Each entry is a path relative to the project root, directories
+        // carrying a trailing `/`. Test it against the ignore set (not the
+        // project .gitignore).
+        let is_dir = entry.ends_with('/');
+        let rel = Path::new(entry.trim_end_matches('/'));
+        if !ignore_set.is_ignored_path(rel, is_dir) {
             has_non_ignored = true;
             break;
         }
@@ -275,10 +311,11 @@ fn is_git_repo(project_path: &Path) -> bool {
     git_cmd(project_path, &["rev-parse", "--git-dir"]).is_ok()
 }
 
-/// Run a git command against `project_path` and return the parsed output, or
-/// `Err` on non-zero exit. We always pass `-C` to lock the command at the
-/// project root so the result is independent of the process's cwd.
-fn git_cmd(project_path: &Path, args: &[&str]) -> Result<GitOutput, String> {
+/// Run a git command against `project_path` and return its stdout, or `Err`
+/// carrying the formatted stderr on non-zero exit. We always pass `-C` to lock
+/// the command at the project root so the result is independent of the
+/// process's cwd.
+fn git_cmd(project_path: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(project_path);
     for a in args {
@@ -290,10 +327,7 @@ fn git_cmd(project_path: &Path, args: &[&str]) -> Result<GitOutput, String> {
         .map_err(|e| format!("git command failed: {e}"))?;
 
     if out.status.success() {
-        Ok(GitOutput {
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(format!(
             "git command failed (exit {}): {} — {}",
@@ -302,16 +336,6 @@ fn git_cmd(project_path: &Path, args: &[&str]) -> Result<GitOutput, String> {
             String::from_utf8_lossy(&out.stderr)
         ))
     }
-}
-
-/// Parsed output from a git command — we keep the two text buffers separately
-/// so callers can inspect each without re-parsing.
-#[derive(Debug)]
-pub struct GitOutput {
-    #[allow(dead_code)]
-    pub stdout: String,
-    #[allow(dead_code)]
-    pub stderr: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +371,10 @@ mod tests {
         // Initialize a git repo, set the global user for the test, commit an
         // initial file so we have at least one ref.
         git_run(&root, &["init"]);
+        // Pin the branch name so the fixture does not depend on the ambient
+        // `init.defaultBranch`; every `push origin main` below assumes `main`.
+        // `symbolic-ref` works on every git version, unlike `init -b`.
+        git_run(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git_run(&root, &["config", "user.email", "test@test.dev"]);
         git_run(&root, &["config", "user.name", "Test"]);
         fs::write(root.join("initial.txt"), "initial contents").unwrap();
@@ -377,11 +405,12 @@ mod tests {
             cmd.arg(a);
         }
         let status = cmd.status().unwrap();
-        if !status.success() {
-            // Swallow non-fatal failures — this is a fixture builder, not
-            // the classifier itself. Fatal failures (init, config) are
-            // recorded; the test asserts the expected state.
-        }
+        assert!(
+            status.success(),
+            "fixture setup failed: git -C {} {:?}",
+            root.display(),
+            args
+        );
     }
 
     fn write_file(dir: &Path, name: &str, contents: &str) {
@@ -520,6 +549,48 @@ mod tests {
         let ignore_set = IgnoreSet::empty(); // nothing devcleanignored
         let status = classify(&root, &ignore_set);
         assert_eq!(status, Status::Cleanable);
+    }
+
+    #[test]
+    fn clean_when_ignored_untracked_path_is_non_ascii() {
+        // `ls-files --others` without `-z` quotes and C-escapes a non-ASCII
+        // path (`café.txt` → `"caf\303\251.txt"`), which matches no
+        // devcleanignore pattern and wrongly reports a protected file as
+        // Cleanable. With `-z` the raw path reaches the matcher.
+        let root = fixture("non_ascii");
+        fixture_with_remote(&root);
+        write_file(&root, "café.txt", "protected");
+        let ignore_set =
+            IgnoreSet::from_layers(&root, &[(&PathBuf::new(), &["café.txt"])]).unwrap();
+        let status = classify(&root, &ignore_set);
+        assert_eq!(status, Status::Clean);
+    }
+
+    #[test]
+    fn clean_when_ignored_untracked_directory_has_contents() {
+        // `--directory` collapses a wholly-untracked directory to a single
+        // `node_modules/` entry, so the pattern must still match it as a
+        // directory rather than as each file beneath it.
+        let root = fixture("ignored_dir");
+        fixture_with_remote(&root);
+        write_file(&root, "node_modules/pkg/index.js", "junk");
+        let ignore_set =
+            IgnoreSet::from_layers(&root, &[(&PathBuf::new(), &["node_modules/"])]).unwrap();
+        let status = classify(&root, &ignore_set);
+        assert_eq!(status, Status::Clean);
+    }
+
+    #[test]
+    fn clean_when_only_untracked_directory_is_empty() {
+        // `--directory` alone would newly surface an empty untracked directory
+        // that the recursive form never reported; `--no-empty-directory` keeps
+        // an empty dir from flipping a clean repo to Cleanable.
+        let root = fixture("empty_dir");
+        fixture_with_remote(&root);
+        fs::create_dir_all(root.join("scratch")).unwrap();
+        let ignore_set = IgnoreSet::empty();
+        let status = classify(&root, &ignore_set);
+        assert_eq!(status, Status::Clean);
     }
 
     #[test]

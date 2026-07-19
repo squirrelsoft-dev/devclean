@@ -275,21 +275,36 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Collect each project's status, then sort by rank (lowest = most severe).
-    let mut rows: Vec<(usize, String, classify::Status)> = Vec::new();
+    // Collect each project's status, then sort by severity. `Status` derives
+    // `Ord` over variants declared most-severe-first, so it sorts directly.
+    let mut rows: Vec<(String, classify::Status)> = Vec::new();
     for d in &projects {
-        let ignore_set = ignore::IgnoreSet::load(&d.path)?;
+        // Classification is a read-only survey over independent projects, so
+        // one project with an unreadable `.devcleanignore` must not abort the
+        // whole report. Skip just that project: falling back to an empty set
+        // would treat nothing as protected and could report it `cleanable`,
+        // which is the one verdict the cleaning engine acts destructively on.
+        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
+            Ok(set) => set,
+            Err(e) => {
+                eprintln!(
+                    "warning: {}: skipped, could not load .devcleanignore: {e}",
+                    d.path.display()
+                );
+                continue;
+            }
+        };
         let status = classify::classify(&d.path, &ignore_set);
-        rows.push((status.rank() as usize, d.path.display().to_string(), status));
+        rows.push((d.path.display().to_string(), status));
     }
-    rows.sort_by_key(|&(rank, _, _)| rank);
+    rows.sort_by_key(|&(_, status)| status);
 
     println!(
         "classification: {} project(s), sorted by severity",
         rows.len()
     );
-    for (rank, path, status) in &rows {
-        println!("  [{rank}] {path} -> {}", status.label());
+    for (path, status) in &rows {
+        println!("  [{}] {path} -> {}", status.rank(), status.label());
     }
     Ok(())
 }
