@@ -1,3 +1,4 @@
+mod classify;
 mod config;
 mod discovery;
 mod ignore;
@@ -69,6 +70,10 @@ enum Command {
     /// reported path is tagged with the marker that found it.
     /// Classification/cleaning are separate issues.
     Discovery,
+    /// Classify each discovered project by its git state and print the result
+    /// sorted by status. Status 5 is the only cleanable state; status 1..4
+    /// each signal that cleaning must wait. See issue #6 for the full spec.
+    Classification,
 }
 
 fn main() {
@@ -98,6 +103,12 @@ fn main() {
         }
         Some(Command::Discovery) => {
             if let Err(e) = run_discovery(&cli) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Classification) => {
+            if let Err(e) = run_classification(&cli) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -246,6 +257,39 @@ fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         for p in &projects {
             println!("  {} ({})", p.path.display(), p.marker);
         }
+    }
+    Ok(())
+}
+
+/// `devclean classification`: walk each configured workspace root, classify
+/// each discovered project by its git state, and print each one with its
+/// status label, sorted by severity. Precedence is the lowest-numbered (most-
+/// severe) status; status 5 is cleanable only. See issue #6 for the full spec.
+fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (_config_path, cfg) = load_cli_config(cli)?;
+    let cfg = cfg.apply_overrides(&cli_overrides(cli));
+
+    let projects = discovery::discover(&cfg)?;
+    if projects.is_empty() {
+        println!("classification: no projects found");
+        return Ok(());
+    }
+
+    // Collect each project's status, then sort by rank (lowest = most severe).
+    let mut rows: Vec<(usize, String, classify::Status)> = Vec::new();
+    for d in &projects {
+        let ignore_set = ignore::IgnoreSet::load(&d.path)?;
+        let status = classify::classify(&d.path, &ignore_set);
+        rows.push((status.rank() as usize, d.path.display().to_string(), status));
+    }
+    rows.sort_by_key(|&(rank, _, _)| rank);
+
+    println!(
+        "classification: {} project(s), sorted by severity",
+        rows.len()
+    );
+    for (rank, path, status) in &rows {
+        println!("  [{rank}] {path} -> {}", status.label());
     }
     Ok(())
 }

@@ -39,6 +39,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `devclean ignore` helper; the `src/ignore.rs` module docs and rustdoc for the
   implementation sharp edges and constructor contracts.
 
+## Classification
+
+- `src/classify.rs` shells out to `git` plumbing (`git -C <project> ...`), consistent with the rest of the crate; it deliberately does NOT pull in `git2`. Status precedence is evaluated in order 1→5 (most-severe first); only status 5 (`Cleanable`) is cleanable. The `Clean` state is committed+pushed with NO untracked non-devcleanignored junk.
+- Status 5 vs Clean uses `git ls-files --others` WITHOUT `--exclude-standard`, deliberately: build junk like `node_modules`/`target/` is gitignored by the *project*, but devclean exists to clean it, so gitignored files must stay visible. The devcleanignore matcher (issue #3 `is_ignored`) is the sole judge of whether untracked junk is protected. Owners: `README.md` classification table; `src/classify.rs` module docs; tests in `src/classify.rs` and `tests/classification_cli.rs`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
