@@ -18,9 +18,11 @@
 //! purpose. The module picks terminal width via terminal_size (lightweight,
 //! no ANSI escapes), falling back to the COLUMNS env var, then a default of
 //! 80. Paths are truncated to fit with a leading ellipsis (U+2026) so the
-//! leaf (the dir currently being visited) stays visible on the right. Each
-//! update pads with spaces and CR so a shorter path fully overwrites a longer
-//! previous one (no leftover trailing characters).
+//! leaf (the dir currently being visited) stays visible on the right. Fit is
+//! measured in display columns via unicode-width -- wide chars (CJK, emoji)
+//! occupy two columns each -- never in bytes or chars, or wide paths would
+//! wrap and scroll. Each update pads with spaces and CR so a shorter path
+//! fully overwrites a longer previous one (no leftover trailing characters).
 //!
 //! ## Finish
 //!
