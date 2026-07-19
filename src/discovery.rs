@@ -212,7 +212,7 @@ fn walk_root(
         }
         // Check each direct child file for markers. Only look at *files* —
         // a marker is a file, never a directory (except `.git` which is a
-        // directory on disk but is treated as a file-name marker). 
+        // directory on disk but is treated as a file-name marker).
         if let Some(marker) = find_marker_in(entry.path(), markers) {
             // Suppression is for non-git markers only: a nested `.git` is its
             // own project (issue #15). Anything else is suppressed if it sits
@@ -241,12 +241,8 @@ fn has_ancestor_git(dir: &Path, root: &Path) -> bool {
         return false;
     }
     let mut current = dir.to_path_buf();
-    loop {
-        if let Some(parent) = current.parent() {
-            current = parent.to_path_buf();
-        } else {
-            break;
-        }
+    while let Some(parent) = current.parent() {
+        current = parent.to_path_buf();
         if current.join(".git").exists() {
             return true;
         }

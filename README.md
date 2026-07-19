@@ -156,11 +156,14 @@ reported once, tagged with one of the markers found in it.
 
 Depth is counted from each workspace root: depth 0 is the root itself, depth 1
 a direct child, and so on. The walk never rises above a root, and symlinks are
-not followed. Nested projects are each reported separately — a repo with `.git`
-that contains a subfolder with its own `Cargo.toml` yields two entries, with no
-double-counting of either folder. Reported paths are printed as they were
-walked from the workspace root, so configuring absolute roots (the usual case)
-yields absolute output.
+not followed. Only `.git` boundaries define standalone projects: a nested
+`.git` is reported as a separate project, but a non-git marker (`Cargo.toml`,
+`package.json`, ...) in a subfolder of an ancestor git worktree is part of that
+project, not a new one — a monorepo with a root `.git` and marker-bearing
+package folders yields one entry. A non-git marker at a workspace root is
+always reported; a git repo above the root is never consulted. Reported paths
+are printed as they were walked from the workspace root, so configuring
+absolute roots (the usual case) yields absolute output.
 
 ```
 devclean discovery                        # uses workspace_roots from config
