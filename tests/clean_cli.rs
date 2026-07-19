@@ -327,3 +327,54 @@ fn clean_dry_run_skips_non_cleanable_projects() {
         "non-cleanable project should be skipped silently: {out}"
     );
 }
+
+/// Issue #18: the dry-run report row for a cleanable project carries its
+/// reclaimable size, and the summary line carries the aggregate.
+#[test]
+fn clean_dry_run_shows_per_project_and_aggregate_sizes() {
+    let root = root_for("size-dryrun");
+    init_repo_with_commit(&root);
+    add_pushed_remote(&root);
+    // 4 KB of safe-list junk — big enough for a KB-unit size.
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), vec![0u8; 4096]).unwrap();
+
+    let home = root_for("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+    let out = run(["--dry-run", "--config", config.to_str().unwrap(), "clean"]);
+
+    assert!(
+        out.contains("cleanable (~"),
+        "cleanable row should carry a size: {out}"
+    );
+    assert!(
+        out.contains("reclaimable"),
+        "summary should carry the aggregate reclaimable size: {out}"
+    );
+}
+
+/// Issue #18: `devclean list` shows the same per-project size on each
+/// cleanable row plus the aggregate in the summary line.
+#[test]
+fn list_shows_per_project_and_aggregate_sizes() {
+    let root = root_for("size-list");
+    init_repo_with_commit(&root);
+    add_pushed_remote(&root);
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), vec![0u8; 4096]).unwrap();
+
+    let home = root_for("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+    let out = run(["--config", config.to_str().unwrap(), "list"]);
+
+    assert!(
+        out.contains("reclaimable"),
+        "list summary should carry the aggregate reclaimable size: {out}"
+    );
+    assert!(
+        out.contains("cleanable (~"),
+        "list cleanable row should carry a size: {out}"
+    );
+}

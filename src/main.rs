@@ -358,12 +358,8 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             total_reclaimable_str.as_deref(),
         )
     );
-    for (path, status) in &rows {
-        let size = per_project_size
-            .iter()
-            .find(|s| s.as_ref().map(|ss| ss.contains(path)).unwrap_or(false))
-            .and_then(|s| s.as_ref())
-            .map(|ss| ss.as_str());
+    for (idx, (path, status)) in rows.iter().enumerate() {
+        let size = per_project_size[idx].as_deref();
         println!(
             "{}",
             output::format_project_row(
