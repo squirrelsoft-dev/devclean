@@ -267,6 +267,16 @@ fn status_wip(project_path: &Path) -> bool {
 /// - `--no-empty-directory` keeps `--directory` from newly surfacing empty
 ///   untracked directories, which the recursive form never reported at all.
 ///
+/// `--directory` is a cost optimization **only** where it does not change the
+/// granularity ignore patterns are evaluated at. A collapsed `logs/` entry
+/// hides the files beneath it, so a content-matching pattern like `*.js` would
+/// be tested against `logs` alone, never match, and report a directory of
+/// wholly-protected files as cleanable. So the collapsed entry is only trusted
+/// when the directory itself is ignored — the common `node_modules/` case,
+/// where nothing beneath it can change the verdict. A directory that is *not*
+/// itself ignored is re-listed at file granularity and each file is matched
+/// individually, which is the pattern granularity users write against.
+///
 /// The trailing `/` that `--directory` puts on directory entries tells us the
 /// entry's kind, so we call `is_ignored_path` directly and skip the stat that
 /// `is_ignored` would do per entry.
@@ -289,20 +299,58 @@ fn status_cleanable(project_path: &Path, ignore_set: &IgnoreSet) -> bool {
         Err(_) => return false, // not a git repo (covered by status 1)
     };
 
-    let mut has_non_ignored = false;
+    // Each entry is a path relative to the project root, directories carrying
+    // a trailing `/`. Test it against the ignore set (not the project
+    // .gitignore).
     for entry in untracked.split('\0').filter(|e| !e.is_empty()) {
-        // Each entry is a path relative to the project root, directories
-        // carrying a trailing `/`. Test it against the ignore set (not the
-        // project .gitignore).
-        let is_dir = entry.ends_with('/');
-        let rel = Path::new(entry.trim_end_matches('/'));
-        if !ignore_set.is_ignored_path(rel, is_dir) {
-            has_non_ignored = true;
-            break;
+        match entry.strip_suffix('/') {
+            Some(dir) => {
+                if ignore_set.is_ignored_path(Path::new(dir), true) {
+                    continue;
+                }
+                if dir_holds_non_ignored(project_path, dir, ignore_set) {
+                    return true;
+                }
+            }
+            None => {
+                if !ignore_set.is_ignored_path(Path::new(entry), false) {
+                    return true;
+                }
+            }
         }
     }
 
-    has_non_ignored
+    false
+}
+
+/// Whether an untracked directory holds at least one file that is not
+/// devcleanignored.
+///
+/// Re-lists `dir` without `--directory` so every file beneath it is matched at
+/// the granularity patterns are written against: a `logs/` holding only `*.js`
+/// files is protected even though `*.js` does not match `logs` itself. Only
+/// reached for directories that are not themselves ignored, so the collapsed
+/// fast path still covers the common ignored-build-dir case.
+///
+/// The pathspec is `:(literal)`-prefixed so a directory name containing glob
+/// metacharacters (`w[t]d`) is matched as the literal name, not as a pattern.
+/// A listing failure reports "no non-ignored files", matching the fail-safe
+/// `Err` handling in [`status_cleanable`]: never invent a cleanable verdict.
+fn dir_holds_non_ignored(project_path: &Path, dir: &str, ignore_set: &IgnoreSet) -> bool {
+    let pathspec = format!(":(literal){dir}");
+    let output = git_cmd(
+        project_path,
+        &["ls-files", "--others", "-z", "--", &pathspec],
+    );
+    match output {
+        Ok(files) => files
+            .split('\0')
+            .filter(|f| !f.is_empty())
+            // `ls-files` without `--directory` lists only files, never
+            // directories, so every entry here is a file.
+            .any(|f| !ignore_set.is_ignored_path(Path::new(f), false)),
+        Err(_) => false,
+    }
 }
 
 /// Test whether `project_path` is a git repository — i.e. `git rev-parse
@@ -576,6 +624,47 @@ mod tests {
         write_file(&root, "node_modules/pkg/index.js", "junk");
         let ignore_set =
             IgnoreSet::from_layers(&root, &[(&PathBuf::new(), &["node_modules/"])]).unwrap();
+        let status = classify(&root, &ignore_set);
+        assert_eq!(status, Status::Clean);
+    }
+
+    #[test]
+    fn clean_when_untracked_directory_contents_match_a_content_pattern() {
+        // `--directory` collapses `logs/` to one entry, but `*.js` is written
+        // against the files inside it, not the directory name. The directory
+        // is not itself ignored, so it must be re-listed at file granularity;
+        // every file beneath it is protected, so the repo is Clean.
+        let root = fixture("content_pattern");
+        fixture_with_remote(&root);
+        write_file(&root, "logs/a.js", "junk");
+        write_file(&root, "logs/b.js", "junk");
+        let ignore_set = IgnoreSet::from_layers(&root, &[(&PathBuf::new(), &["*.js"])]).unwrap();
+        let status = classify(&root, &ignore_set);
+        assert_eq!(status, Status::Clean);
+    }
+
+    #[test]
+    fn cleanable_when_untracked_directory_holds_one_non_ignored_file() {
+        // Same shape as above, but one file beneath the collapsed directory is
+        // not protected. Matching is per file, so the unprotected file alone
+        // makes the repo Cleanable — the cleaning engine excludes the rest.
+        let root = fixture("mixed_dir");
+        fixture_with_remote(&root);
+        write_file(&root, "logs/a.js", "protected");
+        write_file(&root, "logs/keep.txt", "not protected");
+        let ignore_set = IgnoreSet::from_layers(&root, &[(&PathBuf::new(), &["*.js"])]).unwrap();
+        let status = classify(&root, &ignore_set);
+        assert_eq!(status, Status::Cleanable);
+    }
+
+    #[test]
+    fn clean_when_untracked_directory_name_has_glob_metacharacters() {
+        // The re-listing pathspec must be `:(literal)`-quoted, or a directory
+        // named `w[t]d` is read as a glob and matches nothing.
+        let root = fixture("glob_dir");
+        fixture_with_remote(&root);
+        write_file(&root, "w[t]d/a.js", "junk");
+        let ignore_set = IgnoreSet::from_layers(&root, &[(&PathBuf::new(), &["*.js"])]).unwrap();
         let status = classify(&root, &ignore_set);
         assert_eq!(status, Status::Clean);
     }
