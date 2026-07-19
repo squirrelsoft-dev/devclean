@@ -279,3 +279,154 @@ fn discovery_honors_workspace_roots_supplied_on_the_cli() {
         "--workspace must be honored, not silently ignored:\n{text}"
     );
 }
+
+/// Build a fixture that contains a real project alongside a `node_modules`
+/// directory with a nested `package.json` — the discovery output should
+/// report only the project, not the nested package.
+fn artifact_fixture(label: &str) -> PathBuf {
+    let ws = unique_dir(label);
+    // Real project: git repo with a Cargo.toml.
+    std::fs::create_dir_all(ws.join("myproject/.git")).unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.join("myproject"))
+        .arg("init")
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.join("myproject"))
+        .arg("config")
+        .arg("user.email")
+        .arg("test@test.dev")
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.join("myproject"))
+        .arg("config")
+        .arg("user.name")
+        .arg("Test")
+        .status()
+        .unwrap();
+    write_file(&ws.join("myproject"), "main.rs", "fn main() {}");
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.join("myproject"))
+        .arg("add")
+        .arg("main.rs")
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.join("myproject"))
+        .arg("status")
+        .arg("--porcelain")
+        .status()
+        .unwrap();
+    // node_modules with a nested package.json — should NOT be reported.
+    let nm = ws.join("node_modules");
+    std::fs::create_dir_all(&nm).unwrap();
+    let pkg = nm.join("lodash");
+    std::fs::create_dir_all(&pkg).unwrap();
+    write_file(&pkg, "package.json", "{}");
+    ws
+}
+
+#[test]
+fn discovery_prunes_node_modules_from_descent() {
+    // A project whose node_modules contains a nested package.json — only
+    // the project is reported, not the nested package. The walker does
+    // not descend into node_modules at all.
+    let ws = artifact_fixture("artifact");
+    let (ok, out) = run_discovery(&[&ws], 3);
+    assert!(ok, "discovery failed: {out}");
+
+    let paths = reported_paths(&out);
+    let project = ws.join("myproject").display().to_string();
+    let nested = ws.join("node_modules/lodash").display().to_string();
+
+    assert!(paths.contains(&project), "project must be reported:\n{out}");
+    assert!(
+        !paths.contains(&nested),
+        "nested package must not be reported:\n{out}"
+    );
+    assert_eq!(
+        paths.len(),
+        1,
+        "only the project should be reported:\n{out}"
+    );
+}
+
+#[test]
+fn discovery_prunes_target_from_descent() {
+    // A Rust project whose target/ contains a nested Cargo.toml — only the
+    // project is reported, not the nested Cargo.toml.
+    let ws = artifact_fixture("target");
+    // Add a target/ with a Cargo.toml inside.
+    let target = ws.join("target");
+    std::fs::create_dir_all(target.join("debug/deep")).unwrap();
+    write_file(
+        &target.join("debug/deep/Cargo.toml"),
+        "Cargo.toml",
+        "[package]",
+    );
+
+    let (ok, out) = run_discovery(&[&ws], 4);
+    assert!(ok, "discovery failed: {out}");
+
+    let paths = reported_paths(&out);
+    let project = ws.join("myproject").display().to_string();
+    let nested = ws.join("target/debug/deep").display().to_string();
+
+    assert!(paths.contains(&project), "project must be reported:\n{out}");
+    assert!(
+        !paths.contains(&nested),
+        "target/debug/deep must not be reported:\n{out}"
+    );
+}
+
+#[test]
+fn discovery_prunes_user_safe_delete_artifact() {
+    // A user-added safe_delete pattern prunes the artifact from discovery.
+    let ws = artifact_fixture("user_artifact");
+    let art = ws.join(".my-artifacts");
+    std::fs::create_dir_all(&art).unwrap();
+    write_file(&art, "package.json", "{}");
+
+    let home = unique_dir("home2");
+    let cfg_dir = unique_dir("cfg2");
+    let cfg = cfg_dir.join("config.toml");
+    let root_list = format!("{:?}", ws.display().to_string());
+    write_file(
+        &cfg_dir,
+        "config.toml",
+        &format!(
+            "workspace_roots = [{root_list}]\nmax_depth = 3\nsafe_delete = [\"**/.my-artifacts\"]\n"
+        ),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+        .env("HOME", &home)
+        .arg("--config")
+        .arg(&cfg)
+        .arg("discovery")
+        .output()
+        .unwrap();
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "discovery failed: {text}");
+
+    let paths = reported_paths(&text);
+    let project = ws.join("myproject").display().to_string();
+    let artifact = art.display().to_string();
+
+    assert!(
+        paths.contains(&project),
+        "project must be reported:\n{text}"
+    );
+    assert!(
+        !paths.contains(&artifact),
+        ".my-artifacts must not be reported:\n{text}"
+    );
+}
