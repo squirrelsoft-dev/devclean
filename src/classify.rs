@@ -123,13 +123,30 @@ pub fn classify(project_path: &Path, ignore_set: &IgnoreSet) -> Status {
     Status::Clean
 }
 
-/// Status 1: project has no `.git` directory.
+/// Status 1: project has no `.git` directory (or a file whose gitdir target
+/// does not exist).
 ///
 /// Checks for the literal `.git` path under the project root. If it is absent,
 /// the project is not git-initialized and we stop here — every subsequent
-/// git-state check is moot.
+/// git-state check is moot. If `.git` is a gitdir pointer pointing at a path
+/// that does not exist on this filesystem, also treat as NoGit — that is a
+/// broken / dangling worktree, not a real git project, so every subsequent
+/// git-state check would fail loudly. We short-circuit here with NoGit so
+/// callers do not emit a noisy warning about missing remotes for a repo that
+/// no longer exists on this box.
 fn status_no_git(project_path: &Path) -> bool {
-    !project_path.join(".git").exists()
+    let git_path = project_path.join(".git");
+    if !git_path.exists() {
+        return true;
+    }
+    // A `.git` file whose `gitdir:` target does not exist locally is a
+    // dangling worktree — not a real git project on this box. Treat it as
+    // NoGit rather than letting each subsequent git-state check blow up and
+    // emit a warning about missing remotes for a repo that is half-stale.
+    if git_path.is_file() {
+        return git_cmd(project_path, &["rev-parse", "--git-dir"]).is_err();
+    }
+    false
 }
 
 /// Status 2: git repo with no remote configured.
