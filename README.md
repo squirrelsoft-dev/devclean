@@ -303,8 +303,21 @@ With no workspace roots configured, discovery reports that and exits without
 error. An unreadable or missing root is a hard error rather than a silent
 empty result.
 
+Each subcommand that runs discovery — `devclean discovery`, `devclean list`,
+`devclean classification`, and the default run / `devclean clean` — renders a
+live single-line progress indicator while walking each workspace root:
+`walking: <path>` overwrites itself in place via a carriage return on a TTY,
+so the display never scrolls. When stdout is piped or redirected, nothing is
+rendered — a stream of CR-terminated partial paths would be garbage in a pipe
+or log file. Terminal width is resolved via the `terminal_size` crate, falling
+back to `COLUMNS` then a default of 80; paths that would wrap are truncated
+with a leading ellipsis so the leaf (current directory) stays visible. When
+the walk completes, the progress line is cleared and a newline is emitted so
+the following summary line starts on a fresh line.
+
 See `src/discovery.rs` for the matching and nesting rules;
-`tests/discovery_cli.rs` for integration tests of the subcommand.
+`src/progress.rs` for the live indicator; `tests/discovery_cli.rs` for
+integration tests of the subcommand.
 
 ## Classification
 

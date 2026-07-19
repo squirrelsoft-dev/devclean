@@ -55,6 +55,13 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Public API seam driven by the interactive flow (#8, `src/interactive.rs`): `clean(project, ignore_set, safe_set, approved, force, dry_run)` and `dry_run(...)`; `build_exclusions` is the exclusion-list builder. The `devclean clean` CLI hook is **destructive**: it deletes via `clean()` only for a project the user approved (or under `--force`), and never under `--dry-run`. Each subcommand — `devclean` (no subcommand, the default run) and `devclean clean` — runs the destructive interactive flow; `devclean list` only lists statuses.
 - Owners: `README.md` "Cleaning" section; `src/clean.rs` module docs and rustdoc; unit tests in `src/clean.rs`, CLI-level tests in `tests/clean_cli.rs`.
 
+## Live progress indicator
+
+- `src/progress.rs` owns the live single-line progress writer: `ProgressWriter<W: Write>` is generic over any writer so tests can inject a `Vec<u8>` buffer. TTY-gated via `output::is_tty()`; each `update(path)` writes CR-prefixed `walking: <truncated path>` with no trailing newline; each `finish()` clears the line and emits a newline. Terminal width: `terminal_size` crate first, then `COLUMNS` env var, then default 80. Paths truncated with a leading ellipsis so the leaf stays visible; padded with spaces so each update fully overwrites the prior one.
+- Integrated into `src/discovery.rs`: `discover()` constructs a `ProgressWriter::new(std::io::stdout())`, threads it through each `walk_root` call, and calls `finish()` once the walk ends — on success after all roots and on a `walk_root` error before returning it, so no partial progress line lingers ahead of the error. Every subcommand that runs discovery (`devclean discovery`, `devclean list`, `devclean classification`, the default run / `devclean clean`) gets the indicator automatically — no per-subcommand wiring.
+- Unit tests in `src/progress.rs` inject a buffer instead of a real terminal — no real TTYs are spawned; see that module's `tests` for the covered cases (TTY gating, truncation incl. multibyte paths and tiny widths, overwrite, finish).
+- Owners: `README.md` "Discovery" section; `src/progress.rs` module docs and rustdoc; the `walk_root` rustdoc in `src/discovery.rs`; unit tests in `src/progress.rs`.
+
 ## Disk savings (issue #18)
 
 - `src/disk.rs` computes per-project reclaimable size (each cleanable project's `Safe` + `Surfaced` items summed via `WalkDir`, `symlink_metadata` for symlinks, tolerant of permission-denied paths and non-UTF-8 names).
