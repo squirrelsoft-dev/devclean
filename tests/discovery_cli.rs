@@ -147,7 +147,7 @@ fn discovery_skips_folders_without_a_marker() {
 }
 
 #[test]
-fn discovery_reports_nested_projects_separately_without_double_counting() {
+fn discovery_suppresses_nested_non_git_marker_under_git_root() {
     let ws = workspace_fixture("nested");
     let (ok, out) = run_discovery(&[&ws.join("web-app")], 4);
     assert!(ok, "discovery failed: {out}");
@@ -156,14 +156,15 @@ fn discovery_reports_nested_projects_separately_without_double_counting() {
     let parent = ws.join("web-app").display().to_string();
     let nested = ws.join("web-app/packages/ui").display().to_string();
 
-    // Both are reported: no parent suppression.
+    // The root (root has .git) is reported; the nested non-git marker
+    // (packages/ui/package.json) is suppressed — it is a subfolder of
+    // the parent repo, not a separate project (issue #15).
     assert!(paths.contains(&parent), "parent missing:\n{out}");
-    assert!(paths.contains(&nested), "nested project missing:\n{out}");
+    assert!(!paths.contains(&nested), "nested project leaked:\n{out}");
     // And no double-counting: the parent matches two markers (.git and
     // package.json) but is still listed exactly once.
     assert_eq!(paths.iter().filter(|p| **p == parent).count(), 1);
-    assert_eq!(paths.iter().filter(|p| **p == nested).count(), 1);
-    assert_eq!(paths.len(), 2, "unexpected extra entries:\n{out}");
+    assert_eq!(paths.len(), 1, "unexpected extra entries:\n{out}");
 }
 
 #[test]

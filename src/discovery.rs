@@ -7,12 +7,22 @@
 //!
 //! ## Nesting rule
 //!
-//! Every folder that contains a marker is reported as a discovered project,
-//! regardless of nesting. There is no "parent project" suppression: if a
-//! workspace root has `.git` and a deeper subdirectory also has `.git`, both
-//! are reported. This matches the principle of each marker being a
-//! **candidate** project — classification (issue #6) and cleaning (issue #7)
-//! can decide how to relate nested projects later.
+//! A folder that contains a marker is reported as a discovered project, unless
+//! it sits inside an ancestor git worktree (the monorepo case, resolved by
+//! issue #15). Each marker is a candidate project — classification (#6) and
+//! cleaning (#7) can decide how to relate nested projects later.
+//!
+//! Only `.git` boundaries define standalone projects; a nested non-git marker
+//! (`package.json`, `Cargo.toml`, ...) inside an existing git worktree is a
+//! subfolder of that project, not a new project. A nested `.git` still counts
+//! as a separate project — it is its own git repository, and its own
+//! descendants are relative to it, not any outer ancestor.
+//!
+//! "Ancestor git worktree" means: walking up from the marker folder toward its
+//! workspace root, some ancestor directory contains a `.git` entry (directory
+//! or file). The workspace root is the discovery boundary; nothing above it is
+//! scanned. A `.git` at the marker folder's own level counts as that folder
+//! being a git project (the existing nested-`.git` case), not as an ancestor.
 //!
 //! The one "no double-count" invariant: the workspace root itself is reported
 //! only if it has a marker; otherwise it is a plain folder and not reported.
@@ -202,15 +212,44 @@ fn walk_root(
         }
         // Check each direct child file for markers. Only look at *files* —
         // a marker is a file, never a directory (except `.git` which is a
-        // directory on disk but is treated as a file-name marker).
+        // directory on disk but is treated as a file-name marker). 
         if let Some(marker) = find_marker_in(entry.path(), markers) {
-            out.push(DiscoveredProject {
-                path: entry.path().to_path_buf(),
-                marker: marker.to_string(),
-            });
+            // Suppression is for non-git markers only: a nested `.git` is its
+            // own project (issue #15). Anything else is suppressed if it sits
+            // inside an ancestor git worktree.
+            if marker == ".git" || !has_ancestor_git(entry.path(), root) {
+                out.push(DiscoveredProject {
+                    path: entry.path().to_path_buf(),
+                    marker: marker.to_string(),
+                });
+            }
         }
     }
     Ok(())
+}
+
+/// Check whether any ancestor directory between `dir` and `root` (inclusive of
+/// `root`, exclusive of `dir`) contains a `.git` entry.
+///
+/// Walks each parent of `dir` upward; stops when the parent equals the
+/// workspace root (the discovery boundary). A `.git` at `dir`'s own level is
+/// not considered an ancestor — that is the nested-`.git`-is-separate case.
+fn has_ancestor_git(dir: &Path, root: &Path) -> bool {
+    let mut current = dir.to_path_buf();
+    loop {
+        if let Some(parent) = current.parent() {
+            current = parent.to_path_buf();
+        } else {
+            break;
+        }
+        if current.join(".git").exists() {
+            return true;
+        }
+        if current == root {
+            break;
+        }
+    }
+    false
 }
 
 /// Scan `dir`'s direct children for any file whose basename matches `markers`.
@@ -297,19 +336,34 @@ mod tests {
     }
 
     #[test]
-    fn nested_markers_both_reported() {
-        let root = tmp_root("nested");
+    fn nested_git_separate_project_suppressed_non_git() {
+        // A nested `.git` (a repo inside a repo) still counts as a separate
+        // project, unchanged from issue #5.
+        let root = tmp_root("nested_git");
         mkfixture(&root, ".git", "root repo");
         let sub = root.join("src");
         fs::create_dir_all(&sub).unwrap();
-        mkfixture(&sub, "Cargo.toml", "[package]");
-        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        mkfixture(&sub, ".git", "nested repo");
+        let cfg = mkconfig(&root, &[".git"], 2);
         let results = discover(&cfg).unwrap();
         assert_eq!(results.len(), 2);
-        // Both are reported; depth-first does not suppress nested.
+        // Both .git directories are reported as separate git projects.
         let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
         assert!(paths.iter().any(|p| p.join(".git").exists()));
-        assert!(paths.iter().any(|p| p.join("Cargo.toml").exists()));
+
+        // A nested non-git marker inside an ancestor git worktree is suppressed.
+        let root2 = tmp_root("nested_non_git");
+        mkfixture(&root2, ".git", "root repo");
+        let pkg = root2.join("packages/a");
+        fs::create_dir_all(&pkg).unwrap();
+        mkfixture(&pkg, "package.json", "{}");
+        let cfg2 = mkconfig(&root2, &[".git", "package.json"], 2);
+        let results2 = discover(&cfg2).unwrap();
+        assert_eq!(results2.len(), 1);
+        assert_eq!(results2[0].path, root2);
+        assert_eq!(results2[0].marker, ".git");
+        // The package folder is not reported — it is a subfolder of root's
+        // git worktree, not a separate project.
     }
 
     #[test]
@@ -324,14 +378,16 @@ mod tests {
         mkfixture(&sub2, "Cargo.toml", "[package]");
         let cfg = mkconfig(&root, &[".git", "package.json", "Cargo.toml"], 1);
         let results = discover(&cfg).unwrap();
-        // Depth 0 (root) and depth 1 (sub1), but not depth 2 (sub2).
-        assert_eq!(results.len(), 2);
+        // Depth 0 (root, which has .git) is reported; depth 1 (sub1) is suppressed
+        // — its package.json is a non-git marker inside the ancestor git worktree.
+        // Depth 2 (sub2) is beyond max_depth=1, so not visited.
+        assert_eq!(results.len(), 1);
         let paths: Vec<_> = results
             .iter()
             .map(|r| r.path.as_os_str().to_string_lossy().to_string())
             .collect();
         assert!(paths.iter().any(|p| p == root.to_str().unwrap()));
-        assert!(paths.iter().any(|p| p.ends_with("a")));
+        assert!(!paths.iter().any(|p| p.ends_with("a")));
         assert!(!paths.iter().any(|p| p.ends_with("b")));
     }
 
@@ -424,11 +480,38 @@ mod tests {
         mkfixture(&outside, "package.json", "{}");
         let cfg = mkconfig(&root, &[".git", "Cargo.toml", "package.json"], 2);
         let results = discover(&cfg).unwrap();
-        assert_eq!(results.len(), 3);
-        // All three are reported, each once.
+        // Only the root (which has .git) is reported — sub's Cargo.toml and
+        // outside's package.json are each suppressed as non-git markers inside
+        // the ancestor git worktree (issue #15). Each appears exactly once
+        // for the .git marker that actually defines a standalone project.
+        assert_eq!(results.len(), 1);
         let names: Vec<_> = results.iter().map(|r| r.marker.as_str()).collect();
-        assert!(names.contains(&".git"));
-        assert!(names.contains(&"Cargo.toml"));
-        assert!(names.contains(&"package.json"));
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], ".git");
+    }
+
+    #[test]
+    fn monorepo_reports_only_root_git() {
+        // A monorepo with a single root `.git` and nested package folders
+        // each containing a non-git marker should report only the root.
+        let root = tmp_root("monorepo");
+        mkfixture(&root, ".git", "root repo");
+        let pkg_a = root.join("packages/a");
+        fs::create_dir_all(&pkg_a).unwrap();
+        mkfixture(&pkg_a, "package.json", "{}");
+        let pkg_b = root.join("packages/b");
+        fs::create_dir_all(&pkg_b).unwrap();
+        mkfixture(&pkg_b, "package.json", "{}");
+        let cfg = mkconfig(&root, &[".git", "package.json"], 3);
+        let results = discover(&cfg).unwrap();
+        // Only the root (which has .git) is reported.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        // Neither packages/a nor packages/b is reported — they are subfolders
+        // of the parent repo, not separate projects (issue #15).
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&pkg_a));
+        assert!(!paths.contains(&pkg_b));
     }
 }

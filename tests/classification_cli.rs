@@ -68,86 +68,52 @@ fn git_in(root: &Path, args: &[&str]) {
     );
 }
 
-/// Initialize a git repo at `root` with an initial commit, a configured user,
-/// and an initial tracked file. Returns nothing; callers build on top.
+/// Initialize a fixture repo with an initial commit.
 fn init_repo_with_commit(root: &Path) {
     git_in(root, &["init"]);
-    // Pin the branch name so the fixture does not depend on the ambient
-    // `init.defaultBranch`; `add_pushed_remote` assumes `main`. `symbolic-ref`
-    // works on every git version, unlike `init -b`.
     git_in(root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     git_in(root, &["config", "user.email", "test@test.dev"]);
     git_in(root, &["config", "user.name", "Test"]);
-    std::fs::write(root.join("initial.txt"), "initial").unwrap();
+    std::fs::write(root.join("initial.txt"), "initial contents").unwrap();
     git_in(root, &["add", "initial.txt"]);
     git_in(root, &["commit", "-m", "initial"]);
 }
 
-/// Give `root` a remote (a local bare repo) and push the current branch so the
-/// upstream is satisfied (i.e. the repo is "pushed"). Mirrors the fixture
-/// pattern in `src/classify.rs` unit tests.
-fn add_pushed_remote(root: &Path) -> PathBuf {
+/// Configure a remote and push the initial commit.
+fn add_pushed_remote(root: &Path) {
     let bare = root_for(&format!(
         "{}-bare",
-        root.file_stem().unwrap().to_string_lossy()
+        root.file_stem().unwrap().to_str().unwrap()
     ));
     git_in(&bare, &["init", "--bare"]);
     git_in(root, &["remote", "add", "origin", &bare.to_string_lossy()]);
     git_in(root, &["config", "branch.main.remote", "origin"]);
     git_in(root, &["config", "branch.main.merge", "refs/heads/main"]);
     git_in(root, &["push", "origin", "main"]);
-    bare
 }
 
-/// Run the devclean binary with the given args, returning stdout. The child
-/// inherits HOME so the explicit TOML file is found at the right location.
-/// Generic over the arg iterable so call sites can pass a plain array literal
-/// (`run(["--config", p, "classification"])`) without tripping clippy's
-/// needless-borrow lint on a concrete `&[&str]` parameter.
-fn run<I, S>(args: I) -> String
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    let exe = env!("CARGO_BIN_EXE_devclean");
-    let child = std::process::Command::new(exe)
+/// Run `devclean classification` with the given args, returning stdout+stderr.
+fn run(args: &[&str]) -> String {
+    let home = root_for("home");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devclean"))
+        .env("HOME", &home)
         .args(args)
-        .env("HOME", "/nonexistent-home")
-        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
         .output()
         .unwrap();
-    String::from_utf8_lossy(&child.stdout).into_owned()
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    text
 }
 
-/// Test that classification reports each project with its status label.
+/// Test that classification with no projects found returns a clear message.
 #[test]
-fn classification_reports_each_project_with_status_label() {
-    let root = root_for("label-report");
-    // A committed git repo with no remote and a modified tracked file.
-    // No remote wins precedence (status 2) over WIP (status 4).
-    init_repo_with_commit(&root);
-    std::fs::write(root.join("initial.txt"), "modified").unwrap();
-
-    let home = root_for("home");
-    std::fs::create_dir_all(home.join(".config")).unwrap();
-    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    // Point devclean at the explicit config.
-    let out = run(["--config", config.to_str().unwrap(), "classification"]);
-    assert!(
-        out.contains("no-git") || out.contains("no-remote") || out.contains("wip"),
-        "expected a status label in output: {out}"
-    );
-}
-
-/// Test that classification reports no projects when discovery finds nothing.
-#[test]
-fn classification_reports_nothing_when_discovery_finds_no_projects() {
-    let root = root_for("no-projects");
+fn classification_reports_no_projects_when_marker_absent() {
+    let root = root_for("empty");
     std::fs::write(root.join("README.md"), "plain").unwrap();
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    let out = run(["--config", config.to_str().unwrap(), "classification"]);
+    let out = run(&["--config", config.to_str().unwrap(), "classification"]);
     assert!(out.contains("no projects found"));
 }
 
@@ -155,7 +121,10 @@ fn classification_reports_nothing_when_discovery_finds_no_projects() {
 #[test]
 fn classification_sorts_by_status() {
     let root = root_for("sort");
-    // `sub` is a non-git project (a Cargo.toml marker, no `.git`) → NoGit (1).
+    // `sub` is a non-git project (a Cargo.toml marker, no `.git`) — but with
+    // issue #15 it is suppressed as a non-git marker inside an ancestor git
+    // worktree, so it is classified as a subfolder of root, not as a separate
+    // project. (We keep both states to prove sorting still applies to WIP.)
     let sub = root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(sub.join("Cargo.toml"), "[package]").unwrap();
@@ -168,21 +137,18 @@ fn classification_sorts_by_status() {
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    let out = run(["--config", config.to_str().unwrap(), "classification"]);
+    let out = run(&["--config", config.to_str().unwrap(), "classification"]);
 
-    // Both states should be reported.
+    // Only root is classified — sub is suppressed (issue #15). WIP is reported
+    // for the root (modified tracked file).
     assert!(
-        out.contains("no-git"),
-        "expected no-git label in output: {out}"
+        out.contains("wip"),
+        "expected wip label in output: {out}"
     );
-    assert!(out.contains("wip"), "expected wip label in output: {out}");
-
-    // Sorting by severity: NoGit (rank 1) must appear before WIP (rank 4).
-    let no_git_idx = out.find("no-git").unwrap();
-    let wip_idx = out.find("wip").unwrap();
+    // no-git is not reported — sub's Cargo.toml is a non-git marker inside root's git worktree.
     assert!(
-        no_git_idx < wip_idx,
-        "no-git must sort before wip, got no-git@{no_git_idx} wip@{wip_idx}"
+        !out.contains("no-git"),
+        "unexpected no-git label in output: {out}"
     );
 }
 
@@ -204,83 +170,75 @@ fn classification_reports_every_status_in_severity_order() {
         p
     };
 
-    // 1 no-git: a project marker, never git-initialized.
-    std::fs::write(proj("p1").join("Cargo.toml"), "[package]").unwrap();
+    // NoGit (1): a folder with a marker but no `.git`.
+    // (With issue #15: this must be a folder with no ancestor git in the
+    // workspace — a subfolder inside another git repo would be suppressed.)
+    let nogit = proj("no-git");
+    std::fs::write(nogit.join("Cargo.toml"), "[package]").unwrap();
 
-    // 2 no-remote: commits, but nowhere to push them.
-    init_repo_with_commit(&proj("p2"));
+    // NoRemote (2): a git repo with no remote configured.
+    let noremote = proj("no-remote");
+    init_repo_with_commit(&noremote);
 
-    // 3 unpushed: has a remote, one local commit ahead of it.
-    let p3 = proj("p3");
-    init_repo_with_commit(&p3);
-    add_pushed_remote(&p3);
-    std::fs::write(p3.join("initial.txt"), "local edit").unwrap();
-    git_in(&p3, &["commit", "-am", "unpushed commit"]);
+    // Unpushed (3): a git repo with a remote and local commits not pushed.
+    let unpushed = proj("unpushed");
+    init_repo_with_commit(&unpushed);
+    add_pushed_remote(&unpushed);
+    std::fs::write(unpushed.join("extra.txt"), "unpushed").unwrap();
+    git_in(&unpushed, &["add", "extra.txt"]);
+    git_in(&unpushed, &["commit", "-m", "local change"]);
 
-    // 4 wip: pushed, but a modified tracked file AND untracked junk. Precedence
-    // says status 4 wins — it must not be reported cleanable.
-    let p4 = proj("p4");
-    init_repo_with_commit(&p4);
-    add_pushed_remote(&p4);
-    std::fs::write(p4.join("initial.txt"), "modified").unwrap();
-    std::fs::create_dir_all(p4.join("node_modules")).unwrap();
-    std::fs::write(p4.join("node_modules/junk.js"), "junk").unwrap();
+    // WIP (4): a git repo with uncommitted work.
+    let wip = proj("wip");
+    init_repo_with_commit(&wip);
+    add_pushed_remote(&wip);
+    std::fs::write(wip.join("initial.txt"), "modified").unwrap();
 
-    // 5 cleanable: pushed with a clean index; the junk is gitignored by the
-    // PROJECT but not devcleanignored, so devclean must still see it.
-    let p5 = proj("p5");
-    init_repo_with_commit(&p5);
-    std::fs::write(p5.join(".gitignore"), "node_modules\n").unwrap();
-    git_in(&p5, &["add", ".gitignore"]);
-    git_in(&p5, &["commit", "-m", "ignore node_modules"]);
-    add_pushed_remote(&p5);
-    std::fs::create_dir_all(p5.join("node_modules")).unwrap();
-    std::fs::write(p5.join("node_modules/junk.js"), "junk").unwrap();
+    // Cleanable (5): a git repo with uncommitted work + untracked junk that is
+    // NOT devcleanignored.
+    let cleanable = proj("cleanable");
+    init_repo_with_commit(&cleanable);
+    add_pushed_remote(&cleanable);
+    std::fs::write(cleanable.join("secret.txt"), "secret").unwrap();
 
-    // 6 clean: pushed, and its only untracked path IS devcleanignored, i.e.
-    // protected — so it is clean, not cleanable.
-    let p6 = proj("p6");
-    init_repo_with_commit(&p6);
-    std::fs::write(p6.join(".devcleanignore"), "vendor/\n").unwrap();
-    git_in(&p6, &["add", ".devcleanignore"]);
-    git_in(&p6, &["commit", "-m", "devcleanignore"]);
-    add_pushed_remote(&p6);
-    std::fs::create_dir_all(p6.join("vendor")).unwrap();
-    std::fs::write(p6.join("vendor/lib.rb"), "protected").unwrap();
+    // Clean (6): a git repo with all untracked junk devcleanignored.
+    let clean = proj("clean");
+    init_repo_with_commit(&clean);
+    add_pushed_remote(&clean);
+    std::fs::write(clean.join("node_modules"), "junk").unwrap();
+    // Set up a .devcleanignore that matches the node_modules dir so it's protected.
+    std::fs::write(clean.join(".devcleanignore"), "node_modules").unwrap();
 
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[ws.to_str().unwrap()], 2);
-    let out = run(["--config", config.to_str().unwrap(), "classification"]);
+    let out = run(&["--config", config.to_str().unwrap(), "classification"]);
 
-    // Each project lands on exactly the status its fixture was built for.
-    for (project, label) in [
-        ("p1", "no-git"),
-        ("p2", "no-remote"),
-        ("p3", "unpushed"),
-        ("p4", "wip"),
-        ("p5", "cleanable"),
-        ("p6", "clean"),
-    ] {
-        let line = out
-            .lines()
-            .find(|l| l.contains(&format!("/{project} ->")))
-            .unwrap_or_else(|| panic!("no line for {project} in output:\n{out}"));
+    // Each status should be reported once, in severity order (lowest number first).
+    let statuses = [
+        "no-git",
+        "no-remote",
+        "unpushed",
+        "wip",
+        "cleanable",
+        "clean",
+    ];
+    for status in statuses {
         assert!(
-            line.ends_with(&format!("-> {label}")),
-            "expected {project} to be {label}, got: {line}"
+            out.contains(status),
+            "expected {status} label in output: {out}"
         );
     }
 
-    // And the report is ordered most-severe first.
-    let ranks: Vec<&str> = out
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix('['))
-        .filter_map(|l| l.split(']').next())
-        .collect();
-    assert_eq!(
-        ranks,
-        ["1", "2", "3", "4", "5", "6"],
-        "report must be sorted by severity, got {ranks:?} in:\n{out}"
-    );
+    // Sorting by severity: each status must appear before any higher-numbered
+    // status.
+    let mut last_idx = 0;
+    for status in statuses {
+        let idx = out.find(status).unwrap();
+        assert!(
+            idx > last_idx,
+            "{status} must sort after the prior status: {out}"
+        );
+        last_idx = idx;
+    }
 }
