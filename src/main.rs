@@ -1,3 +1,4 @@
+mod classify;
 mod config;
 mod discovery;
 mod ignore;
@@ -57,7 +58,7 @@ enum Command {
     ///
     /// Loads the platform default config (respecting `--config`) and prints
     /// `safe` / `not-safe` for the given path, interpreted relative to the
-    /// current directory. Discovery/cleaning are separate issues.
+    /// current directory. Cleaning is a separate issue.
     Safelist {
         /// Path to test, relative to the current directory.
         path: String,
@@ -66,9 +67,13 @@ enum Command {
     ///
     /// Walks each workspace root up to `max_depth` and reports each folder
     /// that contains a marker from the resolved `project_markers` list. Each
-    /// reported path is tagged with the marker that found it.
-    /// Classification/cleaning are separate issues.
+    /// reported path is tagged with the marker that found it. Classifying those
+    /// projects is `devclean classification`; cleaning is a separate issue.
     Discovery,
+    /// Classify each discovered project by its git state and print the result
+    /// sorted by status. Status 5 is the only cleanable state; status 1..4
+    /// each signal that cleaning must wait. See issue #6 for the full spec.
+    Classification,
 }
 
 fn main() {
@@ -98,6 +103,12 @@ fn main() {
         }
         Some(Command::Discovery) => {
             if let Err(e) = run_discovery(&cli) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Classification) => {
+            if let Err(e) = run_classification(&cli) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -197,7 +208,7 @@ fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `devclean ignore <path>`: load the ignore set for the current directory and
 /// print whether `path` is ignored. Minimal observable hook for the ignore
-/// matcher; discovery/cleaning are separate issues.
+/// matcher; cleaning is a separate issue.
 fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let set = ignore::IgnoreSet::load(&root)?;
@@ -216,7 +227,7 @@ fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// `devclean safelist <path>`: load the default config (or `--config`), build
 /// the safe-to-delete set from built-ins plus the loaded `safe_delete`, and
 /// report whether `path` is safe to delete. Minimal observable hook for the
-/// catalog; discovery/cleaning are separate issues.
+/// catalog; cleaning is a separate issue.
 fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let p = std::path::Path::new(path);
@@ -232,8 +243,8 @@ fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// `devclean discovery`: walk each configured workspace root and print the
-/// list of discovered projects (paths with markers). Classification/cleaning
-/// are separate issues.
+/// list of discovered projects (paths with markers). Classifying them is
+/// `run_classification`; cleaning is a separate issue.
 fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));
@@ -246,6 +257,54 @@ fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         for p in &projects {
             println!("  {} ({})", p.path.display(), p.marker);
         }
+    }
+    Ok(())
+}
+
+/// `devclean classification`: walk each configured workspace root, classify
+/// each discovered project by its git state, and print each one with its
+/// status label, sorted by severity. Precedence is the lowest-numbered (most-
+/// severe) status; status 5 is cleanable only. See issue #6 for the full spec.
+fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (_config_path, cfg) = load_cli_config(cli)?;
+    let cfg = cfg.apply_overrides(&cli_overrides(cli));
+
+    let projects = discovery::discover(&cfg)?;
+    if projects.is_empty() {
+        println!("classification: no projects found");
+        return Ok(());
+    }
+
+    // Collect each project's status, then sort by severity. `Status` derives
+    // `Ord` over variants declared most-severe-first, so it sorts directly.
+    let mut rows: Vec<(String, classify::Status)> = Vec::new();
+    for d in &projects {
+        // Classification is a read-only survey over independent projects, so
+        // one project with an unreadable `.devcleanignore` must not abort the
+        // whole report. Skip just that project: falling back to an empty set
+        // would treat nothing as protected and could report it `cleanable`,
+        // which is the one verdict the cleaning engine acts destructively on.
+        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
+            Ok(set) => set,
+            Err(e) => {
+                eprintln!(
+                    "warning: {}: skipped, could not load .devcleanignore: {e}",
+                    d.path.display()
+                );
+                continue;
+            }
+        };
+        let status = classify::classify(&d.path, &ignore_set);
+        rows.push((d.path.display().to_string(), status));
+    }
+    rows.sort_by_key(|&(_, status)| status);
+
+    println!(
+        "classification: {} project(s), sorted by severity",
+        rows.len()
+    );
+    for (path, status) in &rows {
+        println!("  [{}] {path} -> {}", status.rank(), status.label());
     }
     Ok(())
 }

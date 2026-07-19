@@ -20,7 +20,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - User-facing config docs (file location, TOML keys, defaults, CLI flags) live in `README.md`; the resolution logic is `config::default_config_path`.
 - Top-level flags are not `global`, so clap requires them *before* the subcommand (`devclean --force list`, never `devclean list --force`).
 - `--force` and `--dry-run` conflict at the clap layer (`conflicts_with`), so no runtime precedence logic exists or should be added.
-- `devclean list` is the observable config-printing command; `devclean discovery` finds projects (issue #5 — see `src/discovery.rs`); `devclean ignore` and `devclean safelist` are debug hooks for the matcher and the safe-to-delete catalog. All four are documented in `README.md`; classification/cleaning are separate issues.
+- `devclean list` is the observable config-printing command; `devclean discovery` finds projects (issue #5 — see `src/discovery.rs`); `devclean classification` classifies them (issue #6 — see `src/classify.rs`); `devclean ignore` and `devclean safelist` are debug hooks for the matcher and the safe-to-delete catalog. All five are documented in `README.md`; cleaning is a separate issue.
 
 ## Safe-to-delete catalog
 
@@ -38,6 +38,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Owners: `README.md` for scopes, pattern syntax, precedence, and the
   `devclean ignore` helper; the `src/ignore.rs` module docs and rustdoc for the
   implementation sharp edges and constructor contracts.
+
+## Classification
+
+- `src/classify.rs` shells out to `git` plumbing (`git -C <project> ...`), consistent with the rest of the crate; it deliberately does NOT pull in `git2`. Status precedence is evaluated in order 1→5 (most-severe first); only status 5 (`Cleanable`) is cleanable. The `Clean` state is committed+pushed with NO untracked non-devcleanignored junk.
+- Status 5 vs Clean uses `git ls-files --others` WITHOUT `--exclude-standard`, deliberately: build junk like `node_modules`/`target/` is gitignored by the *project*, but devclean exists to clean it, so gitignored files must stay visible. The devcleanignore matcher (issue #3 `is_ignored`) is the sole judge of whether untracked junk is protected. Owners: `README.md` classification table; `src/classify.rs` module docs; tests in `src/classify.rs` and `tests/classification_cli.rs`.
 
 ## Maintaining this file
 

@@ -2,11 +2,11 @@
 
 Development environment cleanup CLI (scaffold).
 
-The binary loads configuration and discovers projects. The current surface
-covers discovery (`devclean discovery`), protection via `.devcleanignore`
+The binary loads configuration, discovers projects, and classifies their git
+state. The current surface covers discovery (`devclean discovery`),
+classification (`devclean classification`), protection via `.devcleanignore`
 (`devclean ignore`), and the safe-to-delete catalog (`devclean safelist`);
-classification, cleaning, and the interactive flow are separate,
-not-yet-implemented features.
+cleaning and the interactive flow are separate, not-yet-implemented features.
 
 ## Build
 
@@ -126,6 +126,35 @@ empty result.
 See `src/discovery.rs` for the matching and nesting rules;
 `tests/discovery_cli.rs` for integration tests of the subcommand.
 
+## Classification
+
+`devclean classification` runs discovery, then classifies each project by
+its git state and prints the results sorted by severity (most-needs-attention
+first). Only status 5 is cleanable; statuses 1-4 each mean cleaning must wait.
+
+| # | Status | Meaning |
+|---|-------|---------|
+| 1 | `no-git` | Has a project marker but is NOT git-initialized. |
+| 2 | `no-remote` | Git repo with no remote configured. |
+| 3 | `unpushed` | Git repo with a remote but unpushed commits (or no upstream). |
+| 4 | `wip` | Git repo with uncommitted work-in-progress (modified/staged tracked changes). |
+| 5 | `cleanable` | Committed + pushed, AND has untracked junk that is NOT devcleanignored. |
+| 6 | `clean` | Committed + pushed with no untracked non-devcleanignored junk. Not a dirty status; sorts last. |
+
+Precedence is the lowest-numbered (most-severe) status. A repo with both WIP
+(4) and untracked junk is status 4, not 5 — it must not be cleaned while it has
+uncommitted work. The `.devcleanignore` matcher (see above) decides whether
+untracked junk is protected, which separates `cleanable` from `clean`.
+
+```
+devclean classification                 # uses workspace_roots from config
+devclean --workspace ~/code classification
+```
+
+See `src/classify.rs` for the git-plumbing logic and status precedence;
+`tests/classification_cli.rs` for integration tests. Cleaning (#7) and the
+interactive flow (#8) are separate issues.
+
 ## Configuration
 
 devclean reads a TOML config file from the platform config dir
@@ -163,6 +192,7 @@ devclean [FLAGS] list            # print the resolved config
 devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
 devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
 devclean [FLAGS] discovery       # see "Discovery" above
+devclean [FLAGS] classification  # see "Classification" above
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)
