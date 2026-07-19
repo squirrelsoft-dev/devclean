@@ -327,6 +327,42 @@ fn run_config(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Classify each discovered project with a live `classifying N/M: <path>`
+/// progress line, returning each project's path, status, and loaded ignore
+/// set in discovery order.
+///
+/// Classification is a read-only survey over independent projects, so one
+/// project with an unreadable `.devcleanignore` must not abort the whole
+/// report. Skip just that project: falling back to an empty set would treat
+/// nothing as protected and could report it `cleanable`, which is the one
+/// verdict the cleaning engine acts destructively on. The live progress line
+/// is cleared before the skip warning so the warning starts on a clean line
+/// on a TTY instead of appending to the un-terminated progress line.
+fn classify_projects(
+    projects: &[discovery::DiscoveredProject],
+) -> Vec<(PathBuf, classify::Status, ignore::IgnoreSet)> {
+    let mut out = Vec::new();
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    for (i, d) in projects.iter().enumerate() {
+        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
+            Ok(set) => set,
+            Err(e) => {
+                progress.clear();
+                eprintln!(
+                    "warning: {}: skipped, could not load .devcleanignore: {e}",
+                    d.path.display()
+                );
+                continue;
+            }
+        };
+        progress.update_phase("classifying", i + 1, projects.len(), &d.path);
+        let status = classify::classify(&d.path, &ignore_set);
+        out.push((d.path.clone(), status, ignore_set));
+    }
+    progress.finish();
+    out
+}
+
 /// `devclean list`: show each discovered project with its git status, sorted
 /// by severity (most-needs-attention first). Read-only — no cleaning.
 ///
@@ -345,24 +381,10 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
-    let mut rows: Vec<(String, classify::Status)> = Vec::new();
-    let mut progress = progress::ProgressWriter::new(std::io::stdout());
-    for (i, d) in projects.iter().enumerate() {
-        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
-            Ok(set) => set,
-            Err(e) => {
-                eprintln!(
-                    "warning: {}: skipped, could not load .devcleanignore: {e}",
-                    d.path.display()
-                );
-                continue;
-            }
-        };
-        progress.update_phase("classifying", i + 1, projects.len(), &d.path);
-        let status = classify::classify(&d.path, &ignore_set);
-        rows.push((d.path.display().to_string(), status));
-    }
-    progress.finish();
+    let mut rows: Vec<(String, classify::Status)> = classify_projects(&projects)
+        .into_iter()
+        .map(|(path, status, _)| (path.display().to_string(), status))
+        .collect();
     rows.sort_by_key(|&(_, status)| status);
 
     // Compute reclaimable size per project (only for cleanable rows) and
@@ -532,29 +554,10 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
-    let mut rows: Vec<(String, classify::Status)> = Vec::new();
-    let mut progress = progress::ProgressWriter::new(std::io::stdout());
-    for (i, d) in projects.iter().enumerate() {
-        // Classification is a read-only survey over independent projects, so
-        // one project with an unreadable `.devcleanignore` must not abort the
-        // whole report. Skip just that project: falling back to an empty set
-        // would treat nothing as protected and could report it `cleanable`,
-        // which is the one verdict the cleaning engine acts destructively on.
-        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
-            Ok(set) => set,
-            Err(e) => {
-                eprintln!(
-                    "warning: {}: skipped, could not load .devcleanignore: {e}",
-                    d.path.display()
-                );
-                continue;
-            }
-        };
-        progress.update_phase("classifying", i + 1, projects.len(), &d.path);
-        let status = classify::classify(&d.path, &ignore_set);
-        rows.push((d.path.display().to_string(), status));
-    }
-    progress.finish();
+    let mut rows: Vec<(String, classify::Status)> = classify_projects(&projects)
+        .into_iter()
+        .map(|(path, status, _)| (path.display().to_string(), status))
+        .collect();
     rows.sort_by_key(|&(_, status)| status);
 
     println!(
@@ -591,27 +594,11 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Classify every project, keeping each status and ignore-set for the
     // report and execution. Skip each project whose `.devcleanignore` could
-    // not be loaded — same fail-safe as `run_classification`: one bad set
-    // would otherwise mask a protected file as cleanable, and the engine
-    // acts destructively on that verdict.
-    let mut all_projects: Vec<(PathBuf, classify::Status, ignore::IgnoreSet)> = Vec::new();
-    let mut progress = progress::ProgressWriter::new(std::io::stdout());
-    for (i, d) in projects.iter().enumerate() {
-        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
-            Ok(set) => set,
-            Err(e) => {
-                eprintln!(
-                    "warning: {}: skipped, could not load .devcleanignore: {e}",
-                    d.path.display()
-                );
-                continue;
-            }
-        };
-        progress.update_phase("classifying", i + 1, projects.len(), &d.path);
-        let status = classify::classify(&d.path, &ignore_set);
-        all_projects.push((d.path.clone(), status, ignore_set));
-    }
-    progress.finish();
+    // not be loaded — see `classify_projects` for the fail-safe rationale:
+    // one bad set would otherwise mask a protected file as cleanable, and
+    // the engine acts destructively on that verdict.
+    let mut all_projects: Vec<(PathBuf, classify::Status, ignore::IgnoreSet)> =
+        classify_projects(&projects);
     all_projects.sort_by_key(|&(_, status, _)| status);
 
     // Report phase: each non-cleanable project gets a one-line reason; cleanable
@@ -739,10 +726,15 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // same order as `cleanable_meta`. Print each project's outcome, then
     // execute the approved ones (execution is always suppressed by
     // --dry-run; --force approved everything without prompting).
+    // The `cleaning N/M` progress line interleaves with per-project stdout
+    // output, so it is cleared in place before each print — a println after
+    // an un-cleared padded line would wrap and leave the progress line
+    // permanently on screen instead of overwriting it.
     let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
     for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
         let will_execute = r.project_approved && !cli.dry_run;
         clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
+        clean_progress.clear();
         println!(
             "clean {}: {} — {}",
             r.path.display(),
@@ -801,7 +793,10 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .cloned()
                 .collect();
             let ignore_set = &all_projects[*idx].2;
-            match clean::clean(&r.path, ignore_set, safe_set, &approved, cli.force, false) {
+            clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
+            let outcome = clean::clean(&r.path, ignore_set, safe_set, &approved, cli.force, false);
+            clean_progress.clear();
+            match outcome {
                 Ok(_) => {
                     println!(
                         "clean {}: deleted {} item(s)",
@@ -815,7 +810,6 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    clean_progress.finish();
     Ok(())
 }
 

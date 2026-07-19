@@ -31,12 +31,15 @@
 //! wrap and scroll. Each update pads with spaces and CR so a shorter path
 //! fully overwrites a longer previous one (no leftover trailing characters).
 //!
-//! ## Finish
+//! ## Clear and finish
 //!
-//! When the walk completes, the progress line is cleared (CR + spaces to
-//! width + CR) and a newline is emitted so the following summary line
-//! (e.g. listing: N projects) starts on a fresh line. No partial line
-//! lingers above the summary.
+//! Whenever other output (a summary line, a per-project block, a stderr
+//! warning) must interleave with a live progress line, the line is first
+//! cleared in place (CR + spaces to width + CR, no newline) via `clear` so
+//! the following output overwrites it rather than wrapping after the padded
+//! line. When a phase completes, `finish` clears the line and emits a
+//! newline so the following summary line (e.g. listing: N projects) starts
+//! on a fresh line. No partial line lingers above the summary.
 //!
 //! ## Testability
 //!
@@ -124,11 +127,13 @@ impl<W: Write> ProgressWriter<W> {
         let _ = self.writer.flush();
     }
 
-    /// Clear the progress line and emit a newline so the following summary
-    /// line starts on a fresh line.
+    /// Clear the progress line in place: CR + spaces to width + CR, no
+    /// newline. The cursor lands at column 0 of the erased line so the next
+    /// write (a println, a stderr warning) overwrites it rather than
+    /// wrapping after the padded progress line.
     ///
     /// When not a TTY this is a no-op.
-    pub fn finish(&mut self) {
+    pub fn clear(&mut self) {
         if !self.active {
             return;
         }
@@ -138,6 +143,18 @@ impl<W: Write> ProgressWriter<W> {
         let spaces = " ".repeat(self.width);
         let _ = self.writer.write_all(spaces.as_bytes());
         let _ = self.writer.write_all(b"\r");
+        let _ = self.writer.flush();
+    }
+
+    /// Clear the progress line and emit a newline so the following summary
+    /// line starts on a fresh line.
+    ///
+    /// When not a TTY this is a no-op.
+    pub fn finish(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.clear();
         let _ = self.writer.write_all(b"\n");
         let _ = self.writer.flush();
     }
@@ -352,6 +369,50 @@ mod tests {
             "label still emitted: {:?}",
             bytes
         );
+    }
+
+    /// clear erases the line in place without emitting a newline, so the
+    /// next write starts at column 0 of the erased line.
+    #[test]
+    fn clear_erases_line_without_newline() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 20,
+            active: true,
+        };
+        pw.update(Path::new("/some/path"));
+        pw.clear();
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        assert!(
+            !bytes.contains('\n'),
+            "clear must not emit a newline: {:?}",
+            bytes
+        );
+        assert!(
+            bytes.ends_with('\r'),
+            "clear must leave the cursor at column 0: {:?}",
+            bytes
+        );
+        let last = bytes.split('\r').rev().nth(1).unwrap_or("");
+        assert!(
+            last.trim().is_empty(),
+            "cleared segment must be spaces only: {:?}",
+            last
+        );
+    }
+
+    /// clear is a no-op when not a TTY.
+    #[test]
+    fn clear_no_op_when_not_tty() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 20,
+            active: false,
+        };
+        pw.clear();
+        assert!(pw.writer.is_empty(), "non-TTY clear must emit nothing");
     }
 
     /// finish clears the line and emits a newline.

@@ -307,13 +307,19 @@ Each subcommand that runs discovery — `devclean discovery`, `devclean list`,
 `devclean classification`, and the default run / `devclean clean` — renders a
 live single-line progress indicator while walking each workspace root:
 `walking: <path>` overwrites itself in place via a carriage return on a TTY,
-so the display never scrolls. When stdout is piped or redirected, nothing is
-rendered — a stream of CR-terminated partial paths would be garbage in a pipe
-or log file. Terminal width is resolved via the `terminal_size` crate, falling
-back to `COLUMNS` then a default of 80; paths that would wrap are truncated
-with a leading ellipsis so the leaf (current directory) stays visible. When
-the walk completes, the progress line is cleared and a newline is emitted so
-the following summary line starts on a fresh line.
+so the display never scrolls. The same indicator continues through the later
+phases: while each project's git state is examined the line reads
+`classifying N/M: <path>`, and while an approved project's untracked junk is
+deleted it reads `cleaning N/M: <path>` (N is the 1-based project counter,
+M the total). When stdout is piped or redirected, nothing is rendered — a
+stream of CR-terminated partial paths would be garbage in a pipe or log
+file. Terminal width is resolved via the `terminal_size` crate, falling back
+to `COLUMNS` then a default of 80; paths that would wrap are truncated with
+a leading ellipsis so the leaf (current directory) stays visible. Whenever
+regular output must interleave with the indicator (per-project rows,
+warnings), the progress line is first cleared in place; when a phase
+completes, it is cleared and a newline is emitted so the following summary
+line starts on a fresh line.
 
 See `src/discovery.rs` for the matching and nesting rules;
 `src/progress.rs` for the live indicator; `tests/discovery_cli.rs` for
