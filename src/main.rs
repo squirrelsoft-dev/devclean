@@ -1,6 +1,7 @@
 mod classify;
 mod clean;
 mod config;
+mod disk;
 mod discovery;
 mod ignore;
 mod interactive;
@@ -265,13 +266,108 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     rows.sort_by_key(|&(_, status)| status);
 
+    // Compute reclaimable size per project (only for cleanable rows) and
+    // an aggregate across all cleanable projects. A project whose safe set
+    // could not be built contributes zero — the row still displays but the
+    // aggregate skips that project.
+    let per_project_size: Vec<Option<String>> = rows
+        .iter()
+        .map(|(path, status)| {
+            if *status != classify::Status::Cleanable {
+                return None;
+            }
+            let safe_set = match safelist::SafeSet::from_config(
+                std::path::Path::new(path),
+                &cfg,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "warning: {}: could not build safe-to-delete set: {e}",
+                        path
+                    );
+                    return None;
+                }
+            };
+            let ignore_set = match ignore::IgnoreSet::load(std::path::Path::new(path)) {
+                Ok(s) => s,
+                Err(_) => return None,
+            };
+            match clean::dry_run(std::path::Path::new(path), &ignore_set, &safe_set) {
+                Ok(items) => match disk::compute_reclaimable_size(
+                    std::path::Path::new(path),
+                    &items,
+                ) {
+                    Ok(bytes) => Some(disk::format_size(bytes)),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: {}: could not compute reclaimable size: {e}",
+                            path
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "warning: {}: dry_run failed: {e}",
+                        path
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+
+    let cleanable_count = rows.iter().filter(|&(_, s)| *s == classify::Status::Cleanable).count();
+    let total_reclaimable: u64 = per_project_size
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, _)| {
+            if rows[idx].1 == classify::Status::Cleanable {
+                let path = std::path::Path::new(&rows[idx].0);
+                let ignore_set = match ignore::IgnoreSet::load(path) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                };
+                let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                };
+                clean::dry_run(path, &ignore_set, &safe_set)
+                    .ok()
+                    .and_then(|items| disk::compute_reclaimable_size(path, &items).ok())
+            } else {
+                None
+            }
+        })
+        .sum();
+    let total_reclaimable_str = if total_reclaimable > 0 {
+        Some(disk::format_size(total_reclaimable))
+    } else {
+        None
+    };
+
     // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
     // lets `output::color` fall back to its runtime gate.
-    println!("{}", output::format_summary(rows.len(), None));
-    for (path, status) in &rows {
+    println!(
+        "{}",
+        output::format_summary(
+            rows.len(),
+            None,
+            if cleanable_count > 0 { Some(cleanable_count) } else { None },
+            total_reclaimable_str.as_deref(),
+        )
+    );
+    for (idx, (path, status)) in rows.iter().enumerate() {
+        let size = per_project_size[idx].as_deref();
         println!(
             "{}",
-            output::format_project_row(std::path::Path::new(path), *status, None)
+            output::format_project_row(
+                std::path::Path::new(path),
+                *status,
+                None,
+                size,
+            )
         );
     }
     Ok(())
@@ -430,10 +526,48 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // safe set built here, so execution below does not rebuild or re-find either.
     // Each row uses the formatted shape with color gating on TTY.
     // The header is prefixed with "clean:" — this is the destructive run, so
-    // the reader knows which flow is about to execute.
+    // the reader knows which flow is about to execute. The aggregate
+    // reclaimable across all cleanable projects is computed below from
+    // each cleanable project's raw size, formatted once for the summary.
+    let cleanable_count = all_projects
+        .iter()
+        .filter(|&(_, status, _)| *status == classify::Status::Cleanable)
+        .count();
+    // Each cleanable project's reclaimable size is summed into an
+    // aggregate — the per-project rows below each carry their own size
+    // too, but the total is what the user actually wants.
+    let total_reclaimable: u64 = all_projects
+        .iter()
+        .filter(|&(_, status, _)| *status == classify::Status::Cleanable)
+        .filter_map(|(path, _, ignore_set)| {
+            let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
+                Ok(s) => s,
+                Err(_) => return None,
+            };
+            clean::dry_run(path, ignore_set, &safe_set)
+                .ok()
+                .and_then(|items| disk::compute_reclaimable_size(path, &items).ok())
+        })
+        .sum();
+    let total_reclaimable_str = if total_reclaimable > 0 {
+        Some(disk::format_size(total_reclaimable))
+    } else {
+        None
+    };
+    // The aggregate reclaimable is printed alongside the header — the
+    // per-project rows below each carry their own size too.
     println!(
         "clean: {} project(s) — sorted by status",
         all_projects.len()
+    );
+    println!(
+        "{}",
+        output::format_summary(
+            all_projects.len(),
+            None,
+            if cleanable_count > 0 { Some(cleanable_count) } else { None },
+            total_reclaimable_str.as_deref(),
+        )
     );
     let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
     let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
@@ -457,12 +591,28 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                println!("{}", output::format_project_row(path, *status, None));
+                let size = match disk::compute_reclaimable_size(path, &items) {
+                    Ok(bytes) => Some(disk::format_size(bytes)),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: {}: could not compute reclaimable size: {e}",
+                            path.display()
+                        );
+                        None
+                    }
+                };
+                println!(
+                    "{}",
+                    output::format_project_row(path, *status, None, size.as_deref())
+                );
                 cleanable_items.push((path.clone(), items));
                 cleanable_meta.push((idx, safe_set));
             }
             _ => {
-                println!("{}", output::format_project_row(path, *status, None));
+                println!(
+                    "{}",
+                    output::format_project_row(path, *status, None, None)
+                );
             }
         }
     }
