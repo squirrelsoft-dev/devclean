@@ -76,11 +76,11 @@ enum Command {
     /// sorted by status. Status 5 is the only cleanable state; status 1..4
     /// each signal that cleaning must wait. See issue #6 for the full spec.
     Classification,
-    /// Debug helper: clean each cleanable project in dry-run mode, printing
-    /// what each project would delete (protected items excluded, safe items
-    /// auto-deleted, surfaced items auto-approved via --force, or each one
-    /// listed for display in dry-run). Does not actually delete anything in
-    /// dry-run. See issue #7 for the full spec.
+    /// Interactive cleaning flow: report every project sorted by status,
+    /// then for each cleanable project show what would be deleted and
+    /// collect approval before running `git clean`. `--force` skips the
+    /// prompts and auto-approves; `--dry-run` previews and deletes nothing.
+    /// See issues #7 (engine) and #8 (flow) for the full spec.
     Clean,
 }
 
@@ -363,12 +363,15 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     all_projects.sort_by_key(|&(_, status, _)| status);
 
-    // Report phase: each non-cleanable project gets a one-line reason.
-    // Each cleanable project is listed separately.
+    // Report phase: each non-cleanable project gets a one-line reason;
+    // cleanable projects are listed separately as the cleanup subjects.
+    // For each cleanable project, keep its index into `all_projects` (for
+    // the ignore set) and the safe set built here, so execution below does
+    // not rebuild or re-find either.
     println!("clean: {} project(s) — sorted by status", all_projects.len());
-    let mut cleanable: Vec<PathBuf> = Vec::new();
     let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
-    for (path, status, ignore_set) in &all_projects {
+    let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
+    for (idx, (path, status, ignore_set)) in all_projects.iter().enumerate() {
         match status {
             classify::Status::Cleanable => {
                 let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
@@ -393,8 +396,8 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     path.display(),
                     status.label()
                 );
-                cleanable.push(path.clone());
                 cleanable_items.push((path.clone(), items));
+                cleanable_meta.push((idx, safe_set));
             }
             _ => {
                 println!(
@@ -409,7 +412,7 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Zero cleanable: summary and exit 0 — no prompts, no enumeration,
     // nothing to clean. The flow only runs when there is a subject to clean.
-    if cleanable.is_empty() {
+    if cleanable_items.is_empty() {
         println!("clean: no cleanable projects — nothing to delete");
         return Ok(());
     }
@@ -419,7 +422,7 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // owns the decision state machine; the CLI hook owns the I/O plumbing.
     let inputs = interactive::InteractiveFlowInputs {
         all_projects: all_projects.iter().map(|(p, s, _)| (p.clone(), *s)).collect(),
-        per_project_items: cleanable_items.clone(),
+        per_project_items: cleanable_items,
         force: cli.force,
         dry_run: cli.dry_run,
     };
@@ -427,13 +430,11 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = std::io::BufReader::new(stdin_lock);
     let results = interactive::run(inputs, &mut reader);
 
-    // Each result: print each project's report (what would-delete and
-    // each project's path). In interactive mode, each item's per-item prompt
-    // and each project's per-project prompt are the same as above.
-    // Then execute each project that is project_approved (in interactive;
-    // each project auto-approved in force; each project auto-approved in
-    // dry-run but each execution is gated on dry_run = false).
-    for r in &results {
+    // Outcome phase: `run` returns one result per cleanable project in the
+    // same order as `cleanable_meta`. Print each project's outcome, then
+    // execute the approved ones (execution is always suppressed by
+    // --dry-run; --force approved everything without prompting).
+    for (r, (idx, safe_set)) in results.iter().zip(&cleanable_meta) {
         println!(
             "clean {}: {} — {}",
             r.path.display(),
@@ -446,35 +447,33 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 clean::Classification::Safe => "safe-to-delete",
                 clean::Classification::Surfaced => "surfaced",
             };
-            let would_delete = r.would_delete.contains(&item.rel_path);
+            let verdict = if r.would_delete.contains(&item.rel_path) {
+                " (would delete)"
+            } else if cli.dry_run
+                && !cli.force
+                && item.classification == clean::Classification::Surfaced
+            {
+                // A real interactive run would ask about this item, so the
+                // preview must not claim either fate.
+                " (would prompt)"
+            } else {
+                " (kept)"
+            };
             println!(
                 "  {}{} [{}]{}",
                 item.rel_path.display(),
                 if item.is_dir { "/" } else { "" },
                 label,
-                if would_delete { " (would delete)" } else { " (kept)" }
+                verdict
             );
         }
 
         if r.project_approved && !cli.dry_run {
-            // Execute: build each exclusion from each approved set (each
-            // item's rel_path — each Safe + each approved Surfaced are each
-            // un-excluded; each Protected + each disapproved Surfaced are
-            // each excluded). The `clean` function owns this; it builds each
-            // exclusion and runs each `git clean`.
-            let safe_set = match safelist::SafeSet::from_config(&r.path, &cfg) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!(
-                        "warning: {}: could not build safe-to-delete set: {e}",
-                        r.path.display()
-                    );
-                    continue;
-                }
-            };
-            // Each approval is each item's rel_path for each Surfaced item
-            // each approved. Each Saved item is auto-removed; each Protected
-            // item is excluded; each disapproved Surfaced item is excluded.
+            // `clean` builds the exclusion list from the approvals: Safe and
+            // approved Surfaced items are left un-excluded so `git clean`
+            // deletes them; Protected and unapproved Surfaced items are
+            // excluded. The approvals are the Surfaced entries of the
+            // would-delete list.
             let approved: Vec<PathBuf> = r.would_delete
                 .iter()
                 .filter(|p| {
@@ -485,27 +484,11 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .cloned()
                 .collect();
-            // Each project's ignore_set was captured above alongside its
-            // status. Each Safe item is auto-removed; each Protected item is
-            // excluded; each disapproved Surfaced item is excluded.
-            let _ignore_set = all_projects
-                .iter()
-                .find(|(p, _, _)| p == &r.path)
-                .map(|(_, _, is)| is);
-            let ignore_set = match _ignore_set {
-                Some(is) => is,
-                None => {
-                    eprintln!(
-                        "warning: {}: could not find ignore set, skipping execution",
-                        r.path.display()
-                    );
-                    continue;
-                }
-            };
+            let ignore_set = &all_projects[*idx].2;
             if let Err(e) = clean::clean(
                 &r.path,
                 ignore_set,
-                &safe_set,
+                safe_set,
                 &approved,
                 cli.force,
                 false,

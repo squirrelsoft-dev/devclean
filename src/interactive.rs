@@ -21,7 +21,8 @@
 //! 1. **Report phase** — show every project sorted by status, report each
 //!    non-cleanable one with a one-line reason, list each cleanable one.
 //! 2. **All-cleanup prompt** — "Clean the N cleanable projects? (y/n)". If
-//!    no (or EOF / --force / --dry-run), exit without touching any project.
+//!    no (or EOF / --force / --dry-run), exit without touching any project:
+//!    no further prompts are shown and every result comes back unapproved.
 //! 3. **Per-project loop** (in sorted order, each cleanable):
 //!     a. enumerate untracked items (dry-run);
 //!     b. print the project path and the list of each item that would be
@@ -40,6 +41,12 @@
 //! every item the user would approve if prompted). A `Surfaced` item is
 //! never silently deleted; a `Protected` item is always excluded. `Safe` and
 //! approved-`Surfaced` items are left un-excluded so `git clean` deletes them.
+//!
+//! In `--dry-run` without `--force`, only `Safe` items are reported as
+//! would-delete; `Surfaced` items are what a real interactive run would
+//! prompt about, so the preview must not claim they would be deleted.
+//! `--force --dry-run` previews the force run, so every non-`Protected`
+//! item is reported as would-delete.
 //!
 //! The `clean` function in `clean.rs` owns the deletion step; this module
 //! owns the approval collection.
@@ -80,8 +87,10 @@ pub struct ProjectResult {
     pub status: Status,
     /// Each untracked item enumerated for this project.
     pub items: Vec<CleanItem>,
-    /// Items this project would be deleted (Safe + approved Surfaced for
-    /// interactive; every item for force/dry-run auto-approve).
+    /// The items that would be deleted for this project (Safe + approved
+    /// Surfaced in interactive mode; every non-Protected item under
+    /// --force; Safe only under plain --dry-run, which previews the
+    /// interactive run without pretending Surfaced items were approved).
     pub would_delete: Vec<PathBuf>,
     /// Whether the user (or --force) approved this project for cleaning.
     pub project_approved: bool,
@@ -149,54 +158,66 @@ pub fn collect_all_approval<R: BufRead>(
     let question = format!(
         "Clean the {num_cleanable} cleanable projects? (y/n)",
     );
-    print!("? ");
-    eprintln!("{question}");
+    eprintln!("? {question}");
     match read_line(reader) {
         Some(answer) if answer.eq_ignore_ascii_case("y") => true,
         _ => false,
     }
 }
 
+/// Print the pre-approval report for one project: its path and every
+/// enumerated item with its classification and fate. Goes to stderr — the
+/// same stream as the prompts — so the user sees exactly what they are
+/// about to approve, in order, before any question is asked.
+fn print_project_report(path: &std::path::Path, items: &[CleanItem]) {
+    eprintln!("{}:", path.display());
+    for item in items {
+        let (label, fate) = match item.classification {
+            Classification::Protected => ("protected", "kept"),
+            Classification::Safe => ("safe-to-delete", "will delete"),
+            Classification::Surfaced => ("surfaced", "needs approval"),
+        };
+        eprintln!(
+            "  {}{} [{label}] ({fate})",
+            item.rel_path.display(),
+            if item.is_dir { "/" } else { "" },
+        );
+    }
+}
+
 /// Prompt the user about each surfaced item for `project_path`. Each
-/// `item` is shown one at a time with its classification label, and the user
-/// answers keep or delete. Each approval is returned in order.
+/// `Surfaced` item is shown one at a time and the user answers delete or
+/// keep. The approvals are returned in item order.
 ///
-/// "y"/"yes"/"n"/"no"/"n"/EOF → each call returns the item's approval
-/// status (`approved: true` → would be deleted; `approved: false` → excluded,
-/// kept). The caller accumulates these into the set it feeds into `build_exclusions`.
+/// Only a (case-insensitive) "y" approves; anything else — including
+/// "yes", blank lines, and EOF — keeps the item (`approved: false` →
+/// excluded). The caller accumulates the approvals into the set it feeds
+/// into `build_exclusions`.
 ///
 /// `--force` skips the per-item loop entirely; `--dry-run` displays without
-/// collecting approvals. The call site in `collect_all` decides.
+/// collecting approvals. The call site in `run` decides.
 pub fn collect_each_item<R: BufRead>(
     reader: &mut R,
     _project_path: &std::path::Path,
     items: &[CleanItem],
 ) -> Vec<(PathBuf, bool)> {
-    let mut each: Vec<(PathBuf, bool)> = Vec::new();
+    let mut approvals: Vec<(PathBuf, bool)> = Vec::new();
     for item in items {
         if item.classification != Classification::Surfaced {
             continue;
         }
-        let label = match item.classification {
-            Classification::Surfaced => "surfaced",
-            Classification::Protected => "protected",
-            Classification::Safe => "safe-to-delete",
-        };
-        let display = match item.is_dir {
-            true => format!("{}{} [{}] delete or keep? (y/n)",
-                item.rel_path.display(), "/", label),
-            false => format!("{} [{}] delete or keep? (y/n)",
-                item.rel_path.display(), label),
-        };
-        print!("? ");
-        eprintln!("{display}");
+        eprintln!(
+            "? {}{} [surfaced] delete or keep? (y/n)",
+            item.rel_path.display(),
+            if item.is_dir { "/" } else { "" },
+        );
         let approved = match read_line(reader) {
             Some(answer) if answer.eq_ignore_ascii_case("y") => true,
             _ => false,
         };
-        each.push((item.rel_path.clone(), approved));
+        approvals.push((item.rel_path.clone(), approved));
     }
-    each
+    approvals
 }
 
 /// Prompt the user about cleaning a single project. Returns whether the
@@ -211,8 +232,7 @@ pub fn collect_project_approval<R: BufRead>(
         "Clean {}? (y/n)",
         project_path.display(),
     );
-    print!("? ");
-    eprintln!("{question}");
+    eprintln!("? {question}");
     match read_line(reader) {
         Some(answer) if answer.eq_ignore_ascii_case("y") => true,
         _ => false,
@@ -220,23 +240,24 @@ pub fn collect_project_approval<R: BufRead>(
 }
 
 /// Drive the full interactive flow. Returns each cleanable project's result
-/// in sorted order.
+/// in sorted order (one result per `per_project_items` entry, same order).
 ///
 /// For each cleanable project (in sorted order):
-/// - in interactive mode: print the report, collect each item's approval and
-///   the project's approval, execute if both approved;
-/// - in force mode: print the report, execute every item (auto-approved);
-/// - in dry-run mode: print the report, execute nothing;
-/// - in force + dry-run mode: print the auto-approved report, execute nothing.
+/// - in interactive mode: print the project's item report, collect each
+///   surfaced item's approval and the project's approval — the report is
+///   shown *before* any prompt so nothing is approved sight-unseen;
+/// - in force mode: no prompts, every item auto-approved;
+/// - in dry-run mode: no prompts, Safe items marked would-delete;
+/// - in force + dry-run mode: no prompts, every non-Protected item marked
+///   would-delete (a preview of the force run).
 ///
 /// In interactive mode, the all-cleanup prompt is collected first. If the
-/// user says no (or EOF), the function returns with every project
-/// `project_approved = false`. The per-project loop still runs, but each
-/// project's execution is gated.
+/// user says no (or EOF), no further prompts are shown and the function
+/// returns with every project `project_approved = false`.
 ///
 /// In non-interactive mode (`--force` or `--dry-run`), the all-cleanup
-/// prompt is skipped; each project's execution is unconditional (if dry-run
-/// is set, no execution; otherwise every project is fully approved).
+/// prompt is skipped and every project comes back approved (the caller
+/// gates actual execution on `dry_run`).
 ///
 /// Zero cleanable → short-circuits before prompting: the summary is printed
 /// by the caller (see `main::run_clean`); this function returns the (empty)
@@ -246,50 +267,45 @@ pub fn run<R: BufRead>(
     reader: &mut R,
 ) -> Vec<ProjectResult> {
     let num_cleanable = inputs.per_project_items.len();
+    let interactive = !inputs.force && !inputs.dry_run;
 
     // Step 1: report phase — caller prints this. Each project gets a human
     // readable status and a one-line reason. Cleanable projects are listed
     // separately as the cleanup subjects.
 
     // Step 2: all-cleanup prompt — skip in non-interactive modes.
-    let all_approved = if !inputs.force && !inputs.dry_run {
+    let all_approved = if interactive {
         collect_all_approval(reader, num_cleanable)
     } else {
-        // Force or dry-run: the loop runs unconditionally. Each project
-        // is treated as approved for display.
         true
     };
 
     // Step 3: per-project loop.
     let mut results: Vec<ProjectResult> = Vec::new();
-    for (i, &(ref path, ref items)) in inputs.per_project_items.iter().enumerate() {
-        // Build the set of each Surfaced item the user approved (interactive mode only;
-        // empty for force/dry-run because they auto-approve).
-        let item_approvals: Vec<(PathBuf, bool)> =
-            if !inputs.force && !inputs.dry_run {
-                collect_each_item(reader, path, items)
-            } else {
-                Vec::new()
-            };
+    for (path, items) in &inputs.per_project_items {
+        // Show what would be deleted, then ask. A declined all-cleanup
+        // prompt suppresses every later prompt: the user already said no.
+        let item_approvals: Vec<(PathBuf, bool)> = if interactive && all_approved {
+            print_project_report(path, items);
+            collect_each_item(reader, path, items)
+        } else {
+            Vec::new()
+        };
 
-        // Collect each Surfaced item's approval into the "approved" list.
         let approved: Vec<PathBuf> = item_approvals
             .into_iter()
             .filter(|(_, approved)| *approved)
             .map(|(path, _)| path)
             .collect();
 
-        // Build the "would-delete" list from every item that would be
-        // deleted in this mode. Safe + approved-`Surfaced` for interactive;
-        // each item (each non-Protected, each auto-approved for display) for
-        // force/dry-run.
-        let would_delete: Vec<PathBuf> = items
+        let would_delete_paths: Vec<PathBuf> = items
             .iter()
             .filter(|item| {
-                if inputs.dry_run {
-                    // Each item non-Protected is each auto-approved for display
-                    // in dry-run (the user sees each item each deleted).
-                    item.classification != Classification::Protected
+                if inputs.dry_run && !inputs.force {
+                    // Plain dry-run previews the interactive run: Safe items
+                    // would be deleted, Surfaced items would be prompted
+                    // about, so they must not be claimed as deletions.
+                    item.classification == Classification::Safe
                 } else {
                     would_delete(item, inputs.force, &approved)
                 }
@@ -297,18 +313,29 @@ pub fn run<R: BufRead>(
             .map(|item| item.rel_path.clone())
             .collect();
 
-        // Step 4: per-project confirmation — only in interactive mode.
-        let project_approved = if !inputs.force && !inputs.dry_run {
-            collect_project_approval(reader, path) && all_approved
+        // Step 4: per-project confirmation — only in interactive mode, and
+        // only when the all-cleanup prompt was approved.
+        let project_approved = if interactive {
+            all_approved && collect_project_approval(reader, path)
         } else {
             all_approved
         };
 
+        // `per_project_items` holds only cleanable projects, a subset of
+        // `all_projects`, so the status must be looked up by path — the
+        // loop index does not line up with the full sorted list.
+        let status = inputs
+            .all_projects
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|&(_, s)| s)
+            .unwrap_or(Status::Cleanable);
+
         results.push(ProjectResult {
             path: path.clone(),
-            status: inputs.all_projects[i].1,
+            status,
             items: items.clone(),
-            would_delete: would_delete.clone(),
+            would_delete: would_delete_paths,
             project_approved,
         });
     }
@@ -354,8 +381,8 @@ mod tests {
         run(inputs, &mut r)
     }
 
-    /// Interactive mode with every answer "y": each project is approved,
-    /// each surfaced item is approved, each project runs.
+    /// Interactive mode with every answer "y": the project is approved and
+    /// every surfaced item is approved.
     #[test]
     fn interactive_all_yes_approves_each_project() {
         let items = vec![
@@ -365,28 +392,24 @@ mod tests {
             make_item("c.tmp", Classification::Surfaced, false),
         ];
         let inputs = inputs_for(&items, false, false);
-        // answers: all, each-item, each-project, each-project, each-project,
-        //         each-project, each-project, each-project. We have three
-        //         cleanable projects in `inputs.all_projects`, so we need
-        //         three "y" per project. Each project has two surfaced items.
-        let all = format!("y\ny\ny\ny\ny\ny\ny\ny\ny\n");
+        // One cleanable project consuming four answers: the all-cleanup
+        // prompt, one per surfaced item (b.tmp, c.tmp), and the per-project
+        // confirmation.
+        let all = format!("y\ny\ny\ny\n");
         let results = run_with_answers(inputs, &all);
-        // Three projects, all approved.
         assert_eq!(results.len(), 1);
         assert!(results[0].project_approved);
-        // Both surfaced items approved.
         assert_eq!(results[0].would_delete.len(), 3); // safe + 2 surfaced
     }
 
-    /// Interactive mode with "n" on all-cleanup: exit without any project
-    /// approved.
+    /// Interactive mode with "n" on all-cleanup: no further answers are
+    /// consumed and no project is approved.
     #[test]
     fn interactive_all_no_exits_cleanly() {
         let items = vec![make_item("target", Classification::Safe, true)];
         let inputs = inputs_for(&items, false, false);
-        let results = run_with_answers(inputs, "n\ny\ny\n");
+        let results = run_with_answers(inputs, "n\n");
         assert_eq!(results.len(), 1);
-        // Project is not approved because all-cleanup was "n".
         assert!(!results[0].project_approved);
     }
 
@@ -399,11 +422,11 @@ mod tests {
             make_item("b.tmp", Classification::Surfaced, false),
         ];
         let inputs = inputs_for(&items, false, false);
-        // each item: a.tmp "n", b.tmp "y" — each-item1 (a.tmp) excluded (kept), each-item2 (b.tmp) approved (would-delete).
+        // Answers: all-cleanup "y", a.tmp "n" (kept), b.tmp "y" (delete),
+        // per-project "y".
         let all = format!("y\nn\ny\ny\n");
         let results = run_with_answers(inputs, &all);
         assert!(results[0].project_approved);
-        // Only b.tmp would-delete; a.tmp is excluded (kept).
         assert!(results[0].would_delete.contains(&PathBuf::from("b.tmp")));
         assert!(!results[0].would_delete.contains(&PathBuf::from("a.tmp")));
     }
@@ -432,9 +455,9 @@ mod tests {
         assert!(!would_delete.contains(&&PathBuf::from("important.dat")));
     }
 
-    /// Dry-run mode: each project is "approved" for display but each project
-    /// is also non-executed. The result shows the items and their
-    /// classifications but no execution.
+    /// Dry-run mode: no prompts, nothing executed. Only Safe items are
+    /// reported as would-delete — a Surfaced item would be prompted about
+    /// in a real interactive run, so the preview must not claim it.
     #[test]
     fn dry_run_displays_each_item() {
         let items = vec![
@@ -444,13 +467,11 @@ mod tests {
         let inputs = inputs_for(&items, false, true);
         let results = run_with_answers(inputs, "");
         assert!(results[0].project_approved);
-        // Both non-protected items would-delete in dry-run (auto-approved
-        // each item; each project is "approved" for display).
-        assert_eq!(results[0].would_delete.len(), 2);
+        assert_eq!(results[0].would_delete, vec![PathBuf::from("target")]);
     }
 
-    /// Force + dry-run: each project's report is printed (auto-approved view)
-    /// and no project is executed.
+    /// Force + dry-run previews the force run: every non-Protected item is
+    /// reported as would-delete and nothing is executed.
     #[test]
     fn force_and_dry_run_auto_approve_each_item() {
         let items = vec![
@@ -461,12 +482,12 @@ mod tests {
         let inputs = inputs_for(&items, true, true);
         let results = run_with_answers(inputs, "");
         assert!(results[0].project_approved);
-        // target and a.tmp would-delete (auto-approved each item); important.dat is excluded.
+        // target and a.tmp would-delete; important.dat is Protected.
         assert_eq!(results[0].would_delete.len(), 2);
     }
 
-    /// Zero cleanable projects: each project is reported, no prompts are
-    /// sent, each result is empty.
+    /// Zero cleanable projects: no prompts are sent and the result list is
+    /// empty.
     #[test]
     fn zero_cleanable_each_result_empty() {
         let inputs = InteractiveFlowInputs {
@@ -482,22 +503,23 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    /// Each project in interactive mode is gated by both all-cleanup and
-    /// per-project approval — if either is no, the project is not approved.
+    /// A project in interactive mode is gated by both the all-cleanup and
+    /// the per-project approval — if either is no, it is not approved.
     #[test]
     fn per_project_gating_each_condition() {
         let items = vec![make_item("target", Classification::Safe, true)];
         let inputs = inputs_for(&items, false, false);
-        // No each-item prompts (target is Safe, not Surfaced); each-project prompt reads second answer.
+        // No per-item prompts (target is Safe, not Surfaced); the
+        // per-project prompt reads the second answer.
         let all = format!("y\nn\n");
         let results = run_with_answers(inputs, &all);
-        // each-project: "n" → each project not approved, even though each-item approved.
+        // Per-project answer "n" → not approved despite all-cleanup "y".
         assert!(!results[0].project_approved);
     }
 
-    /// Each item's classification is respected: Protected items are never in
-    /// would-delete; each Safe items are always in would-delete; each
-    /// Surfaced items are in would-delete only if approved (or force).
+    /// Classification is respected: Protected items are never in
+    /// would-delete; Safe items always are; Surfaced items are in
+    /// would-delete only when approved (or under force).
     #[test]
     fn each_classification_respected_each_item() {
         let items = vec![
@@ -506,7 +528,7 @@ mod tests {
             make_item("b.tmp", Classification::Surfaced, false),
         ];
         let inputs = inputs_for(&items, false, false);
-        // each-item: b.tmp "y" → would-delete.
+        // Answers: all-cleanup "y", b.tmp "y", per-project "y".
         let all = format!("y\ny\ny\n");
         let results = run_with_answers(inputs, &all);
         let would_delete: Vec<&PathBuf> = results[0].would_delete.iter().collect();
@@ -539,6 +561,31 @@ mod tests {
         let all = format!("y\ny\ny\n");
         let results = run_with_answers(inputs, &all);
         assert_eq!(results[0].path, PathBuf::from("/tmp/project"));
+        assert_eq!(results[0].status, Status::Cleanable);
+    }
+
+    /// The result status is looked up by path, not by index: non-cleanable
+    /// projects sort before cleanable ones in `all_projects`, so indexing
+    /// that list with the cleanable-only loop index would mislabel the
+    /// cleanable project (e.g. as no-git).
+    #[test]
+    fn status_looked_up_by_path_with_non_cleanable_projects_present() {
+        let cleanable = PathBuf::from("/tmp/zz-cleanable");
+        let inputs = InteractiveFlowInputs {
+            all_projects: vec![
+                (PathBuf::from("/tmp/aa-no-git"), Status::NoGit),
+                (cleanable.clone(), Status::Cleanable),
+            ],
+            per_project_items: vec![(
+                cleanable.clone(),
+                vec![make_item("target", Classification::Safe, true)],
+            )],
+            force: false,
+            dry_run: true,
+        };
+        let results = run_with_answers(inputs, "");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, cleanable);
         assert_eq!(results[0].status, Status::Cleanable);
     }
 }

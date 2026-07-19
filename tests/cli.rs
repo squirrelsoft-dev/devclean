@@ -100,7 +100,8 @@ fn explicit_missing_config_is_an_error() {
 
 #[test]
 fn force_and_dry_run_used_together_run_clean() {
-    // Each config each workspace root each exists.
+    // A config whose single workspace root exists (and is empty), so the
+    // combined flags exercise the clean flow without finding anything.
     let each_dir = std::env::temp_dir().join("devclean-cli-test-each");
     std::fs::create_dir_all(&each_dir).unwrap();
     let toml =
