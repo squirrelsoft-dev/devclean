@@ -264,13 +264,16 @@ additions). Markers may be exact filenames or glob patterns; a folder is
 reported once, tagged with one of the markers found in it.
 
 Depth is counted from each workspace root: depth 0 is the root itself, depth 1
-a direct child, and so on. The walk never rises above a root, and symlinks are
-not followed. Only `.git` boundaries define standalone projects: a nested
-`.git` is reported as a separate project, but a non-git marker (`Cargo.toml`,
-`package.json`, ...) in a subfolder of an ancestor git worktree is part of that
-project, not a new one — a monorepo with a root `.git` and marker-bearing
-package folders yields one entry. A non-git marker at a workspace root is
-always reported; a git repo above the root is never consulted. Reported paths
+a direct child, and so on. The walk never rises above a root, symlinks are
+not followed, and the walk never descends into a `.git` directory (git
+internals are never candidate projects). Each git project yields at most one
+entry: any marker in a subfolder of an ancestor git worktree — a non-git
+marker (`Cargo.toml`, `package.json`, ...) or a nested `.git`, whether a
+directory or a worktree/submodule gitdir pointer file — is part of that
+project, not a new one. A monorepo with a root `.git` and marker-bearing
+package folders yields one entry, and a repo's nested git worktrees are not
+reported separately. A non-git marker at a workspace root is always reported;
+a git repo above the root is never consulted. Reported paths
 are printed as they were walked from the workspace root, so configuring
 absolute roots (the usual case) yields absolute output.
 
@@ -294,7 +297,7 @@ first). Only status 5 is cleanable; statuses 1-4 each mean cleaning must wait.
 
 | # | Status | Meaning |
 |---|-------|---------|
-| 1 | `no-git` | Has a project marker but is NOT git-initialized. |
+| 1 | `no-git` | Has a project marker but is NOT git-initialized (or `.git` is a dangling gitdir pointer to a path that no longer exists). |
 | 2 | `no-remote` | Git repo with no remote configured. |
 | 3 | `unpushed` | Git repo with a remote but unpushed commits (or no upstream). |
 | 4 | `wip` | Git repo with uncommitted work-in-progress (modified/staged tracked changes). |

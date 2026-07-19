@@ -274,11 +274,12 @@ fn has_ancestor_git(dir: &Path, root: &Path) -> bool {
 /// - Literal: compare the basename string.
 /// - Glob: compile once per call site, not per file (the MarkerSet caches).
 ///
-/// `.git` wins over every other marker when a folder contains both: the
-/// nesting rule (issue #15) keys on whether the matched marker is `.git`, so
-/// the choice must not depend on `read_dir`'s platform-specific entry order —
-/// a nested git repo that also carries e.g. a `package.json` is still a
-/// separate project.
+/// `.git` wins over every other marker when a folder contains both, so the
+/// reported marker does not depend on `read_dir`'s platform-specific entry
+/// order — a git repo that also carries e.g. a `package.json` is always
+/// reported with the `.git` marker. Suppression itself no longer keys on
+/// which marker matched (issue #26): anything under an ancestor git worktree
+/// is suppressed regardless.
 fn find_marker_in<'a>(dir: &Path, markers: &'a MarkerSet) -> Option<&'a str> {
     let read = fs::read_dir(dir).ok()?;
     let mut first: Option<&'a str> = None;
@@ -310,7 +311,8 @@ mod tests {
 
     use std::sync::LazyLock;
 
-static COUNTER: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(std::process::id() as u64));
+    static COUNTER: LazyLock<AtomicU64> =
+        LazyLock::new(|| AtomicU64::new(std::process::id() as u64));
 
     fn mkconfig(root: &Path, markers: &[&str], depth: usize) -> Config {
         Config {
@@ -351,37 +353,37 @@ static COUNTER: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(std::proce
             .unwrap();
         assert!(status.success(), "git init failed: {:?}", dir);
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C").arg(dir)
+        cmd.arg("-C")
+            .arg(dir)
             .arg("symbolic-ref")
             .arg("HEAD")
             .arg("refs/heads/main");
         assert!(cmd.status().unwrap().success());
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C").arg(dir)
+        cmd.arg("-C")
+            .arg(dir)
             .arg("config")
             .arg("user.email")
             .arg("test@test.dev");
         assert!(cmd.status().unwrap().success());
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C").arg(dir)
+        cmd.arg("-C")
+            .arg(dir)
             .arg("config")
             .arg("user.name")
             .arg("Test");
         assert!(cmd.status().unwrap().success());
         fs::write(dir.join("initial.txt"), "initial").unwrap();
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C").arg(dir)
-            .arg("add")
-            .arg("initial.txt");
+        cmd.arg("-C").arg(dir).arg("add").arg("initial.txt");
         assert!(cmd.status().unwrap().success());
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C").arg(dir)
-            .arg("status")
-            .arg("--porcelain");
+        cmd.arg("-C").arg(dir).arg("status").arg("--porcelain");
         let out = cmd.output().unwrap();
         if !out.stdout.is_empty() {
             let mut cmd = std::process::Command::new("git");
-            cmd.arg("-C").arg(dir)
+            cmd.arg("-C")
+                .arg(dir)
                 .arg("commit")
                 .arg("-m")
                 .arg("initial");
@@ -393,11 +395,7 @@ static COUNTER: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(std::proce
     fn write_gitdir(dir: &Path, target: &Path) -> PathBuf {
         let gitfile = dir.join(".git");
         fs::create_dir_all(dir).unwrap();
-        fs::write(
-            &gitfile,
-            &format!("gitdir: {}", target.display()),
-        )
-        .unwrap();
+        fs::write(&gitfile, format!("gitdir: {}", target.display())).unwrap();
         gitfile
     }
 
