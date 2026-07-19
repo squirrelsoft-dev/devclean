@@ -247,8 +247,10 @@ whether a given path is in it. The catalog is:
 
 - **Built-in defaults** — compiled into `src/safelist.rs` as `BUILT_IN_DEFAULTS` (a non-exhaustive list of common build/cache dirs/files: `node_modules`, `target`, `.next`, `.turbo`, `dist`, `build`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.gradle`, `bin/obj`, `out`, `coverage`, `.nuxt`, `.svelte-kit`, `.cache`, `.parcel-cache`).
 - **Extension via `Config::safe_delete`** — user-supplied gitignore-style globs are appended (not replaced) to the built-in set. Patterns behave like gitignore globs anchored at the project root: each matches the named dir at any depth (e.g. `**/node_modules`), and matching a directory covers everything beneath it via the `ignore` crate's parent-match semantics.
-- **Intended consumer** — the cleaning engine, which removes matched paths
-  without asking for approval. See "Cleaning" above.
+- **Intended consumers** — the cleaning engine, which removes matched paths
+  without asking for approval (see "Cleaning" above), and the discovery walk,
+  which derives its descent-prune set from the same catalog (see "Discovery"
+  below).
 - **Observable hook** — `devclean safelist <path>` is the minimal diagnostic
   for the catalog.
 
@@ -271,16 +273,25 @@ reported once, tagged with one of the markers found in it.
 
 Depth is counted from each workspace root: depth 0 is the root itself, depth 1
 a direct child, and so on. The walk never rises above a root, symlinks are
-not followed, and the walk never descends into a `.git` directory (git
-internals are never candidate projects). Each git project yields at most one
-entry: any marker in a subfolder of an ancestor git worktree — a non-git
-marker (`Cargo.toml`, `package.json`, ...) or a nested `.git`, whether a
-directory or a worktree/submodule gitdir pointer file — is part of that
-project, not a new one. A monorepo with a root `.git` and marker-bearing
-package folders yields one entry, and a repo's nested git worktrees are not
-reported separately. A non-git marker at a workspace root is always reported;
-a git repo above the root is never consulted. Reported paths
-are printed as they were walked from the workspace root, so configuring
+not followed, and `WalkDir` is instructed via `filter_entry` to never descend
+into a `.git` directory (git internals are never candidate projects). The
+safelist catalog (`BUILT_IN_DEFAULTS` plus each user-supplied `safe_delete`
+entry) is the single source of truth for what is a non-project artifact: each
+`**/<single-segment>` pattern — or an equivalent bare `<single-segment>`
+entry — contributes its basename to the descent-prune set, so
+`node_modules`, `target`, `dist`, `build`, `.next`, `.venv`, and other
+built-in junk dirs are not walked at all. Multi-segment patterns like
+`**/bin/obj` remain clean-time-only (not over-pruned on bare `obj`). A
+project's `.git` marker is still detected via `fs::read_dir` on its own
+children — only descent into `.git/` internals is skipped. Each git project
+yields at most one entry: any marker in a subfolder of an ancestor git
+worktree — a non-git marker (`Cargo.toml`, `package.json`, ...) or a nested
+`.git`, whether a directory or a worktree/submodule gitdir pointer file — is
+part of that project, not a new one. A monorepo with a root `.git` and
+marker-bearing package folders yields one entry, and a repo's nested git
+worktrees are not reported separately. A non-git marker at a workspace root
+is always reported; a git repo above the root is never consulted. Reported
+paths are printed as they were walked from the workspace root, so configuring
 absolute roots (the usual case) yields absolute output.
 
 ```
