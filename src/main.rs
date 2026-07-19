@@ -6,6 +6,7 @@ mod disk;
 mod ignore;
 mod interactive;
 mod output;
+mod progress;
 mod safelist;
 
 use std::fs;

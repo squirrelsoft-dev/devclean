@@ -87,6 +87,7 @@ use glob::Pattern;
 use walkdir::WalkDir;
 
 use crate::config::Config;
+use crate::progress::ProgressWriter;
 use crate::safelist::BUILT_IN_DEFAULTS;
 
 /// A single discovered project path and the marker that identified it.
@@ -203,9 +204,18 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
     }
 
     let mut results: Vec<DiscoveredProject> = Vec::new();
+    let mut progress = ProgressWriter::new(std::io::stdout());
     for root in &cfg.workspace_roots {
-        walk_root(root, max_depth, &markers, &prune_basenames, &mut results)?;
+        walk_root(
+            root,
+            max_depth,
+            &markers,
+            &prune_basenames,
+            &mut results,
+            &mut progress,
+        )?;
     }
+    progress.finish();
 
     Ok(results)
 }
@@ -265,12 +275,18 @@ fn build_prune_set(user_patterns: &[String]) -> std::collections::HashSet<String
 /// contract): `node_modules`, `target`, `dist`, etc. A `.git` entry is also
 /// pruned — but `find_marker_in` reads the parent's children directly so a
 /// parent containing a `.git` is still detected as a project.
+///
+/// `progress` is the live single-line progress writer (issue #27): each
+/// visited directory is rendered on one line that overwrites itself in place
+/// via a carriage return on a TTY, giving the user feedback that devclean is
+/// working on a large workspace. When not a TTY the writer is a no-op.
 fn walk_root(
     root: &Path,
     max_depth: usize,
     markers: &MarkerSet,
     prune_basenames: &std::collections::HashSet<String>,
     out: &mut Vec<DiscoveredProject>,
+    progress: &mut ProgressWriter<std::io::Stdout>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate the root exists before walking. An empty path or a non-existent
     // directory is a hard error — discovery must not silently absorb a typo.
@@ -301,6 +317,12 @@ fn walk_root(
         if !entry.file_type().is_dir() {
             continue;
         }
+        // Emit the current directory path on one line that overwrites itself
+        // in place via a carriage return (issue #27). Each visited directory
+        // is reported so the user sees devclean working on a large workspace
+        // rather than appearing hung. The writer is TTY-gated: when not a TTY
+        // this is a no-op (no carriage-return garbage in a pipe or log file).
+        progress.update(entry.path());
         // Check each direct child file for markers. Only look at *files* —
         // a marker is a file, never a directory (except `.git` which is a
         // directory on disk but is treated as a file-name marker).
