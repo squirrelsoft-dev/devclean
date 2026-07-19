@@ -6,8 +6,9 @@
 //! `%APPDATA%\\devclean\\config.toml` on Windows. A missing file at that
 //! *default* location is not an error: built-in defaults are used. A path the
 //! user passed explicitly via `--config` is required to exist; that check lives
-//! in `main::run_list`, since this module has no notion of where a path came
-//! from. CLI flags override the loaded config.
+//! in `main::load_cli_config`, since this module has no notion of where a path
+//! came from (`devclean init` is the exception: it creates the file — see
+//! `main::run_init`). CLI flags override the loaded config.
 
 use std::fs;
 use std::path::{Path, PathBuf};

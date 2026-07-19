@@ -869,8 +869,10 @@ mod init_tests {
     fn template_body_matches_serialized_default() {
         let workspace = "/tmp/another-workspace";
         let text = generate_init_template(workspace);
-        let mut default_cfg = Config::default();
-        default_cfg.workspace_roots = vec![PathBuf::from(workspace)];
+        let default_cfg = config::Config {
+            workspace_roots: vec![PathBuf::from(workspace)],
+            ..Default::default()
+        };
         let expected_body = toml::to_string_pretty(&default_cfg).unwrap();
         // Split off the comment block (everything up to and including the
         // first blank line after comments).

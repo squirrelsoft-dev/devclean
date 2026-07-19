@@ -265,7 +265,7 @@ mod tests {
         write_file(&root, "target/app.bin", payload);
         // Symlink points at itself (or any target) — we only count the link
         // itself, not the target's full tree.
-        std::os::unix::fs::symlink(&root.join("target/app.bin"), &root.join("target/link.bin"))
+        std::os::unix::fs::symlink(root.join("target/app.bin"), root.join("target/link.bin"))
             .unwrap();
 
         let items = vec![CleanItem {

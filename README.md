@@ -57,7 +57,7 @@ devclean [FLAGS] clean             # interactive clean flow (destructive)
 devclean [FLAGS] config            # print the resolved config
 
   --workspace <path>               # append a workspace root (repeatable)
-  --config <path>                  # alternate config file (must exist)
+  --config <path>                  # alternate config file (must exist; `init` creates it)
   --force                          # skip each prompt, auto-approve each surfaced item (destructive)
   --dry-run                        # show each item's fate, delete nothing
   --verbose                        # verbose output
@@ -333,7 +333,8 @@ devclean reads a TOML config file from the platform config dir
 `%APPDATA%\devclean\config.toml` on Windows). A missing file at that default
 location is not an error: built-in defaults are used. A path you pass explicitly
 with `--config` must exist — devclean exits non-zero rather than silently
-falling back to defaults.
+falling back to defaults. The one exception is `devclean init`, which creates
+the file (see below).
 
 First run? `devclean init <path>` writes a pre-populated config file under the
 platform config dir with the given path as the active workspace root, each
@@ -374,9 +375,10 @@ devclean [FLAGS] discovery         # each project with markers
 devclean [FLAGS] classification    # each project classified, sorted
 devclean [FLAGS] ignore <path>     # see `.devcleanignore` above
 devclean [FLAGS] safelist <path>   # see "Safe-to-delete catalog" above
+devclean [FLAGS] init <path>       # create a pre-populated config file (see above)
 
   --workspace <path>               # append a workspace root (repeatable)
-  --config <path>                  # alternate config file (must exist)
+  --config <path>                  # alternate config file (must exist; `init` creates it)
   --force                          # each prompt skipped, each surfaced item auto-approved (destructive)
   --dry-run                        # each item's fate printed, nothing deleted
   --verbose                        # verbose output
