@@ -435,6 +435,7 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // execute the approved ones (execution is always suppressed by
     // --dry-run; --force approved everything without prompting).
     for (r, (idx, safe_set)) in results.iter().zip(&cleanable_meta) {
+        let will_execute = r.project_approved && !cli.dry_run;
         println!(
             "clean {}: {} — {}",
             r.path.display(),
@@ -448,7 +449,7 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 clean::Classification::Surfaced => "surfaced",
             };
             let verdict = if r.would_delete.contains(&item.rel_path) {
-                " (would delete)"
+                if will_execute { " (deleting)" } else { " (would delete)" }
             } else if cli.dry_run
                 && !cli.force
                 && item.classification == clean::Classification::Surfaced
@@ -468,7 +469,7 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if r.project_approved && !cli.dry_run {
+        if will_execute {
             // `clean` builds the exclusion list from the approvals: Safe and
             // approved Surfaced items are left un-excluded so `git clean`
             // deletes them; Protected and unapproved Surfaced items are
@@ -485,7 +486,7 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .cloned()
                 .collect();
             let ignore_set = &all_projects[*idx].2;
-            if let Err(e) = clean::clean(
+            match clean::clean(
                 &r.path,
                 ignore_set,
                 safe_set,
@@ -493,10 +494,19 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 cli.force,
                 false,
             ) {
-                eprintln!(
-                    "clean {}: failed: {e}",
-                    r.path.display()
-                );
+                Ok(_) => {
+                    println!(
+                        "clean {}: deleted {} item(s)",
+                        r.path.display(),
+                        r.would_delete.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "clean {}: failed: {e}",
+                        r.path.display()
+                    );
+                }
             }
         }
     }

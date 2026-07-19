@@ -1,9 +1,11 @@
-//! Integration tests for the `devclean clean` subcommand (issue #7).
+//! Integration tests for the `devclean clean` subcommand (issues #7/#8).
 //!
 //! Each test creates a real workspace root on disk, configures it, and runs
-//! the real `devclean` binary against it. The CLI hook is a non-destructive
-//! preview: it must print classifications and never delete anything, even
-//! with `--force`. We use an explicit `HOME`/`XDG_CONFIG_HOME` override so the
+//! the real `devclean` binary against it. `--dry-run` must never delete
+//! anything (even combined with `--force`); a real run — interactive
+//! approvals piped over stdin, or `--force` — must delete exactly the safe
+//! and approved surfaced items while protected and unapproved items
+//! survive. We use an explicit `HOME`/`XDG_CONFIG_HOME` override so the
 //! child never picks up the developer's real config or global
 //! `~/.devcleanignore`.
 
@@ -88,14 +90,34 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
+    run_with_stdin(args, "")
+}
+
+/// Run the real binary with `input` piped to stdin — the interactive flow
+/// reads its approval answers from there. Returns stdout.
+fn run_with_stdin<I, S>(args: I, input: &str) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let exe = env!("CARGO_BIN_EXE_devclean");
-    let child = std::process::Command::new(exe)
+    let mut child = std::process::Command::new(exe)
         .args(args)
         .env("HOME", "/nonexistent-home")
         .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
-    String::from_utf8_lossy(&child.stdout).into_owned()
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// A cleanable (status-5) project: committed + pushed, with untracked junk
@@ -161,6 +183,108 @@ fn clean_force_dry_run_auto_approves_each_item() {
     assert!(
         root.join("ambiguous.tmp").is_file(),
         "force dry-run must not actually delete"
+    );
+}
+
+/// A real interactive run, approvals piped over stdin: the safe item and
+/// the approved surfaced item are deleted; the protected item, the
+/// declined surfaced item, and tracked files survive.
+#[test]
+fn clean_interactive_deletes_only_approved_items() {
+    let root = root_for("interactive");
+    init_repo_with_commit(&root);
+    std::fs::write(root.join(".devcleanignore"), "important.dat\n").unwrap();
+    git_in(&root, &["add", ".devcleanignore"]);
+    git_in(&root, &["commit", "-m", "ignore rules"]);
+    add_pushed_remote(&root);
+
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), "safe junk").unwrap();
+    std::fs::write(root.join("important.dat"), "keep me").unwrap();
+    std::fs::write(root.join("approve.tmp"), "surfaced, approved").unwrap();
+    std::fs::write(root.join("keep.tmp"), "surfaced, declined").unwrap();
+
+    let home = root_for("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+    // Prompts in order: all-cleanup, then the surfaced items in enumeration
+    // (sorted) order — approve.tmp ("y"), keep.tmp ("n") — then the
+    // per-project confirmation.
+    let out = run_with_stdin(
+        ["--config", config.to_str().unwrap(), "clean"],
+        "y\ny\nn\ny\n",
+    );
+
+    assert!(
+        !root.join("target").exists(),
+        "safe item must be deleted: {out}"
+    );
+    assert!(
+        !root.join("approve.tmp").exists(),
+        "approved surfaced item must be deleted: {out}"
+    );
+    assert!(
+        root.join("keep.tmp").is_file(),
+        "declined surfaced item must survive: {out}"
+    );
+    assert!(
+        root.join("important.dat").is_file(),
+        "protected item must survive: {out}"
+    );
+    assert!(
+        root.join("initial.txt").is_file(),
+        "tracked file must survive: {out}"
+    );
+    assert!(
+        out.contains("(deleting)"),
+        "real run should report deleting, not would-delete: {out}"
+    );
+    assert!(
+        out.contains("deleted"),
+        "expected a post-execution confirmation line: {out}"
+    );
+}
+
+/// `--force` (no --dry-run) deletes safe and surfaced items without any
+/// prompting; protected and tracked files survive.
+#[test]
+fn clean_force_deletes_without_prompting() {
+    let root = root_for("force-real");
+    init_repo_with_commit(&root);
+    std::fs::write(root.join(".devcleanignore"), "important.dat\n").unwrap();
+    git_in(&root, &["add", ".devcleanignore"]);
+    git_in(&root, &["commit", "-m", "ignore rules"]);
+    add_pushed_remote(&root);
+
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), "safe junk").unwrap();
+    std::fs::write(root.join("important.dat"), "keep me").unwrap();
+    std::fs::write(root.join("ambiguous.tmp"), "surfaced").unwrap();
+
+    let home = root_for("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+    let out = run(["--force", "--config", config.to_str().unwrap(), "clean"]);
+
+    assert!(
+        !root.join("target").exists(),
+        "force must delete safe items: {out}"
+    );
+    assert!(
+        !root.join("ambiguous.tmp").exists(),
+        "force must delete surfaced items: {out}"
+    );
+    assert!(
+        root.join("important.dat").is_file(),
+        "protected item must survive force: {out}"
+    );
+    assert!(
+        root.join("initial.txt").is_file(),
+        "tracked file must survive force: {out}"
+    );
+    assert!(
+        out.contains("deleted"),
+        "expected a post-execution confirmation line: {out}"
     );
 }
 
