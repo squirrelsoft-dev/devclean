@@ -99,10 +99,10 @@ where
 }
 
 /// A cleanable (status-5) project: committed + pushed, with untracked junk
-/// that is not devcleanignored. `devclean clean` prints a dry-run preview of
-/// each untracked item's classification, and deletes nothing.
+/// that is not devcleanignored. `devclean clean --dry-run` prints a preview of
+/// each untracked item's classification and deletes nothing.
 #[test]
-fn clean_prints_classifications_without_deleting() {
+fn clean_dry_run_prints_classifications_without_deleting() {
     let root = root_for("preview");
     init_repo_with_commit(&root);
 
@@ -122,11 +122,11 @@ fn clean_prints_classifications_without_deleting() {
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    let out = run(["--config", config.to_str().unwrap(), "clean"]);
+    let out = run(["--dry-run", "--config", config.to_str().unwrap(), "clean"]);
 
     assert!(
-        out.contains("clean (dry-run)") || out.contains("no projects found"),
-        "expected clean preview header: {out}"
+        out.contains("clean:") || out.contains("no projects found"),
+        "expected clean header: {out}"
     );
     assert!(
         out.contains("safe-to-delete"),
@@ -141,10 +141,9 @@ fn clean_prints_classifications_without_deleting() {
     assert!(root.join("ambiguous.tmp").is_file());
 }
 
-/// `--force` toggles the displayed verdict for surfaced items to
-/// "would delete" but still does not delete (the CLI hook is non-destructive).
+/// `--force --dry-run` auto-approves each item for display and deletes nothing.
 #[test]
-fn clean_force_shows_would_delete_but_deletes_nothing() {
+fn clean_force_dry_run_auto_approves_each_item() {
     let root = root_for("force");
     init_repo_with_commit(&root);
     add_pushed_remote(&root);
@@ -153,22 +152,22 @@ fn clean_force_shows_would_delete_but_deletes_nothing() {
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    let out = run(["--force", "--config", config.to_str().unwrap(), "clean"]);
+    let out = run(["--force", "--dry-run", "--config", config.to_str().unwrap(), "clean"]);
 
     assert!(
         out.contains("would delete"),
-        "force should mark surfaced as would-delete: {out}"
+        "force dry-run should mark surfaced as would-delete: {out}"
     );
     assert!(
         root.join("ambiguous.tmp").is_file(),
-        "force must not actually delete"
+        "force dry-run must not actually delete"
     );
 }
 
-/// `devclean clean` skips non-cleanable projects (nothing printed for them
-/// unless --verbose) and still deletes nothing.
+/// `devclean clean --dry-run` skips non-cleanable projects (nothing
+/// printed for them unless --verbose) and still deletes nothing.
 #[test]
-fn clean_skips_non_cleanable_projects() {
+fn clean_dry_run_skips_non_cleanable_projects() {
     let root = root_for("skip");
     init_repo_with_commit(&root);
     // No remote → status 2 (no-remote), not cleanable.
@@ -177,17 +176,19 @@ fn clean_skips_non_cleanable_projects() {
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    let out = run(["--config", config.to_str().unwrap(), "clean"]);
+    let out = run(["--dry-run", "--config", config.to_str().unwrap(), "clean"]);
 
-    // No cleanable project → no per-project preview header is printed for it.
+    // No cleanable project → each project report is printed, but each
+    // per-project enumeration is not.
     // The file is untouched.
     assert!(
         root.join("junk.tmp").is_file(),
         "non-cleanable project must not be touched"
     );
-    // Without --verbose, non-cleanable projects produce no output lines.
+    // Without --verbose, non-cleanable projects produce no per-project
+    // enumeration lines.
     assert!(
-        !out.contains("clean (dry-run)"),
+        !out.contains("clean (dry-run):"),
         "non-cleanable project should be skipped silently: {out}"
     );
 }

@@ -99,14 +99,24 @@ fn explicit_missing_config_is_an_error() {
 }
 
 #[test]
-fn force_and_dry_run_are_mutually_exclusive() {
+fn force_and_dry_run_used_together_run_clean() {
+    // Each config each workspace root each exists.
+    let each_dir = std::env::temp_dir().join("devclean-cli-test-each");
+    std::fs::create_dir_all(&each_dir).unwrap();
+    let toml =
+        &format!("workspace_roots = [\"{}\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n", each_dir.to_str().unwrap());
+    let cfg = write_config(toml);
     let out = devclean()
-        .args(["--force", "--dry-run", "list"])
+        .args(["--force", "--dry-run", "--config", &cfg, "clean"])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
         .output()
         .unwrap();
-    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("cannot be used with"), "stderr: {stderr}");
+    if !out.status.success() {
+        panic!("force and dry-run failed; stdout: {stdout:?}; stderr: {stderr:?}");
+    }
 }
 
 #[test]
