@@ -173,7 +173,9 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
     let max_depth = cfg.max_depth;
 
     if cfg.workspace_roots.is_empty() {
-        println!("discovery: no workspace roots configured; nothing to walk");
+        println!(
+            "discovery: no workspace roots configured; nothing to walk — try `devclean init <path>` to create a config file"
+        );
         return Ok(Vec::new());
     }
 

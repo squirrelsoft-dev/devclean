@@ -45,6 +45,7 @@ interactive clean flow.
 | `devclean classification` | classify each discovered project by its git state, print each status |
 | `devclean ignore <path>` | test whether `path` is ignored by the loaded `.devcleanignore` |
 | `devclean safelist <path>` | test whether `path` is safe to delete according to the catalog |
+| `devclean init <path>` | create a TOML config file pre-populated with each `Config` field's default and the given workspace root active; idempotent (does not clobber an existing file) |
 
 ### Top-level flags
 
@@ -56,7 +57,7 @@ devclean [FLAGS] clean             # interactive clean flow (destructive)
 devclean [FLAGS] config            # print the resolved config
 
   --workspace <path>               # append a workspace root (repeatable)
-  --config <path>                  # alternate config file (must exist)
+  --config <path>                  # alternate config file (must exist; `init` creates it)
   --force                          # skip each prompt, auto-approve each surfaced item (destructive)
   --dry-run                        # show each item's fate, delete nothing
   --verbose                        # verbose output
@@ -84,6 +85,11 @@ $ devclean --force --dry-run clean  # preview of the force run; deletes nothing
 $ devclean --verbose clean       # verbose output
 $ devclean --version             # crate version (devclean 0.1.0)
 ```
+
+To get started: `devclean init ~/code` writes a pre-populated config file under
+the platform config dir with `~/code` as the active workspace root, each other
+`Config` field documented with its default, and a comment explaining how to add
+more workspace roots. `devclean init --help` for details.
 
 See `src/main.rs` for the CLI surface and `src/output.rs` for the
 formatting; `src/clean.rs` for the deletion engine and
@@ -327,7 +333,17 @@ devclean reads a TOML config file from the platform config dir
 `%APPDATA%\devclean\config.toml` on Windows). A missing file at that default
 location is not an error: built-in defaults are used. A path you pass explicitly
 with `--config` must exist — devclean exits non-zero rather than silently
-falling back to defaults.
+falling back to defaults. The one exception is `devclean init`, which creates
+the file (see below).
+
+First run? `devclean init <path>` writes a pre-populated config file under the
+platform config dir with the given path as the active workspace root, each
+other `Config` field documented with its default, and a comment explaining how
+to add more workspace roots. `init` refuses to overwrite an existing file at
+the target — it exits non-zero with the existing path, and does not read or
+use that file. `devclean --config <other>` writes to `<other>` instead
+(creating parent directories); the same refuse-to-overwrite rule applies to an
+explicit `--config` target.
 
 ```toml
 # ~/.config/devclean/config.toml
@@ -359,9 +375,10 @@ devclean [FLAGS] discovery         # each project with markers
 devclean [FLAGS] classification    # each project classified, sorted
 devclean [FLAGS] ignore <path>     # see `.devcleanignore` above
 devclean [FLAGS] safelist <path>   # see "Safe-to-delete catalog" above
+devclean [FLAGS] init <path>       # create a pre-populated config file (see above)
 
   --workspace <path>               # append a workspace root (repeatable)
-  --config <path>                  # alternate config file (must exist)
+  --config <path>                  # alternate config file (must exist; `init` creates it)
   --force                          # each prompt skipped, each surfaced item auto-approved (destructive)
   --dry-run                        # each item's fate printed, nothing deleted
   --verbose                        # verbose output
