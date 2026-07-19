@@ -21,7 +21,27 @@ fn write_config(contents: &str) -> String {
     dir.to_string_lossy().to_string()
 }
 
-const BANNER: &str = "devclean - development environment cleanup CLI (scaffold)";
+/// Each subcommand is optional — the default run executes the clean flow
+/// without a subcommand. This test confirms no-args triggers the clean flow
+/// (which, with no config, prints "clean: no projects found" and exits 0).
+/// `HOME`/`XDG_CONFIG_HOME` are overridden so the run never picks up the
+/// developer's real config (whose workspace roots would yield projects).
+#[test]
+fn no_args_runs_the_default_clean_flow() {
+    let out = devclean()
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // With no workspace roots configured and no --config, discovery yields
+    // nothing, so the clean flow prints "no projects found" and exits 0.
+    assert!(
+        stdout.contains("no projects found"),
+        "no-args should run the clean flow: {stdout:?}"
+    );
+}
 
 #[test]
 fn version_flag_prints_crate_version() {
@@ -34,18 +54,11 @@ fn version_flag_prints_crate_version() {
 }
 
 #[test]
-fn no_args_prints_placeholder_banner() {
-    let out = devclean().output().unwrap();
-    assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), BANNER);
-}
-
-#[test]
 fn help_flag_lists_version_and_help_options() {
     let out = devclean().arg("--help").output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(BANNER));
+    assert!(stdout.contains("development environment cleanup CLI"));
     assert!(stdout.contains("--version"));
     assert!(stdout.contains("--help"));
 }
@@ -59,9 +72,12 @@ fn unknown_argument_is_rejected() {
 
 #[test]
 fn list_prints_defaults_when_no_config() {
+    // The original `list` subcommand printed the resolved config. Now `list`
+    // lists projects + statuses; the old behavior lives under `devclean
+    // config`. This test verifies the preserved behavior.
     let cfg = write_config("");
     let out = devclean()
-        .args(["--config", &cfg, "list"])
+        .args(["--config", &cfg, "config"])
         .output()
         .unwrap();
     let _ = std::fs::remove_file(&cfg);
@@ -99,9 +115,11 @@ fn explicit_missing_config_is_an_error() {
 }
 
 #[test]
-fn force_and_dry_run_used_together_run_clean() {
-    // A config whose single workspace root exists (and is empty), so the
-    // combined flags exercise the clean flow without finding anything.
+fn force_and_dry_run_combine_as_force_preview() {
+    // `--force --dry-run` is a valid combination (the #8 invariant): it
+    // previews the force run. This test only confirms clap accepts both
+    // flags together; the preview semantics are covered by
+    // `clean_force_dry_run_auto_approves_each_item` in tests/clean_cli.rs.
     let each_dir = std::env::temp_dir().join("devclean-cli-test-each");
     std::fs::create_dir_all(&each_dir).unwrap();
     let toml = &format!(
@@ -115,15 +133,19 @@ fn force_and_dry_run_used_together_run_clean() {
         .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        panic!("force and dry-run failed; stdout: {stdout:?}; stderr: {stderr:?}");
-    }
+    let _ = std::fs::remove_file(&cfg);
+    assert!(
+        out.status.success(),
+        "the flags must combine: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
 fn list_reflects_config_file_and_cli_overrides() {
+    // The original `list` subcommand printed the resolved config. Now `list`
+    // lists projects + statuses; the old behavior lives under `devclean
+    // config`. This test verifies the preserved behavior.
     let toml =
         "workspace_roots = [\"/from/config\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n";
     let cfg = write_config(toml);
@@ -134,7 +156,7 @@ fn list_reflects_config_file_and_cli_overrides() {
             "--workspace",
             "/from/cli",
             "--force",
-            "list",
+            "config",
         ])
         .output()
         .unwrap();

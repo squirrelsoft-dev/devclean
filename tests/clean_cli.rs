@@ -163,7 +163,8 @@ fn clean_dry_run_prints_classifications_without_deleting() {
     assert!(root.join("ambiguous.tmp").is_file());
 }
 
-/// `--force --dry-run` auto-approves each item for display and deletes nothing.
+/// `--force --dry-run` previews the force run: each surfaced item is
+/// auto-approved for display (`would delete`) and nothing is deleted.
 #[test]
 fn clean_force_dry_run_auto_approves_each_item() {
     let root = root_for("force");
@@ -184,11 +185,15 @@ fn clean_force_dry_run_auto_approves_each_item() {
 
     assert!(
         out.contains("would delete"),
-        "force dry-run should mark surfaced as would-delete: {out}"
+        "force preview should mark surfaced as would-delete: {out}"
+    );
+    assert!(
+        !out.contains("would prompt"),
+        "force preview auto-approves — nothing left to prompt about: {out}"
     );
     assert!(
         root.join("ambiguous.tmp").is_file(),
-        "force dry-run must not actually delete"
+        "dry-run must not actually delete: {out}"
     );
 }
 

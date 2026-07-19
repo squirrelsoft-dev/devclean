@@ -4,6 +4,7 @@ mod config;
 mod discovery;
 mod ignore;
 mod interactive;
+mod output;
 mod safelist;
 
 use std::path::PathBuf;
@@ -12,7 +13,13 @@ use clap::{Parser, Subcommand};
 
 use config::{CliOverrides, Config};
 
-/// devclean - development environment cleanup CLI (scaffold)
+/// devclean — development environment cleanup CLI.
+///
+/// Discovers projects under each configured workspace root, classifies each
+/// project by its git state, and (by default) runs the interactive clean
+/// flow on each cleanable project. `devclean list` prints each project's
+/// status without cleaning; `devclean clean` runs the destructive interactive
+/// flow; `devclean` (no subcommand) is the default run.
 #[derive(Parser, Debug)]
 #[command(name = "devclean", version, about)]
 struct Cli {
@@ -20,11 +27,13 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     workspace: Vec<String>,
 
-    /// Alternate config file path.
+    /// Alternate config file path. Must exist — devclean exits non-zero if it does not.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Force mode: delete without prompting (overrides config `default_mode`).
+    /// Force mode: skip all prompts, auto-approve each surfaced item.
+    /// Destructive: deletes on approval. Combined with --dry-run it
+    /// previews the force run without deleting.
     #[arg(long)]
     force: bool,
 
@@ -36,51 +45,37 @@ struct Cli {
     #[arg(long)]
     verbose: bool,
 
-    /// Subcommand. Omitting it prints the placeholder banner.
+    /// Subcommand.
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Print the resolved configuration (workspace roots, max_depth, default_mode).
+    /// List each discovered project with its git status, sorted by severity.
+    /// No cleaning — read-only listing.
     List,
+    /// Print the resolved configuration (workspace roots, max_depth, etc.).
+    /// Preserves the original list-of-resolved-configuration behavior.
+    Config,
     /// Debug helper: report whether a path is ignored by the loaded `.devcleanignore` rules.
-    ///
-    /// Loads the global `~/.devcleanignore` plus every `.devcleanignore` under the
-    /// current directory and prints `ignored` / `not-ignored` for the given path
-    /// (interpreted relative to the current directory).
     Ignore {
         /// Path to test, relative to the current directory.
         path: String,
     },
     /// Debug helper: report whether a path is safe to delete according to the
-    /// loaded `safe_delete` catalog (built-ins plus any `Config::safe_delete`
-    /// additions).
-    ///
-    /// Loads the platform default config (respecting `--config`) and prints
-    /// `safe` / `not-safe` for the given path, interpreted relative to the
-    /// current directory. Cleaning is a separate issue.
+    /// loaded `safe_delete` catalog.
     Safelist {
         /// Path to test, relative to the current directory.
         path: String,
     },
     /// Discover projects under each configured workspace root.
-    ///
-    /// Walks each workspace root up to `max_depth` and reports each folder
-    /// that contains a marker from the resolved `project_markers` list. Each
-    /// reported path is tagged with the marker that found it. Classifying those
-    /// projects is `devclean classification`; cleaning is a separate issue.
     Discovery,
-    /// Classify each discovered project by its git state and print the result
-    /// sorted by status. Status 5 is the only cleanable state; status 1..4
-    /// each signal that cleaning must wait. See issue #6 for the full spec.
+    /// Classify each discovered project by its git state and print the result.
     Classification,
-    /// Interactive cleaning flow: report every project sorted by status,
-    /// then for each cleanable project show what would be deleted and
-    /// collect approval before running `git clean`. `--force` skips the
-    /// prompts and auto-approves; `--dry-run` previews and deletes nothing.
-    /// See issues #7 (engine) and #8 (flow) for the full spec.
+    /// Interactive cleaning flow: report each project sorted by status,
+    /// then clean each cleanable project. Destructive: deletes on approval
+    /// or under --force.
     Clean,
 }
 
@@ -89,10 +84,22 @@ fn main() {
 
     match &cli.command {
         None => {
-            println!("devclean - development environment cleanup CLI (scaffold)");
+            // Default run: discover, classify, report each project sorted by
+            // status, and run the interactive clean flow on each cleanable
+            // project. Same code path as `devclean clean`.
+            if let Err(e) = run_cleaning(&cli) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
         }
         Some(Command::List) => {
-            if let Err(e) = run_list(&cli) {
+            if let Err(e) = run_listing(&cli) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Config) => {
+            if let Err(e) = run_config(&cli) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -122,7 +129,7 @@ fn main() {
             }
         }
         Some(Command::Clean) => {
-            if let Err(e) = run_clean(&cli) {
+            if let Err(e) = run_cleaning(&cli) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -192,7 +199,10 @@ fn load_cli_config(cli: &Cli) -> Result<(Option<PathBuf>, Config), Box<dyn std::
     Ok((config_path, cfg))
 }
 
-fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+/// `devclean config`: print the resolved configuration (workspace roots,
+/// max_depth, default_mode, and per-invocation flags). Preserves the original
+/// list-of-resolved-configuration behavior as a clearly-named alternative.
+fn run_config(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (config_path, cfg) = load_cli_config(cli)?;
     let overrides = cli_overrides(cli);
     let cfg = cfg.apply_overrides(&overrides);
@@ -217,6 +227,53 @@ fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         overrides.dry_run, overrides.force, overrides.verbose
     );
 
+    Ok(())
+}
+
+/// `devclean list`: show each discovered project with its git status, sorted
+/// by severity (most-needs-attention first). Read-only — no cleaning.
+///
+/// Each row uses the formatted shape `[rank] path — label (reason)` with
+/// color coding per status. Cleanable rows carry a bold-green label so the
+/// reader can tell which projects are subjects of the interactive clean flow.
+fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (_config_path, cfg) = load_cli_config(cli)?;
+    let cfg = cfg.apply_overrides(&cli_overrides(cli));
+
+    let projects = discovery::discover(&cfg)?;
+    if projects.is_empty() {
+        println!("listing: no projects found");
+        return Ok(());
+    }
+
+    // Collect each project's status, then sort by severity. `Status` derives
+    // `Ord` over variants declared most-severe-first, so it sorts directly.
+    let mut rows: Vec<(String, classify::Status)> = Vec::new();
+    for d in &projects {
+        let ignore_set = match ignore::IgnoreSet::load(&d.path) {
+            Ok(set) => set,
+            Err(e) => {
+                eprintln!(
+                    "warning: {}: skipped, could not load .devcleanignore: {e}",
+                    d.path.display()
+                );
+                continue;
+            }
+        };
+        let status = classify::classify(&d.path, &ignore_set);
+        rows.push((d.path.display().to_string(), status));
+    }
+    rows.sort_by_key(|&(_, status)| status);
+
+    // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
+    // lets `output::color` fall back to its runtime gate.
+    println!("{}", output::format_summary(rows.len(), None));
+    for (path, status) in &rows {
+        println!(
+            "{}",
+            output::format_project_row(std::path::Path::new(path), *status, None)
+        );
+    }
     Ok(())
 }
 
@@ -323,15 +380,19 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `devclean clean`: the interactive cleaning flow (issue #8).
+/// `devclean clean` (and the default run with no subcommand): the interactive
+/// cleaning flow (issue #8). Sorts every discovered project by status, reports
+/// each non-cleanable one with a one-line reason, and lists each cleanable one.
 ///
-/// Sorts every discovered project by status, reports each non-cleanable one
-/// with a one-line reason, and lists each cleanable one. For each cleanable
-/// project, enumerates untracked items, prompts about each `Surfaced` item,
-/// prompts about the project itself, then executes `git clean` if approved.
-/// `--force` skips every prompt and auto-approves each surfaced item. `--dry-run`
-/// shows what would be deleted, deletes nothing, skips prompts.
-fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+/// For each cleanable project, enumerates untracked items, prompts about each
+/// `Surfaced` item, prompts about the project itself, then executes `git
+/// clean` if approved. `--force` skips every prompt and auto-approves each
+/// surfaced item; `--dry-run` shows what would be deleted, deletes nothing,
+/// skips prompts; `--force --dry-run` previews the force run.
+///
+/// Destructive: `devclean clean` deletes files on approval or under `--force`.
+/// Only one subcommand runs the deletion; the default run runs it too.
+fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));
 
@@ -363,11 +424,13 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     all_projects.sort_by_key(|&(_, status, _)| status);
 
-    // Report phase: each non-cleanable project gets a one-line reason;
-    // cleanable projects are listed separately as the cleanup subjects.
-    // For each cleanable project, keep its index into `all_projects` (for
-    // the ignore set) and the safe set built here, so execution below does
-    // not rebuild or re-find either.
+    // Report phase: each non-cleanable project gets a one-line reason; cleanable
+    // projects are listed separately as the cleanup subjects. For each cleanable
+    // project, keep its index into `all_projects` (for the ignore set) and the
+    // safe set built here, so execution below does not rebuild or re-find either.
+    // Each row uses the formatted shape with color gating on TTY.
+    // The header is prefixed with "clean:" — this is the destructive run, so
+    // the reader knows which flow is about to execute.
     println!(
         "clean: {} project(s) — sorted by status",
         all_projects.len()
@@ -394,21 +457,12 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                println!(
-                    "  {} — {} (cleanable, status 5)",
-                    path.display(),
-                    status.label()
-                );
+                println!("{}", output::format_project_row(path, *status, None));
                 cleanable_items.push((path.clone(), items));
                 cleanable_meta.push((idx, safe_set));
             }
             _ => {
-                println!(
-                    "  {} — {} (needs attention: {})",
-                    path.display(),
-                    status.label(),
-                    interactive::status_reason(*status)
-                );
+                println!("{}", output::format_project_row(path, *status, None));
             }
         }
     }
