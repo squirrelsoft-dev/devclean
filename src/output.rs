@@ -80,14 +80,11 @@ pub fn format_project_row(path: &Path, status: Status, emit_colors: Option<bool>
     row
 }
 
-/// Format a summary line for the sorted listing: "listing: N projects, sorted by status".
+/// Format a summary line for the sorted listing: "listing: N project(s), sorted by status".
 ///
 /// Bold when colors are emitted, plain otherwise.
 pub fn format_summary(count: usize, emit_colors: Option<bool>) -> String {
-    let header = format!(
-        "listing: {} project(s), sorted by status",
-        count,
-    );
+    let header = format!("listing: {} project(s), sorted by status", count,);
     color(&header, OwoStyle::new().bold(), emit_colors)
 }
 
@@ -118,7 +115,6 @@ fn status_style(status: Status) -> OwoStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn emit_true() -> Option<bool> {
         Some(true)
@@ -143,7 +139,11 @@ mod tests {
     fn label_repeating_reason_is_suppressed() {
         let cleanable =
             format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_false());
-        assert_eq!(cleanable.matches("cleanable").count(), 1, "row: {cleanable}");
+        assert_eq!(
+            cleanable.matches("cleanable").count(),
+            1,
+            "row: {cleanable}"
+        );
         assert!(!cleanable.contains("(cleanable)"), "row: {cleanable}");
 
         let clean = format_project_row(Path::new("/tmp/project"), Status::Clean, emit_false());
@@ -168,7 +168,10 @@ mod tests {
             "plain output should contain no escape codes: {row:?}"
         );
         // Verify the content still shows as plain text.
-        assert!(row.contains("/tmp/project"), "plain output still contains the path");
+        assert!(
+            row.contains("/tmp/project"),
+            "plain output still contains the path"
+        );
     }
 
     /// Color output when `emit_colors = Some(true)` — ANSI escape codes present.
@@ -185,21 +188,11 @@ mod tests {
     /// fragment contains an escape sequence that colors it.
     #[test]
     fn dirty_statuses_get_warm_colors() {
-        let no_git = format_project_row(
-            Path::new("/tmp/project"),
-            Status::NoGit,
-            emit_true(),
-        );
-        assert!(
-            no_git.contains("\x1b["),
-            "no-git is red: {no_git:?}"
-        );
+        let no_git = format_project_row(Path::new("/tmp/project"), Status::NoGit, emit_true());
+        assert!(no_git.contains("\x1b["), "no-git is red: {no_git:?}");
 
-        let no_remote = format_project_row(
-            Path::new("/tmp/project"),
-            Status::NoRemote,
-            emit_true(),
-        );
+        let no_remote =
+            format_project_row(Path::new("/tmp/project"), Status::NoRemote, emit_true());
         assert!(
             no_remote.contains("\x1b["),
             "no-remote is yellow: {no_remote:?}"
@@ -209,25 +202,15 @@ mod tests {
     /// Each clean status gets a cool color (green).
     #[test]
     fn clean_statuses_get_cool_colors() {
-        let cleanable = format_project_row(
-            Path::new("/tmp/project"),
-            Status::Cleanable,
-            emit_true(),
-        );
+        let cleanable =
+            format_project_row(Path::new("/tmp/project"), Status::Cleanable, emit_true());
         assert!(
             cleanable.contains("\x1b["),
             "cleanable is green+bold: {cleanable:?}"
         );
 
-        let clean = format_project_row(
-            Path::new("/tmp/project"),
-            Status::Clean,
-            emit_true(),
-        );
-        assert!(
-            clean.contains("\x1b["),
-            "clean is green: {clean:?}"
-        );
+        let clean = format_project_row(Path::new("/tmp/project"), Status::Clean, emit_true());
+        assert!(clean.contains("\x1b["), "clean is green: {clean:?}");
     }
 
     /// Summary header is bold (colored) when TTY, plain otherwise.
@@ -236,10 +219,7 @@ mod tests {
         let colored = format_summary(5, emit_true());
         assert!(colored.contains("\x1b["), "summary: {colored:?}");
         let plain = format_summary(5, emit_false());
-        assert!(
-            !plain.contains("\x1b["),
-            "plain summary: {plain:?}"
-        );
+        assert!(!plain.contains("\x1b["), "plain summary: {plain:?}");
     }
 
     /// Each formatted row has the project path (relative to root) printed.
@@ -252,21 +232,14 @@ mod tests {
             Status::Cleanable,
             emit_false(),
         );
-        assert!(
-            row.contains("/tmp/zz/project"),
-            "row uses full path: {row}"
-        );
+        assert!(row.contains("/tmp/zz/project"), "row uses full path: {row}");
     }
 
     /// Each formatted row uses `display()` — the path is shown as the user
     /// would see it. A relative path is printed as-is.
     #[test]
     fn project_row_prints_as_displayed() {
-        let row = format_project_row(
-            Path::new("my/project"),
-            Status::Cleanable,
-            emit_false(),
-        );
+        let row = format_project_row(Path::new("my/project"), Status::Cleanable, emit_false());
         assert!(
             row.contains("my/project"),
             "row prints the path as given: {row}"

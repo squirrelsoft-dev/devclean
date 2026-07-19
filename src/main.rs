@@ -4,8 +4,8 @@ mod config;
 mod discovery;
 mod ignore;
 mod interactive;
-mod safelist;
 mod output;
+mod safelist;
 
 use std::path::PathBuf;
 
@@ -267,10 +267,7 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
     // lets `output::color` fall back to its runtime gate.
-    println!(
-        "{}",
-        output::format_summary(rows.len(), None)
-    );
+    println!("{}", output::format_summary(rows.len(), None));
     for (path, status) in &rows {
         println!(
             "{}",
@@ -460,18 +457,12 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                println!(
-                    "{}",
-                    output::format_project_row(path, *status, None)
-                );
+                println!("{}", output::format_project_row(path, *status, None));
                 cleanable_items.push((path.clone(), items));
                 cleanable_meta.push((idx, safe_set));
             }
             _ => {
-                println!(
-                    "{}",
-                    output::format_project_row(path, *status, None)
-                );
+                println!("{}", output::format_project_row(path, *status, None));
             }
         }
     }

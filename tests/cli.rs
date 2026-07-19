@@ -21,8 +21,6 @@ fn write_config(contents: &str) -> String {
     dir.to_string_lossy().to_string()
 }
 
-const BANNER: &str = "devclean - development environment cleanup CLI (scaffold)";
-
 /// Each subcommand is optional — the default run executes the clean flow
 /// without a subcommand. This test confirms no-args triggers the clean flow
 /// (which, with no config, prints "clean: no projects found" and exits 0).

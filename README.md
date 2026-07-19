@@ -192,7 +192,8 @@ Flags:
   `would prompt` (a real interactive run asks about them). Combined with
   `--force` it previews the force run: every non-protected item is shown as
   `would delete`, and still nothing is deleted.
-- `--verbose` — verbose output (extra diagnostic lines).
+- `--verbose` — accepted and echoed in the `devclean config` flags line;
+  currently produces no additional output elsewhere.
 
 ```sh
 $ devclean clean                    # interactive: report, approve, then delete
