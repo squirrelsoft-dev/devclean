@@ -154,20 +154,30 @@ fn classification_reports_nothing_when_discovery_finds_no_projects() {
 /// Test that classification sorts by status.
 #[test]
 fn classification_sorts_by_status() {
-    let root = root_for("sort");
-    // `sub` is a non-git project (a Cargo.toml marker, no `.git`) → NoGit (1).
-    let sub = root.join("sub");
+    let ws = root_for("sort");
+    // `alpha` is a non-git project (a Cargo.toml marker, no `.git`, no
+    // ancestor git inside the workspace) → NoGit (1).
+    let alpha = ws.join("alpha");
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::write(alpha.join("Cargo.toml"), "[package]").unwrap();
+
+    // `beta` is a committed+pushed git repo with a modified tracked file → WIP (4).
+    let beta = ws.join("beta");
+    std::fs::create_dir_all(&beta).unwrap();
+    init_repo_with_commit(&beta);
+    add_pushed_remote(&beta);
+    std::fs::write(beta.join("initial.txt"), "modified").unwrap();
+
+    // `beta/sub` has a non-git marker inside beta's git worktree, so it is a
+    // subfolder of beta, not a separate project (issue #15) — it must not add
+    // a second no-git report.
+    let sub = beta.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(sub.join("Cargo.toml"), "[package]").unwrap();
 
-    // `root` is a committed+pushed git repo with a modified tracked file → WIP (4).
-    init_repo_with_commit(&root);
-    add_pushed_remote(&root);
-    std::fs::write(root.join("initial.txt"), "modified").unwrap();
-
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
-    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+    let config = write_config(&home.join(".config"), &[ws.to_str().unwrap()], 2);
     let out = run(["--config", config.to_str().unwrap(), "classification"]);
 
     // Both states should be reported.
@@ -176,6 +186,11 @@ fn classification_sorts_by_status() {
         "expected no-git label in output: {out}"
     );
     assert!(out.contains("wip"), "expected wip label in output: {out}");
+    // The suppressed subfolder is not reported at all.
+    assert!(
+        !out.contains("sub"),
+        "beta/sub must be suppressed (issue #15), got: {out}"
+    );
 
     // Sorting by severity: NoGit (rank 1) must appear before WIP (rank 4).
     let no_git_idx = out.find("no-git").unwrap();
