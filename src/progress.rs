@@ -1,9 +1,16 @@
-//! Live single-line progress indicator for the discovery walk.
+//! Live single-line progress indicator for discovery, classification, and
+//! cleaning phases.
 //!
 //! Each time walk_root visits a directory, this module renders the current
 //! path on one line that overwrites itself in place via a carriage return
 //! (CR), so the display never scrolls -- a TUI-style spinner that tells the
 //! user devclean is working on a large workspace rather than appearing hung.
+//!
+//! The same mechanism also emits counted phase labels during classification
+//! and cleaning: each project classified or each cleanable project cleaned
+//! gets `classifying N/M: <project>` or `cleaning N/M: <project>` rendered
+//! in place, so the screen is never blank during the long git-classification
+//! stretch. The discovery walk keeps its own `walking: <path>` line.
 //!
 //! ## TTY gating
 //!
@@ -24,12 +31,15 @@
 //! wrap and scroll. Each update pads with spaces and CR so a shorter path
 //! fully overwrites a longer previous one (no leftover trailing characters).
 //!
-//! ## Finish
+//! ## Clear and finish
 //!
-//! When the walk completes, the progress line is cleared (CR + spaces to
-//! width + CR) and a newline is emitted so the following summary line
-//! (e.g. listing: N projects) starts on a fresh line. No partial line
-//! lingers above the summary.
+//! Whenever other output (a summary line, a per-project block, a stderr
+//! warning) must interleave with a live progress line, the line is first
+//! cleared in place (CR + spaces to width + CR, no newline) via `clear` so
+//! the following output overwrites it rather than wrapping after the padded
+//! line. When a phase completes, `finish` clears the line and emits a
+//! newline so the following summary line (e.g. listing: N projects) starts
+//! on a fresh line. No partial line lingers above the summary.
 //!
 //! ## Testability
 //!
@@ -44,7 +54,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::output;
 
-/// Live single-line progress writer for the discovery walk.
+/// Live single-line progress writer for discovery, classification, and
+/// cleaning phases.
 ///
 /// Generic over W: Write so tests can inject a Vec<u8> buffer instead of
 /// a real terminal. On a TTY, each update writes CR-prefixed text with no
@@ -83,37 +94,55 @@ impl<W: Write> ProgressWriter<W> {
             return;
         }
         let label = "walking: ";
-        let display = path.display().to_string();
-        let max_cols = self.width.saturating_sub(label.width());
-        let truncated = if display.width() > max_cols {
-            let ellipsis = "\u{2026}";
-            // Right-align: the leaf (current dir) stays visible. We keep chars
-            // from the right whose total display width fits, accounting for
-            // the ellipsis at the left.
-            let keep = max_cols.saturating_sub(ellipsis.width());
-            let mut cols = 0;
-            let mut start = display.len();
-            for (idx, ch) in display.char_indices().rev() {
-                let ch_cols = ch.width().unwrap_or(0);
-                if cols + ch_cols > keep {
-                    break;
-                }
-                cols += ch_cols;
-                start = idx;
-            }
-            format!("{}{}", ellipsis, &display[start..])
-        } else {
-            display
-        };
-        let line = format!("{}{}", label, truncated);
-        // Pad with spaces so a shorter path fully overwrites a longer previous
-        // one (no leftover trailing characters from the prior line). Measured
-        // in display columns: wide chars (CJK, emoji) occupy two columns each.
-        let pad = self.width.saturating_sub(line.width());
-        let padded = format!("{}{}", line, " ".repeat(pad));
+        let line = render_line(label, path, self.width);
         // CR-prefixed, no trailing newline, flushed immediately.
         let _ = self.writer.write_all(b"\r");
-        let _ = self.writer.write_all(padded.as_bytes());
+        let _ = self.writer.write_all(line.as_bytes());
+        let _ = self.writer.flush();
+    }
+
+    /// Emit a counted phase label with a path, overwriting the previous line
+    /// in place. No trailing newline -- each call replaces the prior one.
+    ///
+    /// Renders `<phase> <idx>/<total>: <path>` with the same CR-overwrite,
+    /// truncation (leading ellipsis, leaf visible), TTY-gating, and padding
+    /// as `update`. The label is caller-supplied so the same struct can show
+    /// `classifying 3/47: <project>` or `cleaning 1/5: <project>` without
+    /// duplicating the writer.
+    ///
+    /// `idx` is 1-based (first item is 1, not 0) so the reader sees natural
+    /// enumeration. `total` is the total number of items in the phase.
+    ///
+    /// When not a TTY this is a no-op: the struct's active flag short-circuits
+    /// the path formatting and the write.
+    pub fn update_phase(&mut self, phase: &str, idx: usize, total: usize, path: &Path) {
+        if !self.active {
+            return;
+        }
+        let label = format!("{} {}/{}: ", phase, idx, total);
+        let line = render_line(&label, path, self.width);
+        // CR-prefixed, no trailing newline, flushed immediately.
+        let _ = self.writer.write_all(b"\r");
+        let _ = self.writer.write_all(line.as_bytes());
+        let _ = self.writer.flush();
+    }
+
+    /// Clear the progress line in place: CR + spaces to width + CR, no
+    /// newline. The cursor lands at column 0 of the erased line so the next
+    /// write (a println, a stderr warning) overwrites it rather than
+    /// wrapping after the padded progress line.
+    ///
+    /// When not a TTY this is a no-op.
+    pub fn clear(&mut self) {
+        if !self.active {
+            return;
+        }
+        // Clear: CR + spaces to width + CR. Portable -- no ANSI escapes
+        // (the crate avoids them outside owo-colors).
+        let _ = self.writer.write_all(b"\r");
+        let spaces = " ".repeat(self.width);
+        let _ = self.writer.write_all(spaces.as_bytes());
+        let _ = self.writer.write_all(b"\r");
         let _ = self.writer.flush();
     }
 
@@ -125,12 +154,7 @@ impl<W: Write> ProgressWriter<W> {
         if !self.active {
             return;
         }
-        // Clear: CR + spaces to width + CR. Portable -- no ANSI escapes
-        // (the crate avoids them outside owo-colors).
-        let _ = self.writer.write_all(b"\r");
-        let spaces = " ".repeat(self.width);
-        let _ = self.writer.write_all(spaces.as_bytes());
-        let _ = self.writer.write_all(b"\r");
+        self.clear();
         let _ = self.writer.write_all(b"\n");
         let _ = self.writer.flush();
     }
@@ -146,6 +170,46 @@ fn terminal_width() -> usize {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(80)
+}
+
+/// Render a single-line progress string: label + truncated path, padded to
+/// terminal width in display columns. Shared by `update` and `update_phase`
+/// so both callers reuse the same truncation and padding logic.
+///
+/// The path is right-aligned (leaf visible on the right) with a leading
+/// ellipsis (U+2026) when it exceeds the remaining columns after the label.
+/// Wide chars (CJK, emoji) are counted in display columns, never in bytes.
+/// The returned string is padded with trailing spaces to `width` so each
+/// update fully overwrites a longer previous one.
+fn render_line(label: &str, path: &Path, width: usize) -> String {
+    let display = path.display().to_string();
+    let max_cols = width.saturating_sub(label.width());
+    let truncated = if display.width() > max_cols {
+        let ellipsis = "\u{2026}";
+        // Right-align: the leaf (current dir) stays visible. We keep chars
+        // from the right whose total display width fits, accounting for
+        // the ellipsis at the left.
+        let keep = max_cols.saturating_sub(ellipsis.width());
+        let mut cols = 0;
+        let mut start = display.len();
+        for (idx, ch) in display.char_indices().rev() {
+            let ch_cols = ch.width().unwrap_or(0);
+            if cols + ch_cols > keep {
+                break;
+            }
+            cols += ch_cols;
+            start = idx;
+        }
+        format!("{}{}", ellipsis, &display[start..])
+    } else {
+        display
+    };
+    let line = format!("{}{}", label, truncated);
+    // Pad with spaces so a shorter path fully overwrites a longer previous
+    // one (no leftover trailing characters from the prior line). Measured
+    // in display columns: wide chars (CJK, emoji) occupy two columns each.
+    let pad = width.saturating_sub(line.width());
+    format!("{}{}", line, " ".repeat(pad))
 }
 
 #[cfg(test)]
@@ -307,6 +371,50 @@ mod tests {
         );
     }
 
+    /// clear erases the line in place without emitting a newline, so the
+    /// next write starts at column 0 of the erased line.
+    #[test]
+    fn clear_erases_line_without_newline() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 20,
+            active: true,
+        };
+        pw.update(Path::new("/some/path"));
+        pw.clear();
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        assert!(
+            !bytes.contains('\n'),
+            "clear must not emit a newline: {:?}",
+            bytes
+        );
+        assert!(
+            bytes.ends_with('\r'),
+            "clear must leave the cursor at column 0: {:?}",
+            bytes
+        );
+        let last = bytes.split('\r').rev().nth(1).unwrap_or("");
+        assert!(
+            last.trim().is_empty(),
+            "cleared segment must be spaces only: {:?}",
+            last
+        );
+    }
+
+    /// clear is a no-op when not a TTY.
+    #[test]
+    fn clear_no_op_when_not_tty() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 20,
+            active: false,
+        };
+        pw.clear();
+        assert!(pw.writer.is_empty(), "non-TTY clear must emit nothing");
+    }
+
     /// finish clears the line and emits a newline.
     #[test]
     fn finish_clears_line_and_emits_newline() {
@@ -361,6 +469,147 @@ mod tests {
             !last.contains("structure"),
             "final segment must not carry trailing chars: {:?}",
             last
+        );
+    }
+
+    /// update_phase emits <phase> <idx>/<total>: <path> with CR prefix, no
+    /// trailing newline, and the same truncation/padding as update.
+    #[test]
+    fn update_phase_emits_phase_label_and_counter() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 40,
+            active: true,
+        };
+        pw.update_phase("classifying", 3, 47, Path::new("/my/project"));
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        // Starts with CR, no trailing newline.
+        assert!(bytes.starts_with("\r"), "update_phase must start with CR");
+        assert!(
+            !bytes.ends_with('\n'),
+            "update_phase must not end with newline"
+        );
+        // Contains the phase label, counter, and path.
+        assert!(
+            bytes.contains("classifying 3/47: /my/project"),
+            "update_phase must contain phase/counter/path: {:?}",
+            bytes
+        );
+    }
+
+    /// update_phase is a no-op when not a TTY.
+    #[test]
+    fn update_phase_no_op_when_not_tty() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 80,
+            active: false,
+        };
+        pw.update_phase("cleaning", 1, 5, Path::new("/a/b/c"));
+        pw.finish();
+        assert!(
+            pw.writer.is_empty(),
+            "non-TTY update_phase must emit nothing: {:?}",
+            pw.writer
+        );
+    }
+
+    /// update_phase truncates long paths with a leading ellipsis, just like
+    /// update. The leaf (last segment) stays visible on the right.
+    #[test]
+    fn update_phase_truncates_long_paths() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 25,
+            active: true,
+        };
+        // Path longer than width minus the phase/counter label.
+        pw.update_phase(
+            "classifying",
+            1,
+            100,
+            Path::new("/very/deep/nested/project/structure/here"),
+        );
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        assert!(bytes.contains('\u{2026}'), "long path must be ellipsized");
+        assert!(bytes.contains("here"), "leaf must stay visible");
+        assert!(
+            !bytes.ends_with('\n'),
+            "update_phase must not end with newline"
+        );
+    }
+
+    /// update_phase with multibyte UTF-8 path must not panic: the slice start
+    /// is snapped forward to the next char boundary.
+    #[test]
+    fn update_phase_truncates_multibyte_paths() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 25,
+            active: true,
+        };
+        pw.update_phase("cleaning", 1, 3, Path::new("/Users/séb/工程/项目文件夹"));
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        assert!(
+            bytes.contains('\u{2026}'),
+            "long multibyte path must be ellipsized"
+        );
+        assert!(bytes.contains("件夹"), "leaf tail must stay visible");
+    }
+
+    /// Each update_phase call overwrites the previous one: a shorter path
+    /// after a longer one produces a buffer where each CR-delimited segment
+    /// contains only its own content.
+    #[test]
+    fn update_phase_overwrites_previous() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 40,
+            active: true,
+        };
+        pw.update_phase(
+            "classifying",
+            1,
+            5,
+            Path::new("/a/very/deep/nested/project/structure"),
+        );
+        pw.update_phase("classifying", 2, 5, Path::new("/short"));
+        let second = String::from_utf8_lossy(&pw.writer);
+        assert!(
+            second.contains("classifying 2/5: /short"),
+            "second update_phase must show the new path: {:?}",
+            second
+        );
+        let segments: Vec<&str> = second.split('\r').collect();
+        let last = segments.last().copied().unwrap_or("");
+        assert!(
+            !last.contains("structure"),
+            "final segment must not carry trailing chars: {:?}",
+            last
+        );
+    }
+
+    /// update_phase renders the phase label exactly as supplied -- callers
+    /// can use "classifying", "cleaning", or any other label.
+    #[test]
+    fn update_phase_renders_supplied_label() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 40,
+            active: true,
+        };
+        pw.update_phase("cleaning", 1, 3, Path::new("/project"));
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        assert!(
+            bytes.contains("cleaning 1/3: /project"),
+            "must render the supplied label: {:?}",
+            bytes
         );
     }
 }
