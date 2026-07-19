@@ -6,9 +6,9 @@ The binary loads configuration, discovers projects, classifies their git
 state, and cleans the cleanable ones. The current surface covers discovery
 (`devclean discovery`), classification (`devclean classification`),
 protection via `.devcleanignore` (`devclean ignore`), the safe-to-delete
-catalog (`devclean safelist`), and a non-destructive cleaning preview
-(`devclean clean`); the interactive approval flow is a separate,
-not-yet-implemented feature (#8).
+catalog (`devclean safelist`), and the interactive cleaning flow
+(`devclean clean`), which **deletes files** once approved (or with
+`--force`); use `--dry-run` for a non-destructive preview.
 
 ## Build
 
@@ -105,24 +105,35 @@ items and approved surfaced items are left un-excluded so `git clean` deletes
 them. An absolute path on the cleaning path is treated as **protected**
 (fail-safe toward not-deleting, never fail-open).
 
+`devclean clean` runs the interactive flow (#8): it reports every project
+sorted by status (statuses 1–4 need manual attention; status-5 projects are
+the cleanable subjects), asks "Clean the N cleanable projects? (y/n)", then
+loops over the cleanable projects one at a time — showing the items that
+would be deleted *before* asking anything, prompting per surfaced item
+(delete or keep), and prompting per project — and finally deletes the
+approved items. Answering "n" (or EOF) to the first prompt exits without
+touching anything.
+
 Flags:
 
-- `--force` — auto-approve every surfaced item (no prompting).
-- `--dry-run` — compute and print what would be deleted; delete nothing.
-
-The interactive per-item approval flow is a separate issue (#8); until it
-lands, `devclean clean` is a **non-destructive debug hook** that enumerates
-each cleanable project and prints each untracked item's classification and
-whether it would be deleted (with `--force` toggling the verdict for surfaced
-items), without deleting anything.
+- `--force` — **destructive**: skip every prompt and clean all cleanable
+  projects, auto-approving every surfaced item.
+- `--dry-run` — non-destructive preview: print what would be deleted and
+  delete nothing. Safe items are shown as `would delete`; surfaced items as
+  `would prompt` (a real interactive run asks about them).
+- `--force --dry-run` — preview the force run: every non-protected item is
+  shown as `would delete`, nothing is deleted.
 
 ```sh
-$ devclean clean              # dry-run preview for each cleanable project
-$ devclean --force clean      # show verdicts as if every surfaced item were approved
+$ devclean clean                    # interactive: report, approve, then delete
+$ devclean --dry-run clean          # preview only; deletes nothing
+$ devclean --force clean            # DESTRUCTIVE: clean everything without prompting
+$ devclean --force --dry-run clean  # preview what --force would delete
 ```
 
-See `src/clean.rs` for the implementation (the `clean` / `dry_run` /
-`build_exclusions` API is the seam the interactive flow (#8) will drive).
+See `src/clean.rs` for the deletion engine and `src/interactive.rs` for the
+approval state machine (the `clean` / `dry_run` / `build_exclusions` API is
+the seam the interactive flow drives).
 
 ## Safe-to-delete catalog
 
@@ -203,8 +214,9 @@ devclean --workspace ~/code classification
 ```
 
 See `src/classify.rs` for the git-plumbing logic and status precedence;
-`tests/classification_cli.rs` for integration tests. The interactive approval
-flow (#8) is a separate issue.
+`tests/classification_cli.rs` for integration tests. The interactive
+cleaning flow that acts on these statuses is `devclean clean` (see
+"Cleaning" above).
 
 ## Configuration
 
@@ -244,7 +256,7 @@ devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
 devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
 devclean [FLAGS] discovery       # see "Discovery" above
 devclean [FLAGS] classification  # see "Classification" above
-devclean [FLAGS] clean           # see "Cleaning" above (non-destructive preview)
+devclean [FLAGS] clean           # see "Cleaning" above (interactive; deletes on approval)
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)
@@ -253,7 +265,9 @@ devclean [FLAGS] clean           # see "Cleaning" above (non-destructive preview
   --verbose                      # verbose output
 ```
 
-`--force` and `--dry-run` are mutually exclusive; passing both is an error.
+`--force` and `--dry-run` may be combined: `--force --dry-run` previews what
+a force run would delete, without deleting anything (`--dry-run` always wins
+on execution; `--force` only widens what is auto-approved for display).
 
 For example:
 

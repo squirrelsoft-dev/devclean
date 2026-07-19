@@ -3,6 +3,7 @@ mod clean;
 mod config;
 mod discovery;
 mod ignore;
+mod interactive;
 mod safelist;
 
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Force mode: delete without prompting (overrides config `default_mode`).
-    #[arg(long, conflicts_with = "dry_run")]
+    #[arg(long)]
     force: bool,
 
     /// Dry-run: show what would be deleted without deleting.
@@ -75,11 +76,11 @@ enum Command {
     /// sorted by status. Status 5 is the only cleanable state; status 1..4
     /// each signal that cleaning must wait. See issue #6 for the full spec.
     Classification,
-    /// Debug helper: clean each cleanable project in dry-run mode, printing
-    /// what each project would delete (protected items excluded, safe items
-    /// auto-deleted, surfaced items auto-approved via --force, or each one
-    /// listed for display in dry-run). Does not actually delete anything in
-    /// dry-run. See issue #7 for the full spec.
+    /// Interactive cleaning flow: report every project sorted by status,
+    /// then for each cleanable project show what would be deleted and
+    /// collect approval before running `git clean`. `--force` skips the
+    /// prompts and auto-approves; `--dry-run` previews and deletes nothing.
+    /// See issues #7 (engine) and #8 (flow) for the full spec.
     Clean,
 }
 
@@ -322,14 +323,14 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `devclean clean`: a non-destructive preview hook. For each cleanable
-/// (status-5) project, enumerate untracked items, classify each one, and
-/// print its classification plus whether it would be deleted. Nothing is
-/// deleted — the interactive approval flow is issue #8, and this hook never
-/// invokes `git clean`'s deletion. `--force` only toggles the displayed
-/// verdict for surfaced items (would-delete vs. keep), it does not trigger
-/// deletion. Mirrors the original zshrc approach at the enumeration/classify
-/// layer; the deletion layer (`clean::clean`) is the seam #8 will drive.
+/// `devclean clean`: the interactive cleaning flow (issue #8).
+///
+/// Sorts every discovered project by status, reports each non-cleanable one
+/// with a one-line reason, and lists each cleanable one. For each cleanable
+/// project, enumerates untracked items, prompts about each `Surfaced` item,
+/// prompts about the project itself, then executes `git clean` if approved.
+/// `--force` skips every prompt and auto-approves each surfaced item. `--dry-run`
+/// shows what would be deleted, deletes nothing, skips prompts.
 fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));
@@ -340,6 +341,12 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Classify every project, keeping each status and ignore-set for the
+    // report and execution. Skip each project whose `.devcleanignore` could
+    // not be loaded — same fail-safe as `run_classification`: one bad set
+    // would otherwise mask a protected file as cleanable, and the engine
+    // acts destructively on that verdict.
+    let mut all_projects: Vec<(PathBuf, classify::Status, ignore::IgnoreSet)> = Vec::new();
     for d in &projects {
         let ignore_set = match ignore::IgnoreSet::load(&d.path) {
             Ok(set) => set,
@@ -352,66 +359,159 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let status = classify::classify(&d.path, &ignore_set);
-        if status != classify::Status::Cleanable {
-            if cli.verbose {
+        all_projects.push((d.path.clone(), status, ignore_set));
+    }
+    all_projects.sort_by_key(|&(_, status, _)| status);
+
+    // Report phase: each non-cleanable project gets a one-line reason;
+    // cleanable projects are listed separately as the cleanup subjects.
+    // For each cleanable project, keep its index into `all_projects` (for
+    // the ignore set) and the safe set built here, so execution below does
+    // not rebuild or re-find either.
+    println!(
+        "clean: {} project(s) — sorted by status",
+        all_projects.len()
+    );
+    let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
+    let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
+    for (idx, (path, status, ignore_set)) in all_projects.iter().enumerate() {
+        match status {
+            classify::Status::Cleanable => {
+                let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: {}: skipped, could not build safe-to-delete set: {e}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                };
+                let items = match clean::dry_run(path, ignore_set, &safe_set) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        eprintln!("warning: {}: clean failed: {e}", path.display());
+                        continue;
+                    }
+                };
                 println!(
-                    "{}: {} (not cleanable, skipping)",
-                    d.path.display(),
+                    "  {} — {} (cleanable, status 5)",
+                    path.display(),
+                    status.label()
+                );
+                cleanable_items.push((path.clone(), items));
+                cleanable_meta.push((idx, safe_set));
+            }
+            _ => {
+                println!(
+                    "  {} — {} (needs attention: {})",
+                    path.display(),
                     status.label(),
+                    interactive::status_reason(*status)
                 );
             }
-            continue;
         }
-        let safe_set = match safelist::SafeSet::from_config(&d.path, &cfg) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "warning: {}: skipped, could not build safe-to-delete set: {e}",
-                    d.path.display()
-                );
-                continue;
-            }
-        };
-        // The CLI hook is a non-destructive preview: it enumerates and
-        // classifies each cleanable project's untracked items and prints
-        // what `git clean` would delete, without deleting anything. The
-        // interactive approval flow is issue #8; `--force` here only changes
-        // the displayed verdict for surfaced items (would-be-deleted vs.
-        // surfaces-for-approval), it does not trigger deletion in this hook.
-        let items = match clean::dry_run(&d.path, &ignore_set, &safe_set) {
-            Ok(items) => items,
-            Err(e) => {
-                eprintln!("warning: {}: clean failed: {e}", d.path.display());
-                continue;
-            }
-        };
-        println!("clean (dry-run): {}", d.path.display());
-        if items.is_empty() {
-            println!("  (no untracked items)");
-            continue;
-        }
-        for item in &items {
-            let would_delete = match item.classification {
-                clean::Classification::Protected => false,
-                clean::Classification::Safe => true,
-                clean::Classification::Surfaced => cli.force,
-            };
+    }
+
+    // Zero cleanable: summary and exit 0 — no prompts, no enumeration,
+    // nothing to clean. The flow only runs when there is a subject to clean.
+    if cleanable_items.is_empty() {
+        println!("clean: no cleanable projects — nothing to delete");
+        return Ok(());
+    }
+
+    // Build the interactive inputs and run the state machine against the
+    // process's stdin (locked, buffered for line reads). The flow itself
+    // owns the decision state machine; the CLI hook owns the I/O plumbing.
+    let inputs = interactive::InteractiveFlowInputs {
+        all_projects: all_projects
+            .iter()
+            .map(|(p, s, _)| (p.clone(), *s))
+            .collect(),
+        per_project_items: cleanable_items,
+        force: cli.force,
+        dry_run: cli.dry_run,
+    };
+    let stdin_lock = std::io::stdin().lock();
+    let mut reader = std::io::BufReader::new(stdin_lock);
+    let results = interactive::run(inputs, &mut reader);
+
+    // Outcome phase: `run` returns one result per cleanable project in the
+    // same order as `cleanable_meta`. Print each project's outcome, then
+    // execute the approved ones (execution is always suppressed by
+    // --dry-run; --force approved everything without prompting).
+    for (r, (idx, safe_set)) in results.iter().zip(&cleanable_meta) {
+        let will_execute = r.project_approved && !cli.dry_run;
+        println!(
+            "clean {}: {} — {}",
+            r.path.display(),
+            if r.project_approved {
+                "approved"
+            } else {
+                "skipped"
+            },
+            r.status.label()
+        );
+        for item in &r.items {
             let label = match item.classification {
                 clean::Classification::Protected => "protected",
                 clean::Classification::Safe => "safe-to-delete",
                 clean::Classification::Surfaced => "surfaced",
+            };
+            let verdict = if r.would_delete.contains(&item.rel_path) {
+                if will_execute {
+                    " (deleting)"
+                } else {
+                    " (would delete)"
+                }
+            } else if cli.dry_run
+                && !cli.force
+                && item.classification == clean::Classification::Surfaced
+            {
+                // A real interactive run would ask about this item, so the
+                // preview must not claim either fate.
+                " (would prompt)"
+            } else {
+                " (kept)"
             };
             println!(
                 "  {}{} [{}]{}",
                 item.rel_path.display(),
                 if item.is_dir { "/" } else { "" },
                 label,
-                if would_delete {
-                    " (would delete)"
-                } else {
-                    " (keep)"
-                },
+                verdict
             );
+        }
+
+        if will_execute {
+            // `clean` builds the exclusion list from the approvals: Safe and
+            // approved Surfaced items are left un-excluded so `git clean`
+            // deletes them; Protected and unapproved Surfaced items are
+            // excluded. The approvals are the Surfaced entries of the
+            // would-delete list.
+            let approved: Vec<PathBuf> = r
+                .would_delete
+                .iter()
+                .filter(|p| {
+                    r.items.iter().any(|i| {
+                        i.rel_path == **p && i.classification == clean::Classification::Surfaced
+                    })
+                })
+                .cloned()
+                .collect();
+            let ignore_set = &all_projects[*idx].2;
+            match clean::clean(&r.path, ignore_set, safe_set, &approved, cli.force, false) {
+                Ok(_) => {
+                    println!(
+                        "clean {}: deleted {} item(s)",
+                        r.path.display(),
+                        r.would_delete.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("clean {}: failed: {e}", r.path.display());
+                }
+            }
         }
     }
     Ok(())

@@ -143,7 +143,6 @@ pub struct CleanItem {
 /// (or force-auto-approved) `Surfaced` items contribute nothing, so `git
 /// clean` deletes them. See the module docs for why each exclusion is
 /// anchored at the root rather than re-using layer source patterns.
-#[allow(dead_code)]
 pub fn build_exclusions(items: &[CleanItem], approved: &[PathBuf], force: bool) -> Vec<String> {
     let mut exclusions: Vec<String> = Vec::new();
     for item in items {
@@ -172,7 +171,6 @@ pub fn build_exclusions(items: &[CleanItem], approved: &[PathBuf], force: bool) 
 /// trailing spaces (which gitignore would otherwise trim) are escaped too.
 /// Without this, a protected filename containing e.g. `[` would produce a
 /// pattern that fails to match, and `git clean` would delete the file.
-#[allow(dead_code)]
 fn push_anchored(exclusions: &mut Vec<String>, rel_path: &Path) {
     let s = rel_path.to_string_lossy();
     if s.is_empty() {
@@ -476,7 +474,6 @@ fn discover_fileless_dirs(
 /// Run `git clean -xfd -e <exclusion>...` against `project_path`. Only
 /// invoked on the destructive path — dry-run mode never reaches git clean
 /// (`clean` returns before calling this and `dry_run` only enumerates).
-#[allow(dead_code)]
 fn run_git_clean(project_path: &Path, exclusions: &[String]) -> Result<(), String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(project_path);
@@ -511,7 +508,6 @@ fn run_git_clean(project_path: &Path, exclusions: &[String]) -> Result<(), Strin
 /// `approved` is the set of surfaced item paths the user approved in the
 /// interactive flow (#8); pass `&[]` for a pure dry-run preview or `force =
 /// true` to auto-approve all.
-#[allow(dead_code)]
 pub fn clean(
     project_path: &Path,
     ignore_set: &IgnoreSet,
