@@ -1,4 +1,5 @@
 mod config;
+mod discovery;
 mod ignore;
 mod safelist;
 
@@ -61,6 +62,13 @@ enum Command {
         /// Path to test, relative to the current directory.
         path: String,
     },
+    /// Discover projects under each configured workspace root.
+    ///
+    /// Walks each workspace root up to `max_depth` and reports each folder
+    /// that contains a marker from the resolved `project_markers` list. Each
+    /// reported path is absolute and tagged with the marker that found it.
+    /// Discovery/cleaning are separate issues.
+    Discovery,
 }
 
 fn main() {
@@ -84,6 +92,12 @@ fn main() {
         }
         Some(Command::Safelist { path }) => {
             if let Err(e) = run_safelist(&cli, path) {
+                eprintln!("devclean: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Discovery) => {
+            if let Err(e) = run_discovery(&cli) {
                 eprintln!("devclean: {e}");
                 std::process::exit(1);
             }
@@ -214,5 +228,23 @@ fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>>
     let safe = set.is_safe(rel);
 
     println!("{}: {}", path, if safe { "safe" } else { "not-safe" });
+    Ok(())
+}
+
+/// `devclean discovery`: walk each configured workspace root and print the
+/// list of discovered projects (paths with markers). Discovery/cleaning are
+/// separate issues.
+fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (_config_path, cfg) = load_cli_config(cli)?;
+
+    let projects = discovery::discover(&cfg)?;
+    if projects.is_empty() {
+        println!("discovery: no projects found");
+    } else {
+        println!("discovered {} project(s):", projects.len());
+        for p in &projects {
+            println!("  {} ({})", p.path.display(), p.marker);
+        }
+    }
     Ok(())
 }

@@ -2,12 +2,11 @@
 
 Development environment cleanup CLI (scaffold).
 
-This is an initial, minimal Rust CLI skeleton. Product behavior (discovery,
-classification, cleaning) is not yet implemented; the binary currently loads its
-configuration and can print the resolved config via `devclean list`, answer
-whether a path is protected by `.devcleanignore` rules via `devclean ignore`,
-and answer whether a path is in the safe-to-delete catalog via
-`devclean safelist`.
+The binary loads configuration, discovers projects, classifies them, and
+cleanes them. The current surface covers discovery (`devclean discover`),
+protection via `.devcleanignore` (`devclean ignore`), and the safe-to-delete
+catalog (`devclean safelist`); classification and interactive flow are
+separate issues.
 
 ## Build
 
@@ -125,6 +124,20 @@ Defaults:
 - `max_depth` — `4`
 - `project_markers` — the list shown above
 - `default_mode` — `interactive`
+
+### Discovery
+
+`devclean discover` walks each configured `workspace_root` up to `max_depth`
+and reports every folder that contains one of the configured `project_markers`
+(.git, package.json, Cargo.toml, go.mod, pyproject.toml, pom.xml,
+build.gradle, *.csproj, or any user-supplied additions). Each discovered
+path is absolute. See `src/discovery.rs` for the nesting rule (every marker
+is a candidate project; nested projects within max_depth are all reported).
+
+```
+devclean discover              # prints detected projects for workspace roots
+devclean discover --json       # machine-readable output
+```
 
 ### CLI flags (override config)
 
