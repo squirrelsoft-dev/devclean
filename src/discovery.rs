@@ -234,7 +234,12 @@ fn walk_root(
 /// Walks each parent of `dir` upward; stops when the parent equals the
 /// workspace root (the discovery boundary). A `.git` at `dir`'s own level is
 /// not considered an ancestor — that is the nested-`.git`-is-separate case.
+/// The workspace root itself has no ancestors inside the boundary, so a
+/// marker at the root is never suppressed by a git repo above the root.
 fn has_ancestor_git(dir: &Path, root: &Path) -> bool {
+    if dir == root {
+        return false;
+    }
     let mut current = dir.to_path_buf();
     loop {
         if let Some(parent) = current.parent() {
@@ -488,6 +493,23 @@ mod tests {
         let names: Vec<_> = results.iter().map(|r| r.marker.as_str()).collect();
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], ".git");
+    }
+
+    #[test]
+    fn root_marker_not_suppressed_by_git_above_boundary() {
+        // A git repo ABOVE the workspace root must not suppress a marker at
+        // the root itself: the workspace root is the discovery boundary
+        // (issue #15), so nothing above it is consulted.
+        let outer = tmp_root("outer_git");
+        mkfixture(&outer, ".git", "repo above the boundary");
+        let root = outer.join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        mkfixture(&root, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, "Cargo.toml");
     }
 
     #[test]
