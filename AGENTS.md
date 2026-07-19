@@ -51,7 +51,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Granularity (from #6 review): a directory that is protected or safe is recorded once; a directory that is neither is re-listed at file granularity so content patterns (e.g. `*.js`) inside untracked directories still protect their files. `git ls-files --others -z -- <dir>` yields full repo-relative paths — use them directly, do not re-join onto `dir`. That re-listing yields files only, so it is paired with an on-disk walk (`discover_fileless_dirs`) that classifies nested file-less directories — otherwise `git clean -xfd` would silently delete them.
 - Deferred #3 findings resolved here: `is_ignored == false` for a `!`-whitelisted path means NOT protected (deletable subject to safe-list + approval); an absolute path on the cleaning path is classified `Protected` (fail-safe toward not-deleting, never fail-open) before the matcher is consulted.
 - Public API seam for the interactive flow (#8): `clean(project, ignore_set, safe_set, approved, force, dry_run)` and `dry_run(...)`; `build_exclusions` is the exclusion-list builder. The `devclean clean` CLI hook is a **non-destructive preview** only — it never invokes `git clean` deletion, by design (#8 owns the interactive flow).
-- Owners: `README.md` "Cleaning" section; `src/clean.rs` module docs and rustdoc; tests in `src/clean.rs`.
+- Owners: `README.md` "Cleaning" section; `src/clean.rs` module docs and rustdoc; unit tests in `src/clean.rs`, CLI-level tests in `tests/clean_cli.rs`.
 
 ## Maintaining this file
 

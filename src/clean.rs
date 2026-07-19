@@ -388,7 +388,13 @@ fn enumerate_subtree_files(
             classification: Classification::Surfaced,
         });
     }
-    discover_fileless_dirs(&project_path.join(dir), dir, ignore_set, safe_set, &mut items)?;
+    discover_fileless_dirs(
+        &project_path.join(dir),
+        dir,
+        ignore_set,
+        safe_set,
+        &mut items,
+    )?;
     Ok(items)
 }
 
