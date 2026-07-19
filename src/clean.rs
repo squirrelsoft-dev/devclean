@@ -31,7 +31,8 @@
 //! ## Exclusion list
 //!
 //! Each exclusion is a single gitignore-style `-e` pattern anchored at the
-//! project root with a leading `/`, matching exactly one enumerated path:
+//! project root with a leading `/` and glob-escaped so it matches the
+//! enumerated path literally, matching exactly one enumerated path:
 //!
 //! - every `Protected` item contributes `/<rel_path>` (kept), and
 //! - every un-approved `Surfaced` item contributes `/<rel_path>` (kept).
@@ -108,9 +109,11 @@ pub enum Classification {
 /// One untracked item, classified.
 #[derive(Debug, Clone)]
 pub struct CleanItem {
-    /// The path relative to the project root. Files appear as plain relative
-    /// paths; directories appear as relative paths ending with `/`.
+    /// The path relative to the project root, with no trailing `/` for
+    /// directories — check `is_dir` to distinguish a directory from a file.
     pub rel_path: PathBuf,
+    /// Whether this item is a directory (git listed it with a trailing `/`).
+    pub is_dir: bool,
     /// The classification of this item.
     pub classification: Classification,
 }
@@ -119,7 +122,7 @@ pub struct CleanItem {
 /// items, an approved set, and a force flag.
 ///
 /// Each `Protected` item and each un-approved `Surfaced` item contributes one
-/// root-anchored literal exclusion `/<rel_path>`. `Safe` items and approved
+/// root-anchored, glob-escaped literal exclusion `/<rel_path>`. `Safe` items and approved
 /// (or force-auto-approved) `Surfaced` items contribute nothing, so `git
 /// clean` deletes them. See the module docs for why each exclusion is
 /// anchored at the root rather than re-using layer source patterns.
@@ -146,6 +149,12 @@ pub fn build_exclusions(items: &[CleanItem], approved: &[PathBuf], force: bool) 
 
 /// Push `/<rel_path>` — a root-anchored gitignore literal excluding exactly
 /// this path — unless `rel_path` is empty (defensive; should not occur).
+///
+/// The path is glob-escaped so it matches literally: gitignore
+/// metacharacters (`\`, `*`, `?`, `[`, `]`) are backslash-escaped, and
+/// trailing spaces (which gitignore would otherwise trim) are escaped too.
+/// Without this, a protected filename containing e.g. `[` would produce a
+/// pattern that fails to match, and `git clean` would delete the file.
 #[allow(dead_code)]
 fn push_anchored(exclusions: &mut Vec<String>, rel_path: &Path) {
     let s = rel_path.to_string_lossy();
@@ -153,11 +162,29 @@ fn push_anchored(exclusions: &mut Vec<String>, rel_path: &Path) {
         return;
     }
     let trimmed = s.trim_end_matches('/');
-    exclusions.push(format!("/{trimmed}"));
+    let mut escaped = String::with_capacity(trimmed.len() + 1);
+    for c in trimmed.chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    let kept = escaped.trim_end_matches(' ').len();
+    let trailing_spaces = escaped.len() - kept;
+    escaped.truncate(kept);
+    for _ in 0..trailing_spaces {
+        escaped.push_str("\\ ");
+    }
+    exclusions.push(format!("/{escaped}"));
 }
 
 /// Run `git -C <project_path> <args>...` and return stdout on success, or
 /// `Err` carrying stderr.
+///
+/// Stdout must be valid UTF-8: a lossy decode would corrupt non-UTF-8
+/// filenames so their exclusion patterns could never match on disk, turning
+/// a protected item into a deleted one. Refusing to proceed is the fail-safe
+/// direction — the whole project's clean aborts and nothing is removed.
 fn git_cmd(project_path: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(project_path);
@@ -168,7 +195,13 @@ fn git_cmd(project_path: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("git command failed: {e}"))?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        String::from_utf8(out.stdout).map_err(|_| {
+            format!(
+                "git -C {} {}: output contains non-UTF-8 path(s); refusing to clean this project",
+                project_path.display(),
+                args.join(" ")
+            )
+        })
     } else {
         Err(format!(
             "git -C {} {} failed (exit {}): {}",
@@ -225,6 +258,7 @@ pub fn enumerate_untracked(
         if rel_path.has_root() {
             items.push(CleanItem {
                 rel_path,
+                is_dir,
                 classification: Classification::Protected,
             });
             continue;
@@ -234,6 +268,7 @@ pub fn enumerate_untracked(
         if ignore_set.is_ignored_path(&rel_path, is_dir) {
             items.push(CleanItem {
                 rel_path,
+                is_dir,
                 classification: Classification::Protected,
             });
             continue;
@@ -246,6 +281,7 @@ pub fn enumerate_untracked(
             if safe_set.is_safe_to_delete(&rel_path, true) {
                 items.push(CleanItem {
                     rel_path,
+                    is_dir,
                     classification: Classification::Safe,
                 });
                 continue;
@@ -259,6 +295,7 @@ pub fn enumerate_untracked(
         if safe_set.is_safe_to_delete(&rel_path, false) {
             items.push(CleanItem {
                 rel_path,
+                is_dir,
                 classification: Classification::Safe,
             });
             continue;
@@ -267,6 +304,7 @@ pub fn enumerate_untracked(
         // 5. Surfaced: needs approval.
         items.push(CleanItem {
             rel_path,
+            is_dir,
             classification: Classification::Surfaced,
         });
     }
@@ -276,8 +314,8 @@ pub fn enumerate_untracked(
 /// Each untracked file beneath `dir`, enumerated at file granularity and
 /// classified individually. `git ls-files --others -z -- <dir>` yields full
 /// repo-relative paths, so each result is used directly (not joined onto
-/// `dir`). A listing failure yields an empty set rather than aborting the
-/// whole project's enumeration.
+/// `dir`). A listing failure aborts the whole project's enumeration (the
+/// error propagates), which is fail-safe: nothing is deleted.
 fn enumerate_subtree_files(
     project_path: &Path,
     dir: &Path,
@@ -296,6 +334,7 @@ fn enumerate_subtree_files(
         if rel_path.has_root() {
             items.push(CleanItem {
                 rel_path,
+                is_dir: false,
                 classification: Classification::Protected,
             });
             continue;
@@ -303,6 +342,7 @@ fn enumerate_subtree_files(
         if ignore_set.is_ignored_path(&rel_path, false) {
             items.push(CleanItem {
                 rel_path,
+                is_dir: false,
                 classification: Classification::Protected,
             });
             continue;
@@ -310,28 +350,28 @@ fn enumerate_subtree_files(
         if safe_set.is_safe_to_delete(&rel_path, false) {
             items.push(CleanItem {
                 rel_path,
+                is_dir: false,
                 classification: Classification::Safe,
             });
             continue;
         }
         items.push(CleanItem {
             rel_path,
+            is_dir: false,
             classification: Classification::Surfaced,
         });
     }
     Ok(items)
 }
 
-/// Run `git clean -xfd -e <exclusion>...` against `project_path`. In dry-run
-/// mode the command adds `-n` so nothing is actually removed.
+/// Run `git clean -xfd -e <exclusion>...` against `project_path`. Only
+/// invoked on the destructive path — dry-run mode never reaches git clean
+/// (`clean` returns before calling this and `dry_run` only enumerates).
 #[allow(dead_code)]
-fn run_git_clean(project_path: &Path, exclusions: &[String], dry_run: bool) -> Result<(), String> {
+fn run_git_clean(project_path: &Path, exclusions: &[String]) -> Result<(), String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(project_path);
     cmd.arg("clean").arg("-xfd");
-    if dry_run {
-        cmd.arg("-n");
-    }
     for ex in exclusions {
         cmd.arg("-e").arg(ex);
     }
@@ -375,7 +415,7 @@ pub fn clean(
     let exclusions = build_exclusions(&items, approved, force);
 
     if !dry_run {
-        run_git_clean(project_path, &exclusions, false)?;
+        run_git_clean(project_path, &exclusions)?;
     }
 
     // Return only the surfaced items that still need approval: in `force`
@@ -583,6 +623,7 @@ mod tests {
         // excluded (kept), never deleted.
         let items = vec![CleanItem {
             rel_path: PathBuf::from("/tmp/devclean-noise"),
+            is_dir: false,
             classification: Classification::Protected,
         }];
         let excl = build_exclusions(&items, &[], false);
@@ -602,18 +643,22 @@ mod tests {
         let items = vec![
             CleanItem {
                 rel_path: PathBuf::from("important.bin"),
+                is_dir: false,
                 classification: Classification::Protected,
             },
             CleanItem {
                 rel_path: PathBuf::from("b.tmp"),
+                is_dir: false,
                 classification: Classification::Surfaced,
             },
             CleanItem {
                 rel_path: PathBuf::from("c.tmp"),
+                is_dir: false,
                 classification: Classification::Surfaced,
             },
             CleanItem {
                 rel_path: PathBuf::from("target"),
+                is_dir: true,
                 classification: Classification::Safe,
             },
         ];
@@ -637,6 +682,66 @@ mod tests {
         assert!(!excl.iter().any(|e| e == "/b.tmp"));
         assert!(!excl.iter().any(|e| e == "/c.tmp"));
         assert!(!excl.iter().any(|e| e == "/target"));
+    }
+
+    /// Exclusion patterns are glob-escaped so filenames containing gitignore
+    /// metacharacters (`*`, `?`, `[`, `]`, `\`) or trailing spaces match
+    /// literally instead of being interpreted as globs.
+    #[test]
+    fn exclusions_escape_glob_metacharacters() {
+        let items = vec![
+            CleanItem {
+                rel_path: PathBuf::from("important [backup].dat"),
+                is_dir: false,
+                classification: Classification::Protected,
+            },
+            CleanItem {
+                rel_path: PathBuf::from("star*name?.tmp"),
+                is_dir: false,
+                classification: Classification::Surfaced,
+            },
+            CleanItem {
+                rel_path: PathBuf::from("trailing  "),
+                is_dir: false,
+                classification: Classification::Protected,
+            },
+        ];
+        let excl = build_exclusions(&items, &[], false);
+        assert!(
+            excl.iter().any(|e| e == "/important \\[backup\\].dat"),
+            "bracket name should be escaped: {excl:?}"
+        );
+        assert!(
+            excl.iter().any(|e| e == "/star\\*name\\?.tmp"),
+            "star/question name should be escaped: {excl:?}"
+        );
+        assert!(
+            excl.iter().any(|e| e == "/trailing\\ \\ "),
+            "trailing spaces should be escaped: {excl:?}"
+        );
+    }
+
+    /// End-to-end escaping: a protected file whose name contains glob
+    /// metacharacters survives a real `git clean` run. Without escaping the
+    /// exclusion pattern would fail to match and git would delete it.
+    #[test]
+    fn clean_keeps_protected_file_with_glob_metacharacters_in_name() {
+        let root = fixture("glob_escape");
+        write_file(&root, ".devcleanignore", "important*\n");
+        git_run(&root, &["add", ".devcleanignore"]);
+        git_run(&root, &["commit", "-m", "ignore rules"]);
+        write_file(&root, "important [backup].dat", "keep me");
+        write_file(&root, "ambiguous.tmp", "surfaced junk");
+
+        let ignore_set = IgnoreSet::load(&root).unwrap();
+        let safe = safe_set(&root);
+        clean(&root, &ignore_set, &safe, &[], true, false).unwrap();
+
+        assert!(
+            root.join("important [backup].dat").is_file(),
+            "protected metacharacter-named file must survive git clean"
+        );
+        assert!(!root.join("ambiguous.tmp").exists());
     }
 
     /// Dry-run enumerates and classifies without deleting: an untracked

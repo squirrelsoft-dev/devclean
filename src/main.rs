@@ -402,8 +402,9 @@ fn run_clean(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 clean::Classification::Surfaced => "surfaced",
             };
             println!(
-                "  {} [{}]{}",
+                "  {}{} [{}]{}",
                 item.rel_path.display(),
+                if item.is_dir { "/" } else { "" },
                 label,
                 if would_delete {
                     " (would delete)"
