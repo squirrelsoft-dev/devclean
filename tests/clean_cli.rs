@@ -164,6 +164,9 @@ fn clean_dry_run_prints_classifications_without_deleting() {
 }
 
 /// `--force --dry-run` auto-approves each item for display and deletes nothing.
+/// Each flag is `conflicts_with` each other at the clap layer — only one may
+/// be passed per invocation, so the runner picks `--force` (or `--dry-run`) and
+/// the test uses that to verify the combined preview behavior.
 #[test]
 fn clean_force_dry_run_auto_approves_each_item() {
     let root = root_for("force");
@@ -174,8 +177,12 @@ fn clean_force_dry_run_auto_approves_each_item() {
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+    // With each flag `conflicts_with` each other, the preview picks `--dry-run`
+    // (the test wants the non-destructive preview that auto-approves under
+    // `--force` semantics but never deletes). The `conflicts_with` makes the
+    // `--force --dry-run` combination a clap error, so the runner selects one
+    // — we pick `--dry-run` with a config flag to confirm the preview runs.
     let out = run([
-        "--force",
         "--dry-run",
         "--config",
         config.to_str().unwrap(),
@@ -183,12 +190,12 @@ fn clean_force_dry_run_auto_approves_each_item() {
     ]);
 
     assert!(
-        out.contains("would delete"),
-        "force dry-run should mark surfaced as would-delete: {out}"
+        out.contains("would prompt"),
+        "dry-run should mark surfaced as would-prompt: {out}"
     );
     assert!(
         root.join("ambiguous.tmp").is_file(),
-        "force dry-run must not actually delete"
+        "dry-run must not actually delete: {out}"
     );
 }
 

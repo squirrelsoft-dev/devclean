@@ -1,14 +1,14 @@
 # devclean
 
-Development environment cleanup CLI (scaffold).
+Development environment cleanup CLI.
 
 The binary loads configuration, discovers projects, classifies their git
-state, and cleans the cleanable ones. The current surface covers discovery
-(`devclean discovery`), classification (`devclean classification`),
-protection via `.devcleanignore` (`devclean ignore`), the safe-to-delete
-catalog (`devclean safelist`), and the interactive cleaning flow
-(`devclean clean`), which **deletes files** once approved (or with
-`--force`); use `--dry-run` for a non-destructive preview.
+state, and cleans the cleanable ones. `devclean list` prints each project's
+status sorted by severity without cleaning; `devclean config` prints the
+resolved configuration (preserved from the original list-of-resolved-config
+behavior); `devclean` (no subcommand) and `devclean clean` each run the
+interactive clean flow — sorted report, each cleanable project enumerated,
+interactive prompts, and deletion. Each command is documented below.
 
 ## Build
 
@@ -21,6 +21,85 @@ cargo build
 ```sh
 cargo run -- --version
 cargo run -- list
+cargo run -- clean
+```
+
+## Test
+
+```sh
+cargo test
+```
+
+## CLI surface
+
+Each subcommand is optional — running with no subcommand runs the default
+interactive clean flow.
+
+| command | behavior |
+|---------|----------|
+| `devclean` | default run: discover → classify → report each project sorted by status → interactive clean for each cleanable project |
+| `devclean list` | read-only: show each project's git status, sorted by severity (most-needs-attention first). No cleaning. |
+| `devclean config` | print the resolved configuration (workspace roots, max_depth, default_mode, each invocation's flags) |
+| `devclean clean` | interactive: report each project sorted by status, each cleanable project enumerated, prompts, deletion. Destructive. |
+| `devclean discovery` | walk each workspace root and report discovered projects (paths + markers) |
+| `devclean classification` | classify each discovered project by its git state, print each status |
+| `devclean ignore <path>` | test whether `path` is ignored by the loaded `.devcleanignore` |
+| `devclean safelist <path>` | test whether `path` is safe to delete according to the catalog |
+
+### Top-level flags
+
+Each flag is top-level and must be given *before* the subcommand:
+
+```sh
+devclean [FLAGS] list              # list projects + statuses
+    devclean [FLAGS] clean          # interactive clean flow (destructive)
+    devclean [FLAGS] config         # print the resolved config
+
+  --workspace <path>              # append a workspace root (repeatable)
+  --config <path>                 # alternate config file (must exist)
+  --force                         # skip each prompt, auto-approve each surfaced item (destructive)
+  --dry-run                       # show each item's fate, delete nothing
+  --verbose                       # verbose output
+  --version                       # print the crate version
+```
+
+`--force` and `--dry-run` each `conflicts_with` each other at the clap
+layer — only one may be passed per invocation. Runtime precedence lives in
+one place each: `dry_run` alone gates execution, `force` alone gates
+prompting/auto-approval.
+
+For each cleanable project, `devclean clean` enumerates untracked items,
+prompts each `Surfaced` item (delete or keep), prompts each project (clean?
+y/n), then executes `git clean -xfd -e <globs>` if approved. `--force` skips
+each prompt and auto-approves each surfaced item. `--dry-run` previews each
+item's fate and deletes nothing.
+
+```sh
+$ devclean                       # default run: list + interactive clean
+$ devclean list                  # read-only project listing
+$ devclean clean                 # destructive interactive flow
+$ devclean --force clean         # DESTRUCTIVE: each prompt skipped
+$ devclean --dry-run clean       # preview only; each item printed
+$ devclean --verbose clean       # verbose output
+$ devclean --version             # crate version (devclean 0.1.0)
+```
+
+See `src/main.rs` for the CLI surface and `src/output.rs` for the
+formatting; `src/clean.rs` for the deletion engine and
+`src/interactive.rs` for the approval state machine.
+
+## Build
+
+```sh
+cargo build
+```
+
+## Run
+
+```sh
+cargo run -- --version
+cargo run -- list
+cargo run -- clean
 ```
 
 ## Test
@@ -114,22 +193,26 @@ would be deleted *before* asking anything, prompting per surfaced item
 approved items. Answering "n" (or EOF) to the first prompt exits without
 touching anything.
 
-Flags:
+Flags (each `conflicts_with` each other at the clap layer — only one
+per invocation):
 
 - `--force` — **destructive**: skip every prompt and clean all cleanable
   projects, auto-approving every surfaced item.
-- `--dry-run` — non-destructive preview: print what would be deleted and
+- `--dry-run` — non-destructive preview: print each item's fate and
   delete nothing. Safe items are shown as `would delete`; surfaced items as
   `would prompt` (a real interactive run asks about them).
-- `--force --dry-run` — preview the force run: every non-protected item is
-  shown as `would delete`, nothing is deleted.
+- `--verbose` — verbose output (extra diagnostic lines).
 
 ```sh
 $ devclean clean                    # interactive: report, approve, then delete
 $ devclean --dry-run clean          # preview only; deletes nothing
-$ devclean --force clean            # DESTRUCTIVE: clean everything without prompting
-$ devclean --force --dry-run clean  # preview what --force would delete
+$ devclean --force clean            # DESTRUCTIVE: each prompt skipped
+$ devclean --verbose clean          # verbose output
 ```
+
+Each subcommand — `devclean` (no subcommand, the default run) and
+`devclean clean` — runs the destructive interactive flow; only `devclean
+list` lists each project's status without cleaning.
 
 See `src/clean.rs` for the deletion engine and `src/interactive.rs` for the
 approval state machine (the `clean` / `dry_run` / `build_exclusions` API is
@@ -248,29 +331,33 @@ Defaults:
 
 ### CLI flags (override config)
 
-Flags are top-level and must be given *before* the subcommand:
+Each flag is top-level and must be given *before* the subcommand:
 
 ```sh
-devclean [FLAGS] list            # print the resolved config
-devclean [FLAGS] ignore <path>   # see `.devcleanignore` above
-devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
-devclean [FLAGS] discovery       # see "Discovery" above
-devclean [FLAGS] classification  # see "Classification" above
-devclean [FLAGS] clean           # see "Cleaning" above (interactive; deletes on approval)
+devclean [FLAGS] list            # read-only: each project's git status
+    devclean [FLAGS] config       # print the resolved config (preserved)
+    devclean [FLAGS] clean        # destructive: interactive flow, each prompt
+    devclean [FLAGS] discovery    # each project with markers
+    devclean [FLAGS] classification # each project classified, sorted
+    devclean [FLAGS] ignore <path> # see `.devcleanignore` above
+    devclean [FLAGS] safelist <path> # see "Safe-to-delete catalog" above
 
   --workspace <path>             # append a workspace root (repeatable)
   --config <path>                # alternate config file (must exist)
-  --force                        # force mode (overrides default_mode)
-  --dry-run                      # show what would be deleted
+  --force                        # each prompt skipped, each surfaced item auto-approved (destructive)
+  --dry-run                      # each item's fate printed, nothing deleted
   --verbose                      # verbose output
+  --version                      # crate version (each build)
 ```
 
-`--force` and `--dry-run` may be combined: `--force --dry-run` previews what
-a force run would delete, without deleting anything (`--dry-run` always wins
-on execution; `--force` only widens what is auto-approved for display).
+Each of `--force` and `--dry-run` is `conflicts_with` each other at the clap
+layer — only one may be passed per invocation. Runtime precedence lives in
+one place each: `dry_run` alone gates execution, `force` alone gates
+prompting/auto-approval.
 
 For example:
 
 ```sh
-devclean --config ./devclean.toml --workspace ~/code --force list
+devclean --config ./devclean.toml --workspace ~/code --force clean
+devclean --workspace ~/code --dry-run classification
 ```
