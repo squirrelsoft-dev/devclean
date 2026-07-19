@@ -38,6 +38,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::output;
 
 /// Live single-line progress writer for the discovery walk.
@@ -80,26 +82,33 @@ impl<W: Write> ProgressWriter<W> {
         }
         let label = "walking: ";
         let display = path.display().to_string();
-        let max_len = self.width.saturating_sub(label.len());
-        let truncated = if display.len() > max_len {
+        let max_cols = self.width.saturating_sub(label.width());
+        let truncated = if display.width() > max_cols {
             let ellipsis = "\u{2026}";
-            let ellipsis_len = ellipsis.len();
-            // Right-align: the leaf (current dir) stays visible. We slice from
-            // the right, accounting for the ellipsis at the left.
-            let keep = max_len.saturating_sub(ellipsis_len);
-            let mut start = display.len().saturating_sub(keep);
-            while !display.is_char_boundary(start) {
-                start += 1;
+            // Right-align: the leaf (current dir) stays visible. We keep chars
+            // from the right whose total display width fits, accounting for
+            // the ellipsis at the left.
+            let keep = max_cols.saturating_sub(ellipsis.width());
+            let mut cols = 0;
+            let mut start = display.len();
+            for (idx, ch) in display.char_indices().rev() {
+                let ch_cols = ch.width().unwrap_or(0);
+                if cols + ch_cols > keep {
+                    break;
+                }
+                cols += ch_cols;
+                start = idx;
             }
             format!("{}{}", ellipsis, &display[start..])
         } else {
             display
         };
         let line = format!("{}{}", label, truncated);
-        let padded_len = self.width.max(line.len());
         // Pad with spaces so a shorter path fully overwrites a longer previous
-        // one (no leftover trailing characters from the prior line).
-        let padded = format!("{line:<padding$}", padding = padded_len);
+        // one (no leftover trailing characters from the prior line). Measured
+        // in display columns: wide chars (CJK, emoji) occupy two columns each.
+        let pad = self.width.saturating_sub(line.width());
+        let padded = format!("{}{}", line, " ".repeat(pad));
         // CR-prefixed, no trailing newline, flushed immediately.
         let _ = self.writer.write_all(b"\r");
         let _ = self.writer.write_all(padded.as_bytes());
@@ -250,6 +259,29 @@ mod tests {
             bytes.contains("件夹"),
             "leaf tail must stay visible: {:?}",
             bytes
+        );
+    }
+
+    /// Wide chars (CJK, emoji) occupy two display columns each; the rendered
+    /// line must be truncated and padded in columns, never exceeding the
+    /// terminal width, or it would wrap and scroll on every update.
+    #[test]
+    fn wide_char_line_fits_terminal_width_in_columns() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 30,
+            active: true,
+        };
+        pw.update(Path::new("/Users/dev/工程目录/项目文件夹的名称很长"));
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        let segment = bytes.rsplit('\r').next().unwrap();
+        assert_eq!(
+            segment.width(),
+            30,
+            "rendered line must be padded to exactly the terminal width in \
+             display columns: {:?}",
+            segment
         );
     }
 
