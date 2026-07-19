@@ -20,9 +20,9 @@
 //! - An empty item (a zero-length file or an empty directory) contributes
 //!   zero bytes — counted, not skipped.
 //!
-//! The computation is `u64` (no overflow path in practice for any single
-//! project; aggregate sums may exceed `u64::MAX` in theory but we never
-//! accumulate beyond it — the CLI prints each project's size independently).
+//! The computation is `u64`, accumulated with `saturating_add` — no
+//! overflow path in practice for on-disk sizes (the CLI also sums each
+//! cleanable project's size into an aggregate for the summary line).
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
@@ -74,13 +74,13 @@ pub fn compute_reclaimable_size(
 /// not the whole listing.
 fn compute_item_size(path: &Path, _rel: &Path) -> Result<u64, Box<dyn std::error::Error>> {
     if path.is_symlink() {
-        return Ok(symlink_size(path)?);
+        return symlink_size(path);
     }
     if path.is_file() {
-        return Ok(file_size(path)?);
+        return file_size(path);
     }
     if path.is_dir() {
-        return Ok(directory_size(path)?);
+        return directory_size(path);
     }
     // Non-existent, char device, socket — count as zero.
     Ok(0)
@@ -162,8 +162,8 @@ fn directory_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
 /// Human-readable size format: KB / MB / GB, two decimals.
 ///
 /// 1024-based: KB → 1024, MB → 1024², GB → 1024³. Always picks the largest
-/// unit that keeps the value ≥ 1.0. Values below 1 KB are shown in KB so the
-/// user never sees "0 B" for a multi-KB payload.
+/// unit that keeps the value ≥ 1.0. Values below 1 KB are shown in bytes
+/// (`N B`); zero is `0 B`.
 pub fn format_size(bytes: u64) -> String {
     if bytes == 0 {
         return "0 B".to_string();

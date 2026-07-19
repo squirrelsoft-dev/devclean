@@ -201,13 +201,13 @@ Each cleanable (status-5) project row carries a reclaimable-size estimate
 next to the path: `path — cleanable (~2.3 GB)`. The estimate is computed
 from the items the cleaning engine would delete — every `Safe` item (the
 built-in catalog) plus every `Surfaced` item (in `dry_run` mode every
-surfed item is auto-approved). `Protected` items carry `.devcleanignore`,
-so they are never counted.
+surfaced item is auto-approved). `Protected` items match `.devcleanignore`
+(or the absolute-path fail-safe), so they are never counted.
 
 The aggregate across all cleanable projects is shown in the summary line:
 `listing: N project(s), M cleanable, ~X reclaimable`. The `~` form makes it
 an estimate — the walk tolerates permission-denied paths (counted as 0) and
-non-UTF-8 names (skipped) without aborting the listing. Sizes are 1024-based
+non-UTF-8 names without aborting the listing. Sizes are 1024-based
 KB / MB / GB and each symlink counts its own size only (no target recursion).
 
 Both `devclean list` and `devclean clean` (including `--dry-run` and

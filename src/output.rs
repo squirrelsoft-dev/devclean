@@ -66,8 +66,8 @@ pub fn color(text: &str, style: OwoStyle, emit_colors: Option<bool>) -> String {
 /// the status is `Cleanable` is the size appended — dirty (status 1–4) rows
 /// show no savings (they are not yet cleanable), and `Clean` rows show
 /// nothing either (no deletable junk). The size uses the `~` form so the
-/// reader knows the estimate is approximate (the walk may skip permission-
-/// denied paths or zero-byte files).
+/// reader knows the estimate is approximate (permission-denied paths count
+/// as zero rather than aborting the walk).
 ///
 /// The label is color-coded per status (warm for dirty, cool for clean) so
 /// the most-needs-attention rows stand out at a glance; the bold-green

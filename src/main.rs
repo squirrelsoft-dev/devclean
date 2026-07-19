@@ -524,7 +524,7 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // projects are listed separately as the cleanup subjects. For each cleanable
     // project, keep its index into `all_projects` (for the ignore set) and the
     // safe set built here, so execution below does not rebuild or re-find either.
-    // Each row uses the formatted shape with color gating on TTY. 
+    // Each row uses the formatted shape with color gating on TTY.
     // The header is prefixed with "clean:" — this is the destructive run, so
     // the reader knows which flow is about to execute. The aggregate
     // reclaimable across all cleanable projects is computed below from
