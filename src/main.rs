@@ -66,8 +66,8 @@ enum Command {
     ///
     /// Walks each workspace root up to `max_depth` and reports each folder
     /// that contains a marker from the resolved `project_markers` list. Each
-    /// reported path is absolute and tagged with the marker that found it.
-    /// Discovery/cleaning are separate issues.
+    /// reported path is tagged with the marker that found it.
+    /// Classification/cleaning are separate issues.
     Discovery,
 }
 
@@ -232,8 +232,8 @@ fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// `devclean discovery`: walk each configured workspace root and print the
-/// list of discovered projects (paths with markers). Discovery/cleaning are
-/// separate issues.
+/// list of discovered projects (paths with markers). Classification/cleaning
+/// are separate issues.
 fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));

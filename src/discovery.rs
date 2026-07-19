@@ -39,10 +39,12 @@
 //!
 //! ## Path kind
 //!
-//! Discovered paths are returned **absolute** (as `PathBuf`), because tooling
-//! downstream (classification, cleaning) will want to stat or act on them
-//! against a stable reference. Each path is the resolved absolute path of the
-//! project root it contains a marker at.
+//! Discovered paths are returned as walked from their workspace root, so they
+//! inherit the root's form: an absolute root yields absolute paths, a relative
+//! root yields relative ones. Nothing here canonicalizes. Downstream tooling
+//! (classification, cleaning) that needs a stable reference must resolve the
+//! paths itself, or the roots must be made absolute before `discover` is
+//! called.
 
 use std::fs;
 use std::path::{Path, PathBuf};

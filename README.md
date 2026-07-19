@@ -76,7 +76,7 @@ It treats the current directory as the project root, loads the global file plus
 every `.devcleanignore` beneath it, and tests the given path. The path may be
 relative to the current directory or absolute inside it; a path outside the
 project root is an error rather than a reported "not-ignored".
-Discovery and cleaning are separate, not-yet-implemented features.
+Cleaning is a separate, not-yet-implemented feature.
 
 ## Safe-to-delete catalog
 
@@ -87,7 +87,7 @@ whether a given path is in it. The catalog is:
 - **Built-in defaults** — compiled into `src/safelist.rs` as `BUILT_IN_DEFAULTS` (a non-exhaustive list of common build/cache dirs/files: `node_modules`, `target`, `.next`, `.turbo`, `dist`, `build`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.gradle`, `bin/obj`, `out`, `coverage`, `.nuxt`, `.svelte-kit`, `.cache`, `.parcel-cache`).
 - **Extension via `Config::safe_delete`** — user-supplied gitignore-style globs are appended (not replaced) to the built-in set. Patterns behave like gitignore globs anchored at the project root: each matches the named dir at any depth (e.g. `**/node_modules`), and matching a directory covers everything beneath it via the `ignore` crate's parent-match semantics.
 - **Intended consumer** — the not-yet-implemented cleaning engine, which will remove matched paths without asking for approval. Nothing deletes anything today.
-- **Observable hook** — `devclean safelist <path>` is the minimal diagnostic for the catalog; discovery and cleaning are separate, not-yet-implemented features.
+- **Observable hook** — `devclean safelist <path>` is the minimal diagnostic for the catalog; cleaning is a separate, not-yet-implemented feature.
 
 A path is reported `safe` or `not-safe`, interpreted relative to the current
 directory (treated as the project root); a path outside that root is an error
@@ -96,6 +96,35 @@ matched against the path's actual kind on disk, so a plain file named `build`
 is not reported safe by a `build/` pattern.
 
 See `src/safelist.rs` for the implementation; `tests/safelist_cli.rs` for integration tests of the subcommand.
+
+## Discovery
+
+`devclean discovery` walks each configured `workspace_roots` entry up to
+`max_depth` and reports every folder that contains one of the configured
+`project_markers` (`.git`, `package.json`, `Cargo.toml`, `go.mod`,
+`pyproject.toml`, `pom.xml`, `build.gradle`, `*.csproj`, or any user-supplied
+additions). Markers may be exact filenames or glob patterns; a folder is
+reported once, tagged with one of the markers found in it.
+
+Depth is counted from each workspace root: depth 0 is the root itself, depth 1
+a direct child, and so on. The walk never rises above a root, and symlinks are
+not followed. Nested projects are each reported separately — a repo with `.git`
+that contains a subfolder with its own `Cargo.toml` yields two entries, with no
+double-counting of either folder. Reported paths are printed as they were
+walked from the workspace root, so configuring absolute roots (the usual case)
+yields absolute output.
+
+```
+devclean discovery                        # uses workspace_roots from config
+devclean --workspace ~/code discovery     # append a root from the CLI
+```
+
+With no workspace roots configured, discovery reports that and exits without
+error. An unreadable or missing root is a hard error rather than a silent
+empty result.
+
+See `src/discovery.rs` for the matching and nesting rules;
+`tests/discovery_cli.rs` for integration tests of the subcommand.
 
 ## Configuration
 
@@ -124,20 +153,6 @@ Defaults:
 - `max_depth` — `4`
 - `project_markers` — the list shown above
 - `default_mode` — `interactive`
-
-### Discovery
-
-`devclean discovery` walks each configured `workspace_root` up to `max_depth`
-and reports every folder that contains one of the configured `project_markers`
-(.git, package.json, Cargo.toml, go.mod, pyproject.toml, pom.xml,
-build.gradle, *.csproj, or any user-supplied additions). Each discovered
-path is absolute. See `src/discovery.rs` for the nesting rule (every marker
-is a candidate project; nested projects within max_depth are all reported).
-
-```
-devclean discovery                        # uses workspace_roots from config
-devclean --workspace ~/code discovery     # override the roots from the CLI
-```
 
 ### CLI flags (override config)
 

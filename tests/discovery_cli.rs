@@ -221,7 +221,10 @@ fn discovery_with_no_workspace_roots_reports_nothing_and_succeeds() {
         out.contains("no workspace roots configured"),
         "expected an explanatory message:\n{out}"
     );
-    assert!(reported_paths(&out).is_empty(), "unexpected projects:\n{out}");
+    assert!(
+        reported_paths(&out).is_empty(),
+        "unexpected projects:\n{out}"
+    );
 }
 
 #[test]
@@ -244,7 +247,11 @@ fn discovery_honors_workspace_roots_supplied_on_the_cli() {
     let ws = workspace_fixture("cli-override");
     let home = unique_dir("home");
     let cfg_dir = unique_dir("cfg");
-    write_file(&cfg_dir, "config.toml", "workspace_roots = []\nmax_depth = 4\n");
+    write_file(
+        &cfg_dir,
+        "config.toml",
+        "workspace_roots = []\nmax_depth = 4\n",
+    );
 
     let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
         .env("HOME", &home)

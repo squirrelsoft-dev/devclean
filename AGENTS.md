@@ -20,7 +20,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - User-facing config docs (file location, TOML keys, defaults, CLI flags) live in `README.md`; the resolution logic is `config::default_config_path`.
 - Top-level flags are not `global`, so clap requires them *before* the subcommand (`devclean --force list`, never `devclean list --force`).
 - `--force` and `--dry-run` conflict at the clap layer (`conflicts_with`), so no runtime precedence logic exists or should be added.
-- `devclean list` is the observable config-printing command; `devclean discover` finds projects (issue #5 — see `src/discovery.rs`); `devclean ignore` and `devclean safelist` are debug hooks for the matcher and the safe-to-delete catalog. All four are documented in `README.md`; classification/cleaning are separate issues.
+- `devclean list` is the observable config-printing command; `devclean discovery` finds projects (issue #5 — see `src/discovery.rs`); `devclean ignore` and `devclean safelist` are debug hooks for the matcher and the safe-to-delete catalog. All four are documented in `README.md`; classification/cleaning are separate issues.
 
 ## Safe-to-delete catalog
 
