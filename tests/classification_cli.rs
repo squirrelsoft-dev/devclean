@@ -185,3 +185,102 @@ fn classification_sorts_by_status() {
         "no-git must sort before wip, got no-git@{no_git_idx} wip@{wip_idx}"
     );
 }
+
+/// End-to-end coverage of the whole status table: one project per status in a
+/// single workspace, classified in one run. This is the report a user actually
+/// sees, so it pins down the three things the other tests leave implicit —
+/// that `cleanable` and `clean` are reachable through the CLI at all, that
+/// `cleanable` is separated from `clean` by the devcleanignore matcher rather
+/// than the project's own `.gitignore`, and that precedence holds where it
+/// matters most: a repo with BOTH uncommitted work and untracked junk reports
+/// `wip`, never `cleanable`.
+#[test]
+fn classification_reports_every_status_in_severity_order() {
+    let ws = root_for("all-statuses");
+
+    let proj = |name: &str| {
+        let p = ws.join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    };
+
+    // 1 no-git: a project marker, never git-initialized.
+    std::fs::write(proj("p1").join("Cargo.toml"), "[package]").unwrap();
+
+    // 2 no-remote: commits, but nowhere to push them.
+    init_repo_with_commit(&proj("p2"));
+
+    // 3 unpushed: has a remote, one local commit ahead of it.
+    let p3 = proj("p3");
+    init_repo_with_commit(&p3);
+    add_pushed_remote(&p3);
+    std::fs::write(p3.join("initial.txt"), "local edit").unwrap();
+    git_in(&p3, &["commit", "-am", "unpushed commit"]);
+
+    // 4 wip: pushed, but a modified tracked file AND untracked junk. Precedence
+    // says status 4 wins — it must not be reported cleanable.
+    let p4 = proj("p4");
+    init_repo_with_commit(&p4);
+    add_pushed_remote(&p4);
+    std::fs::write(p4.join("initial.txt"), "modified").unwrap();
+    std::fs::create_dir_all(p4.join("node_modules")).unwrap();
+    std::fs::write(p4.join("node_modules/junk.js"), "junk").unwrap();
+
+    // 5 cleanable: pushed with a clean index; the junk is gitignored by the
+    // PROJECT but not devcleanignored, so devclean must still see it.
+    let p5 = proj("p5");
+    init_repo_with_commit(&p5);
+    std::fs::write(p5.join(".gitignore"), "node_modules\n").unwrap();
+    git_in(&p5, &["add", ".gitignore"]);
+    git_in(&p5, &["commit", "-m", "ignore node_modules"]);
+    add_pushed_remote(&p5);
+    std::fs::create_dir_all(p5.join("node_modules")).unwrap();
+    std::fs::write(p5.join("node_modules/junk.js"), "junk").unwrap();
+
+    // 6 clean: pushed, and its only untracked path IS devcleanignored, i.e.
+    // protected — so it is clean, not cleanable.
+    let p6 = proj("p6");
+    init_repo_with_commit(&p6);
+    std::fs::write(p6.join(".devcleanignore"), "vendor/\n").unwrap();
+    git_in(&p6, &["add", ".devcleanignore"]);
+    git_in(&p6, &["commit", "-m", "devcleanignore"]);
+    add_pushed_remote(&p6);
+    std::fs::create_dir_all(p6.join("vendor")).unwrap();
+    std::fs::write(p6.join("vendor/lib.rb"), "protected").unwrap();
+
+    let home = root_for("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[ws.to_str().unwrap()], 2);
+    let out = run(["--config", config.to_str().unwrap(), "classification"]);
+
+    // Each project lands on exactly the status its fixture was built for.
+    for (project, label) in [
+        ("p1", "no-git"),
+        ("p2", "no-remote"),
+        ("p3", "unpushed"),
+        ("p4", "wip"),
+        ("p5", "cleanable"),
+        ("p6", "clean"),
+    ] {
+        let line = out
+            .lines()
+            .find(|l| l.contains(&format!("/{project} ->")))
+            .unwrap_or_else(|| panic!("no line for {project} in output:\n{out}"));
+        assert!(
+            line.ends_with(&format!("-> {label}")),
+            "expected {project} to be {label}, got: {line}"
+        );
+    }
+
+    // And the report is ordered most-severe first.
+    let ranks: Vec<&str> = out
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('['))
+        .filter_map(|l| l.split(']').next())
+        .collect();
+    assert_eq!(
+        ranks,
+        ["1", "2", "3", "4", "5", "6"],
+        "report must be sorted by severity, got {ranks:?} in:\n{out}"
+    );
+}

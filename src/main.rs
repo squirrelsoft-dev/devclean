@@ -58,7 +58,7 @@ enum Command {
     ///
     /// Loads the platform default config (respecting `--config`) and prints
     /// `safe` / `not-safe` for the given path, interpreted relative to the
-    /// current directory. Discovery/cleaning are separate issues.
+    /// current directory. Cleaning is a separate issue.
     Safelist {
         /// Path to test, relative to the current directory.
         path: String,
@@ -67,8 +67,8 @@ enum Command {
     ///
     /// Walks each workspace root up to `max_depth` and reports each folder
     /// that contains a marker from the resolved `project_markers` list. Each
-    /// reported path is tagged with the marker that found it.
-    /// Classification/cleaning are separate issues.
+    /// reported path is tagged with the marker that found it. Classifying those
+    /// projects is `devclean classification`; cleaning is a separate issue.
     Discovery,
     /// Classify each discovered project by its git state and print the result
     /// sorted by status. Status 5 is the only cleanable state; status 1..4
@@ -208,7 +208,7 @@ fn run_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `devclean ignore <path>`: load the ignore set for the current directory and
 /// print whether `path` is ignored. Minimal observable hook for the ignore
-/// matcher; discovery/cleaning are separate issues.
+/// matcher; cleaning is a separate issue.
 fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let set = ignore::IgnoreSet::load(&root)?;
@@ -227,7 +227,7 @@ fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// `devclean safelist <path>`: load the default config (or `--config`), build
 /// the safe-to-delete set from built-ins plus the loaded `safe_delete`, and
 /// report whether `path` is safe to delete. Minimal observable hook for the
-/// catalog; discovery/cleaning are separate issues.
+/// catalog; cleaning is a separate issue.
 fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let p = std::path::Path::new(path);
@@ -243,8 +243,8 @@ fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// `devclean discovery`: walk each configured workspace root and print the
-/// list of discovered projects (paths with markers). Classification/cleaning
-/// are separate issues.
+/// list of discovered projects (paths with markers). Classifying them is
+/// `run_classification`; cleaning is a separate issue.
 fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));

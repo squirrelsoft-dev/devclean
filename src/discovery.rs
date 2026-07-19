@@ -58,8 +58,8 @@ use crate::config::Config;
 ///
 /// Kept together so tooling can display both — "here is a path, and here is
 /// what we found" — rather than showing paths with no context. Useful for
-/// diagnostics (e.g. the `Discovery` subcommand) and will be useful for
-/// classification (issue #6) too.
+/// diagnostics (e.g. the `Discovery` subcommand); classification consumes the
+/// `path` of each entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredProject {
     pub path: PathBuf,

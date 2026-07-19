@@ -2,11 +2,11 @@
 
 Development environment cleanup CLI (scaffold).
 
-The binary loads configuration and discovers projects. The current surface
-covers discovery (`devclean discovery`), protection via `.devcleanignore`
+The binary loads configuration, discovers projects, and classifies their git
+state. The current surface covers discovery (`devclean discovery`),
+classification (`devclean classification`), protection via `.devcleanignore`
 (`devclean ignore`), and the safe-to-delete catalog (`devclean safelist`);
-classification, cleaning, and the interactive flow are separate,
-not-yet-implemented features.
+cleaning and the interactive flow are separate, not-yet-implemented features.
 
 ## Build
 
@@ -139,7 +139,7 @@ first). Only status 5 is cleanable; statuses 1-4 each mean cleaning must wait.
 | 3 | `unpushed` | Git repo with a remote but unpushed commits (or no upstream). |
 | 4 | `wip` | Git repo with uncommitted work-in-progress (modified/staged tracked changes). |
 | 5 | `cleanable` | Committed + pushed, AND has untracked junk that is NOT devcleanignored. |
-| - | `clean` | Committed + pushed with no untracked non-devcleanignored junk. |
+| 6 | `clean` | Committed + pushed with no untracked non-devcleanignored junk. Not a dirty status; sorts last. |
 
 Precedence is the lowest-numbered (most-severe) status. A repo with both WIP
 (4) and untracked junk is status 4, not 5 — it must not be cleaned while it has
