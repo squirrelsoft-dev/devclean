@@ -75,6 +75,15 @@
 //! not silently deleted). This is the resolution of issue #6's review fix:
 //! `--directory`-only enumeration would under-granularity content patterns.
 //!
+//! The re-listing enumerates files only, so it is paired with an on-disk walk
+//! that discovers nested file-less directories (directories whose whole
+//! subtree contains no files): a `.devcleanignore`-matching directory is
+//! recorded once as `Protected`, and each remaining maximal file-less
+//! directory is recorded as `Safe` or `Surfaced`. Without this, a nested
+//! empty directory would get no classification and no exclusion, and
+//! `git clean -xfd` would silently delete it — the nested-depth analogue of
+//! the top-level empty-directory case above.
+//!
 //! ## Deferred findings from #3 (resolved here)
 //!
 //! 1. **`!` negation semantics:** the matcher already returns
@@ -327,7 +336,10 @@ pub fn enumerate_untracked(
 }
 
 /// Each untracked file beneath `dir`, enumerated at file granularity and
-/// classified individually. `git ls-files --others -z -- <dir>` yields full
+/// classified individually, plus every nested file-less directory discovered
+/// by [`discover_fileless_dirs`] (the `git ls-files --others` re-listing
+/// yields files only, so empty directories would otherwise escape
+/// classification entirely). `git ls-files --others -z -- <dir>` yields full
 /// repo-relative paths, so each result is used directly (not joined onto
 /// `dir`). A listing failure aborts the whole project's enumeration (the
 /// error propagates), which is fail-safe: nothing is deleted.
@@ -376,7 +388,83 @@ fn enumerate_subtree_files(
             classification: Classification::Surfaced,
         });
     }
+    discover_fileless_dirs(&project_path.join(dir), dir, ignore_set, safe_set, &mut items)?;
     Ok(items)
+}
+
+/// Walk the on-disk subtree of a re-listed untracked directory and classify
+/// directories whose subtree contains no files. `git ls-files --others`
+/// enumerates files only, so such directories would otherwise get no
+/// classification and no exclusion, and `git clean -xfd` would silently
+/// delete them — including `.devcleanignore`-protected ones.
+///
+/// A `.devcleanignore`-matching directory is recorded once as `Protected`
+/// without recursing (parent-match semantics; one exclusion covers the whole
+/// tree) and counts as kept content, so no ancestor is treated as file-less
+/// around it. Each remaining *maximal* file-less directory (its whole subtree
+/// has no files, its parent has kept content) is recorded once as `Safe` or
+/// `Surfaced` via the usual checks. Returns whether the subtree rooted at
+/// `abs` contains any kept content (a file or a protected directory); an
+/// entirely file-less subtree records nothing here — the caller records the
+/// top directory itself.
+///
+/// A non-UTF-8 name aborts the whole project's enumeration, mirroring
+/// `git_cmd`: a lossy decode would produce an exclusion pattern that never
+/// matches on disk, turning a protected directory into a deleted one.
+/// Refusing to proceed is the fail-safe direction.
+fn discover_fileless_dirs(
+    abs: &Path,
+    rel: &Path,
+    ignore_set: &IgnoreSet,
+    safe_set: &SafeSet,
+    items: &mut Vec<CleanItem>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut has_content = false;
+    let mut fileless: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(abs)? {
+        let entry = entry?;
+        if entry.file_name().to_str().is_none() {
+            return Err(format!(
+                "non-UTF-8 path under {}; refusing to clean this project",
+                abs.display()
+            )
+            .into());
+        }
+        if !entry.file_type()?.is_dir() {
+            has_content = true;
+            continue;
+        }
+        let child_rel = rel.join(entry.file_name());
+        if ignore_set.is_ignored_path(&child_rel, true) {
+            items.push(CleanItem {
+                rel_path: child_rel,
+                is_dir: true,
+                classification: Classification::Protected,
+            });
+            has_content = true;
+            continue;
+        }
+        if discover_fileless_dirs(&entry.path(), &child_rel, ignore_set, safe_set, items)? {
+            has_content = true;
+        } else {
+            fileless.push(child_rel);
+        }
+    }
+    if has_content {
+        for dir_rel in fileless {
+            let classification = if safe_set.is_safe_to_delete(&dir_rel, true) {
+                Classification::Safe
+            } else {
+                Classification::Surfaced
+            };
+            items.push(CleanItem {
+                rel_path: dir_rel,
+                is_dir: true,
+                classification,
+            });
+        }
+    }
+    Ok(has_content)
 }
 
 /// Run `git clean -xfd -e <exclusion>...` against `project_path`. Only
@@ -940,5 +1028,81 @@ mod tests {
             !root.join("emptyjunk").exists(),
             "empty surfaced dir should be removed in force mode"
         );
+    }
+
+    /// Nested empty directories inside a re-listed untracked directory flow
+    /// through classification instead of escaping enumeration: a
+    /// `.devcleanignore`-matching one is `Protected`, any other file-less one
+    /// is `Surfaced`, and only the maximal file-less directory is recorded
+    /// (its file-less children are subsumed).
+    #[test]
+    fn nested_empty_directories_are_classified() {
+        let root = fixture("nested_empty_dirs");
+        write_file(&root, ".devcleanignore", "keepempty/\n");
+        git_run(&root, &["add", ".devcleanignore"]);
+        git_run(&root, &["commit", "-m", "ignore rules"]);
+        write_file(&root, "junk/data.tmp", "junk");
+        fs::create_dir_all(root.join("junk/keepempty")).unwrap();
+        fs::create_dir_all(root.join("junk/emptyjunk")).unwrap();
+        fs::create_dir_all(root.join("junk/a/b")).unwrap();
+
+        let ignore_set = IgnoreSet::load(&root).unwrap();
+        let items = enumerate_untracked(&root, &ignore_set, &safe_set(&root)).unwrap();
+
+        let by_class = |p: &str| {
+            items
+                .iter()
+                .find(|i| i.rel_path.to_string_lossy() == p)
+                .map(|i| i.classification)
+        };
+        assert_eq!(
+            by_class("junk/keepempty"),
+            Some(Classification::Protected),
+            "nested empty devcleanignored dir should be Protected: {items:?}",
+        );
+        assert_eq!(
+            by_class("junk/emptyjunk"),
+            Some(Classification::Surfaced),
+            "nested empty dir should be Surfaced: {items:?}",
+        );
+        assert_eq!(
+            by_class("junk/a"),
+            Some(Classification::Surfaced),
+            "maximal file-less dir should be Surfaced: {items:?}",
+        );
+        assert_eq!(
+            by_class("junk/a/b"),
+            None,
+            "file-less child of a file-less dir is subsumed by its parent: {items:?}",
+        );
+    }
+
+    /// End-to-end nested empty-dir safety: `clean` with `force = true` keeps
+    /// a `.devcleanignore`-protected empty directory nested inside a
+    /// re-listed untracked directory, while removing that directory's junk
+    /// files and its unprotected empty siblings.
+    #[test]
+    fn clean_force_keeps_nested_protected_empty_dir() {
+        let root = fixture("nested_empty_e2e");
+        write_file(&root, ".devcleanignore", "keepempty/\n");
+        git_run(&root, &["add", ".devcleanignore"]);
+        git_run(&root, &["commit", "-m", "ignore rules"]);
+        write_file(&root, "junk/data.tmp", "junk");
+        fs::create_dir_all(root.join("junk/keepempty")).unwrap();
+        fs::create_dir_all(root.join("junk/emptyjunk")).unwrap();
+
+        let ignore_set = IgnoreSet::load(&root).unwrap();
+        let safe = safe_set(&root);
+        clean(&root, &ignore_set, &safe, &[], true, false).unwrap();
+
+        assert!(
+            root.join("junk/keepempty").is_dir(),
+            "nested empty protected dir must survive git clean"
+        );
+        assert!(
+            !root.join("junk/emptyjunk").exists(),
+            "nested empty surfaced dir should be removed in force mode"
+        );
+        assert!(!root.join("junk/data.tmp").exists());
     }
 }
