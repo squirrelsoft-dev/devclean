@@ -7,22 +7,25 @@
 //!
 //! ## Nesting rule
 //!
-//! A folder that contains a marker is reported as a discovered project, unless
-//! it sits inside an ancestor git worktree (the monorepo case, resolved by
-//! issue #15). Each marker is a candidate project — classification (#6) and
-//! cleaning (#7) can decide how to relate nested projects later.
-//!
-//! Only `.git` boundaries define standalone projects; a nested non-git marker
-//! (`package.json`, `Cargo.toml`, ...) inside an existing git worktree is a
-//! subfolder of that project, not a new project. A nested `.git` still counts
-//! as a separate project — it is its own git repository, and its own
-//! descendants are relative to it, not any outer ancestor.
+//! Each workspace root yields at most one git project. Any marker (git or not)
+//! that sits inside an ancestor git worktree is suppressed — it is a subfolder
+//! of that git project, not a new project (issue #15 and #26). A nested `.git`
+//! — file (gitdir pointer) or directory — is also a subfolder of the ancestor;
+//! it is a worktree or submodule of the repo, not a separate project.
 //!
 //! "Ancestor git worktree" means: walking up from the marker folder toward its
 //! workspace root, some ancestor directory contains a `.git` entry (directory
 //! or file). The workspace root is the discovery boundary; nothing above it is
-//! scanned. A `.git` at the marker folder's own level counts as that folder
-//! being a git project (the existing nested-`.git` case), not as an ancestor.
+//! scanned. A `.git` at the marker folder's own level counts as the marker
+//! folder being the git project (the one git project for its descendants),
+//! not as an ancestor — all deeper items inherit that git project.
+//!
+//! ## Walk pruning
+//!
+//! The walker never descends into a `.git` directory. Any `WalkDir` iteration
+//! whose path includes a `.git` component is skipped — we do not scan git
+//! internals (`HEAD`, `objects/`, `refs/`, etc.) as candidate projects. Only
+//! markers on each directory's direct children are checked.
 //!
 //! The one "no double-count" invariant: the workspace root itself is reported
 //! only if it has a marker; otherwise it is a plain folder and not reported.
@@ -210,14 +213,21 @@ fn walk_root(
         if !entry.file_type().is_dir() {
             continue;
         }
+        // Prune: never descend into a `.git` directory during the walk.
+        // Each iteration whose path includes a `.git` component is inside a
+        // git repo — its children are git internals, not candidate projects.
+        if entry.path().components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
         // Check each direct child file for markers. Only look at *files* —
         // a marker is a file, never a directory (except `.git` which is a
         // directory on disk but is treated as a file-name marker).
         if let Some(marker) = find_marker_in(entry.path(), markers) {
-            // Suppression is for non-git markers only: a nested `.git` is its
-            // own project (issue #15). Anything else is suppressed if it sits
-            // inside an ancestor git worktree.
-            if marker == ".git" || !has_ancestor_git(entry.path(), root) {
+            // Suppress when an ancestor git worktree exists: every marker
+            // — git or not — is a subfolder of that git project, not a
+            // new project. A nested `.git` (file or directory) is a worktree
+            // or submodule of the ancestor, never a separate project.
+            if !has_ancestor_git(entry.path(), root) {
                 out.push(DiscoveredProject {
                     path: entry.path().to_path_buf(),
                     marker: marker.to_string(),
@@ -233,9 +243,10 @@ fn walk_root(
 ///
 /// Walks each parent of `dir` upward; stops when the parent equals the
 /// workspace root (the discovery boundary). A `.git` at `dir`'s own level is
-/// not considered an ancestor — that is the nested-`.git`-is-separate case.
-/// The workspace root itself has no ancestors inside the boundary, so a
-/// marker at the root is never suppressed by a git repo above the root.
+/// **not** an ancestor — it is itself the git project, and all deeper items
+/// are suppressed as subfolders of that project. The workspace root itself
+/// has no ancestors inside the boundary, so a marker at the root is never
+/// suppressed by a git repo above the root.
 fn has_ancestor_git(dir: &Path, root: &Path) -> bool {
     if dir == root {
         return false;
@@ -297,7 +308,9 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    use std::sync::LazyLock;
+
+static COUNTER: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(std::process::id() as u64));
 
     fn mkconfig(root: &Path, markers: &[&str], depth: usize) -> Config {
         Config {
@@ -325,6 +338,69 @@ mod tests {
         out
     }
 
+    /// Initialize a real git repo at `dir` so tests can exercise the `.git`
+    /// directory form (HEAD, refs, objects) rather than only the `.git` file
+    /// form. Each fixture writes an initial file and commits so the repo has
+    /// at least one ref.
+    fn git_init(dir: &Path) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .arg("init")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed: {:?}", dir);
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(dir)
+            .arg("symbolic-ref")
+            .arg("HEAD")
+            .arg("refs/heads/main");
+        assert!(cmd.status().unwrap().success());
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(dir)
+            .arg("config")
+            .arg("user.email")
+            .arg("test@test.dev");
+        assert!(cmd.status().unwrap().success());
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(dir)
+            .arg("config")
+            .arg("user.name")
+            .arg("Test");
+        assert!(cmd.status().unwrap().success());
+        fs::write(dir.join("initial.txt"), "initial").unwrap();
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(dir)
+            .arg("add")
+            .arg("initial.txt");
+        assert!(cmd.status().unwrap().success());
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(dir)
+            .arg("status")
+            .arg("--porcelain");
+        let out = cmd.output().unwrap();
+        if !out.stdout.is_empty() {
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("-C").arg(dir)
+                .arg("commit")
+                .arg("-m")
+                .arg("initial");
+            assert!(cmd.status().unwrap().success());
+        }
+    }
+
+    /// Write a `.git` gitdir pointer file at `dir` pointing at `target`.
+    fn write_gitdir(dir: &Path, target: &Path) -> PathBuf {
+        let gitfile = dir.join(".git");
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            &gitfile,
+            &format!("gitdir: {}", target.display()),
+        )
+        .unwrap();
+        gitfile
+    }
+
     #[test]
     fn literal_marker_detected() {
         let root = tmp_root("literal");
@@ -349,9 +425,10 @@ mod tests {
     }
 
     #[test]
-    fn nested_git_separate_project_suppressed_non_git() {
-        // A nested `.git` (a repo inside a repo) still counts as a separate
-        // project, unchanged from issue #5.
+    fn nested_git_suppressed_inside_root() {
+        // A nested `.git` (file or directory) inside an ancestor git repo
+        // is a worktree / submodule of the ancestor — it is suppressed,
+        // not reported as a separate project (issue #26).
         let root = tmp_root("nested_git");
         mkfixture(&root, ".git", "root repo");
         let sub = root.join("src");
@@ -359,22 +436,26 @@ mod tests {
         mkfixture(&sub, ".git", "nested repo");
         let cfg = mkconfig(&root, &[".git"], 2);
         let results = discover(&cfg).unwrap();
-        assert_eq!(results.len(), 2);
-        // Both .git directories are reported as separate git projects.
-        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
-        assert!(paths.iter().any(|p| p.join(".git").exists()));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+    }
 
-        // A nested non-git marker inside an ancestor git worktree is suppressed.
-        let root2 = tmp_root("nested_non_git");
-        mkfixture(&root2, ".git", "root repo");
-        let pkg = root2.join("packages/a");
+    #[test]
+    fn nested_non_git_suppressed_inside_root() {
+        // A nested non-git marker inside an ancestor git worktree is
+        // suppressed — it is a subfolder of root's git project, not a
+        // separate project (issue #15).
+        let root = tmp_root("nested_non_git");
+        mkfixture(&root, ".git", "root repo");
+        let pkg = root.join("packages/a");
         fs::create_dir_all(&pkg).unwrap();
         mkfixture(&pkg, "package.json", "{}");
-        let cfg2 = mkconfig(&root2, &[".git", "package.json"], 2);
-        let results2 = discover(&cfg2).unwrap();
-        assert_eq!(results2.len(), 1);
-        assert_eq!(results2[0].path, root2);
-        assert_eq!(results2[0].marker, ".git");
+        let cfg = mkconfig(&root, &[".git", "package.json"], 2);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
         // The package folder is not reported — it is a subfolder of root's
         // git worktree, not a separate project.
     }
@@ -504,10 +585,10 @@ mod tests {
     }
 
     #[test]
-    fn nested_git_with_other_marker_still_separate_project() {
-        // A nested repo that carries BOTH `.git` and another marker (e.g. a
-        // vendored JS repo with a package.json) must still be reported as a
-        // separate project, regardless of which marker read_dir yields first.
+    fn nested_git_with_other_marker_still_suppressed() {
+        // A nested folder that carries BOTH `.git` and another marker
+        // (e.g. a vendored JS repo with a package.json) is suppressed — it
+        // is a subfolder of root's git project, not a separate project.
         let root = tmp_root("nested_git_dual");
         mkfixture(&root, ".git", "root repo");
         let sub = root.join("vendored");
@@ -516,12 +597,11 @@ mod tests {
         mkfixture(&sub, ".git", "nested repo");
         let cfg = mkconfig(&root, &["package.json", ".git"], 2);
         let results = discover(&cfg).unwrap();
-        assert_eq!(results.len(), 2);
-        let nested = results
-            .iter()
-            .find(|r| r.path == sub)
-            .expect("nested repo must be reported");
-        assert_eq!(nested.marker, ".git");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        // The vendored folder is not reported — it is a subfolder of root's
+        // git project, regardless of which marker read_dir yields first.
     }
 
     #[test]
@@ -564,5 +644,136 @@ mod tests {
         let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
         assert!(!paths.contains(&pkg_a));
         assert!(!paths.contains(&pkg_b));
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #26: nested git-worktree / .git-file / dangling-gitdir scenarios
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nested_worktree_with_real_gitdir_suppressed() {
+        // A real git init at root, plus a nested directory whose `.git` is
+        // a file pointing at an existing gitdir (a real worktree). The
+        // worktree is suppressed — it is a subfolder of root's git repo.
+        let root = tmp_root("worktree_real_gitdir");
+        fs::create_dir_all(&root).unwrap();
+        git_init(&root);
+        let wt = root.join(".worktrees/work/issue-1");
+        fs::create_dir_all(&wt).unwrap();
+        write_gitdir(&wt, &root.join(".git"));
+        let cfg = mkconfig(&root, &[".git", "package.json"], 3);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        // The worktree itself is not reported.
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&wt));
+    }
+
+    #[test]
+    fn nested_worktree_with_dangling_gitdir_suppressed() {
+        // A real git init at root, plus a nested directory whose `.git` is
+        // a gitdir pointer to a path that does NOT exist on this filesystem.
+        // The worktree is suppressed — it is a subfolder of root's git repo,
+        // and even if it ever reaches classification the warning is silenced.
+        let root = tmp_root("worktree_dangling_gitdir");
+        fs::create_dir_all(&root).unwrap();
+        git_init(&root);
+        let wt = root.join(".worktrees/work/issue-2");
+        fs::create_dir_all(&wt).unwrap();
+        write_gitdir(&wt, &PathBuf::from("/nope/nope/nope"));
+        let cfg = mkconfig(&root, &[".git", "package.json"], 3);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&wt));
+    }
+
+    #[test]
+    fn nested_git_file_with_valid_gitdir_suppressed() {
+        // A root with a real git init, plus a sibling directory whose `.git`
+        // is a file pointing at root's own `.git` — that sibling is itself
+        // a worktree of root. Suppressed.
+        let root = tmp_root("nested_git_valid_gitdir");
+        fs::create_dir_all(&root).unwrap();
+        git_init(&root);
+        let nested = root.join("submodule");
+        fs::create_dir_all(&nested).unwrap();
+        write_gitdir(&nested, &root.join(".git"));
+        let cfg = mkconfig(&root, &[".git"], 2);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&nested));
+    }
+
+    #[test]
+    fn nested_git_file_with_dangling_gitdir_suppressed() {
+        // A root with a real git init, plus a sibling whose `.git` is a
+        // file pointing at a path that does not exist locally. Suppressed.
+        let root = tmp_root("nested_git_dangling_file");
+        fs::create_dir_all(&root).unwrap();
+        git_init(&root);
+        let nested = root.join("stray");
+        fs::create_dir_all(&nested).unwrap();
+        write_gitdir(&nested, &PathBuf::from("/does/not/exist"));
+        let cfg = mkconfig(&root, &[".git"], 2);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&nested));
+    }
+
+    #[test]
+    fn monorepo_with_deeply_nested_packages_suppressed() {
+        // A monorepo where packages nest deeper than one level — each
+        // non-git marker still suppressed because ancestor git reaches all
+        // of them.
+        let root = tmp_root("deep_monorepo");
+        fs::create_dir_all(&root).unwrap();
+        git_init(&root);
+        let pkg_a = root.join("packages/a");
+        fs::create_dir_all(&pkg_a).unwrap();
+        mkfixture(&pkg_a, "package.json", "{}");
+        let pkg_b = root.join("packages/b/src");
+        fs::create_dir_all(&pkg_b).unwrap();
+        mkfixture(&pkg_b, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "package.json", "Cargo.toml"], 3);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&pkg_a));
+        assert!(!paths.contains(&pkg_b));
+    }
+
+    #[test]
+    fn git_directory_not_reported_inside_walk() {
+        // The walker never descends into a `.git` directory. Each iteration
+        // whose path includes a `.git` component is skipped, so no git
+        // internal (HEAD, refs, objects) ever surfaces as a project.
+        let root = tmp_root("git_dir_not_reported");
+        fs::create_dir_all(&root).unwrap();
+        git_init(&root);
+        // Plant a Cargo.toml somewhere inside .git/objects/ — it would be
+        // a marker if we descended into .git, but we don't.
+        let snek = root.join(".git/objects/deep");
+        fs::create_dir_all(&snek).unwrap();
+        mkfixture(&snek, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 3);
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, root);
+        assert_eq!(results[0].marker, ".git");
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&snek));
     }
 }
