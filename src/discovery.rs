@@ -32,12 +32,14 @@
 //!
 //! Artifact directories are also pruned from descent. The prune-basename set
 //! is derived from the safelist catalog (`BUILT_IN_DEFAULTS` plus the user's
-//! `safe_delete`) — each `**/<name>` pattern whose `<name>` is a single path
-//! segment (no `/`) contributes `<name>` to the set. A `WalkDir` entry whose
-//! basename is in the set is not yielded and not descended into. Multi-segment
-//! patterns like `**/bin/obj` are NOT added to the descent-prune set (they
-//! remain clean-time-only via the matcher). The workspace root itself (depth
-//! 0) is not pruned even if its basename matches an artifact name.
+//! `safe_delete`) — each `**/<name>` or bare `<name>` pattern whose `<name>`
+//! is a single glob-free path segment contributes `<name>` to the set (the
+//! two shapes are equivalent under gitignore semantics). A `WalkDir` entry
+//! whose basename is in the set is not yielded and not descended into.
+//! Multi-segment patterns like `**/bin/obj` are NOT added to the
+//! descent-prune set (they remain clean-time-only via the matcher). The
+//! workspace root itself (depth 0) is not pruned even if its basename
+//! matches an artifact name.
 //!
 //! Safe-to-delete directories are non-project artifacts by definition (the
 //! safelist contract), so discovery skipping descent into them is correct, not
@@ -210,20 +212,22 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
 
 /// Derive the descent-prune basename set from the safelist catalog.
 ///
-/// Each pattern in `user_patterns` (the caller's `safe_delete`, which is the
-/// user's extension of `BUILT_IN_DEFAULTS`) is parsed as a gitignore glob.
-/// Only patterns shaped `**/<single-segment>` contribute their single segment
-/// to the prune set. Multi-segment patterns like `**/bin/obj` are skipped —
-/// pruning on `obj` alone would be too broad and could skip a legitimate
-/// project directory; they remain clean-time-only via the matcher.
+/// The catalog is `BUILT_IN_DEFAULTS` plus `user_patterns` (the caller's
+/// `safe_delete`). This is not a glob parser: a literal `**/` prefix, if
+/// present, is stripped, and what remains contributes to the prune set only
+/// if it is a plain single path segment — no `/`, no glob metacharacters, no
+/// leading `!`. Under gitignore semantics a bare `<name>` matches at any
+/// depth exactly like `**/<name>`, so both shapes prune.
+///
+/// Everything else is skipped for descent pruning but still honored at clean
+/// time (do not error on it): multi-segment patterns like `**/bin/obj`
+/// (pruning on bare `obj` would be too broad and could skip a legitimate
+/// project directory), glob patterns like `**/*.log` (the prune set matches
+/// basenames by exact equality), and `!` negations.
 ///
 /// The `.git` entry is always in the set regardless of the user patterns —
 /// it is the discovery-internal invariant that `WalkDir` never descends into
 /// a git repo's internals.
-///
-/// Non-`**/<name>`-shaped user patterns (anything not matching the `**/` +
-/// single-segment form) are skipped for descent pruning but still honored at
-/// clean time. Do not error on them.
 fn build_prune_set(user_patterns: &[String]) -> std::collections::HashSet<String> {
     use std::collections::HashSet;
 
@@ -231,25 +235,18 @@ fn build_prune_set(user_patterns: &[String]) -> std::collections::HashSet<String
     // `.git` is always pruned — the discovery-internal invariant.
     set.insert(".git".to_string());
 
-    // Derive the prune set from the full safelist catalog: built-in defaults
-    // plus the user's `safe_delete` entries. The built-ins are the single
-    // source of truth — each `**/<single-segment>` pattern contributes its
-    // single segment to the set.
-    for pat in BUILT_IN_DEFAULTS {
-        let trimmed = pat.strip_prefix("**/");
-        if let Some(rest) = trimmed
-            && !rest.contains('/')
+    for pat in BUILT_IN_DEFAULTS
+        .iter()
+        .copied()
+        .chain(user_patterns.iter().map(String::as_str))
+    {
+        let name = pat.strip_prefix("**/").unwrap_or(pat);
+        if !name.is_empty()
+            && !name.contains('/')
+            && !name.starts_with('!')
+            && !contains_glob_meta(name)
         {
-            set.insert(rest.to_string());
-        }
-    }
-
-    for pat in user_patterns {
-        let trimmed = pat.strip_prefix("**/");
-        if let Some(rest) = trimmed
-            && !rest.contains('/')
-        {
-            set.insert(rest.to_string());
+            set.insert(name.to_string());
         }
     }
     set
@@ -296,8 +293,8 @@ fn walk_root(
             // prune set. The set includes `.git` (true prune — no readdir
             // on `.git/objects` etc.) plus each artifact basename derived
             // from the safelist catalog.
-            let name = e.file_name().to_string_lossy().into_owned();
-            !prune_basenames.contains(&name)
+            let name = e.file_name().to_string_lossy();
+            !prune_basenames.contains(name.as_ref())
         })
     {
         let entry = entry?;
@@ -866,12 +863,16 @@ mod tests {
 
     #[test]
     fn node_modules_not_descended_into() {
-        // A project with `.git` whose `node_modules` contains packages —
-        // only the project is reported, not the packages. The walker does
-        // not descend into `node_modules` at all.
+        // A plain (non-git) workspace root whose `node_modules` contains
+        // packages — nothing suppresses the nested package.json except the
+        // prune itself, so this fails if the walker descends into
+        // `node_modules` at all.
         let root = tmp_root("artifact_node_modules");
-        fs::create_dir_all(&root).unwrap();
-        git_init(&root);
+        // NOTE: no git_init — root is a plain workspace, so the nesting rule
+        // cannot mask a pruning regression.
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        mkfixture(&app, "package.json", "{}");
         let nm = root.join("node_modules");
         fs::create_dir_all(&nm).unwrap();
         let pkg = nm.join("lodash");
@@ -880,19 +881,23 @@ mod tests {
         let cfg = mkconfig(&root, &[".git", "package.json"], 3);
         let results = discover(&cfg).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].path, root);
-        assert_eq!(results[0].marker, ".git");
+        assert_eq!(results[0].path, app);
+        assert_eq!(results[0].marker, "package.json");
         let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
         assert!(!paths.contains(&pkg), "lodash must not be reported:");
     }
 
     #[test]
     fn target_not_descended_into() {
-        // A Rust project whose `target/` contains compiled artifacts —
-        // only the project is reported, not any nested Cargo.toml.
+        // A plain (non-git) workspace root whose `target/` contains a nested
+        // Cargo.toml — only the sibling project is reported; the nested
+        // Cargo.toml would surface if pruning regressed.
         let root = tmp_root("artifact_target");
-        fs::create_dir_all(&root).unwrap();
-        git_init(&root);
+        // NOTE: no git_init — root is a plain workspace, so the nesting rule
+        // cannot mask a pruning regression.
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        mkfixture(&app, "Cargo.toml", "[package]");
         let target = root.join("target");
         fs::create_dir_all(&target).unwrap();
         let deep = target.join("debug/deep");
@@ -901,8 +906,8 @@ mod tests {
         let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 3);
         let results = discover(&cfg).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].path, root);
-        assert_eq!(results[0].marker, ".git");
+        assert_eq!(results[0].path, app);
+        assert_eq!(results[0].marker, "Cargo.toml");
         let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
         assert!(
             !paths.contains(&deep),
@@ -915,8 +920,11 @@ mod tests {
         // A user-added `**/.my-artifacts` pattern prunes `.my-artifacts` from
         // discovery too — the safelist is the single source of truth.
         let root = tmp_root("user_artifact");
-        fs::create_dir_all(&root).unwrap();
-        git_init(&root);
+        // NOTE: no git_init — root is a plain workspace, so the nesting rule
+        // cannot mask a pruning regression.
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        mkfixture(&app, "package.json", "{}");
         let art = root.join(".my-artifacts");
         fs::create_dir_all(&art).unwrap();
         mkfixture(&art, "package.json", "{}");
@@ -924,10 +932,31 @@ mod tests {
         cfg.safe_delete = vec!["**/.my-artifacts".to_string()];
         let results = discover(&cfg).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].path, root);
-        assert_eq!(results[0].marker, ".git");
+        assert_eq!(results[0].path, app);
+        assert_eq!(results[0].marker, "package.json");
         let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
         assert!(!paths.contains(&art), ".my-artifacts must not be reported:");
+    }
+
+    #[test]
+    fn bare_name_safe_delete_pruned() {
+        // A bare single-segment `safe_delete` entry (`my-cache`, gitignore
+        // shorthand for `**/my-cache`) prunes descent just like the `**/`
+        // form — parity with the clean-time matcher.
+        let root = tmp_root("bare_name");
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        mkfixture(&app, "package.json", "{}");
+        let cache = root.join("my-cache");
+        fs::create_dir_all(&cache).unwrap();
+        mkfixture(&cache, "package.json", "{}");
+        let mut cfg = mkconfig(&root, &[".git", "package.json"], 3);
+        cfg.safe_delete = vec!["my-cache".to_string()];
+        let results = discover(&cfg).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, app);
+        let paths: Vec<PathBuf> = results.iter().map(|r| r.path.clone()).collect();
+        assert!(!paths.contains(&cache), "my-cache must not be reported:");
     }
 
     #[test]
@@ -959,7 +988,7 @@ mod tests {
         // The workspace root itself (depth 0) is not pruned even if its
         // basename matches an artifact name. A workspace root literally
         // named `target` is still walked so the user sees the error.
-        let root = tmp_root("target");
+        let root = tmp_root("d0").join("target");
         fs::create_dir_all(&root).unwrap();
         git_init(&root);
         mkfixture(&root, "Cargo.toml", "[package]");

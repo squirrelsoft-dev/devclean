@@ -317,13 +317,6 @@ fn artifact_fixture(label: &str) -> PathBuf {
         .arg("main.rs")
         .status()
         .unwrap();
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(&ws.join("myproject"))
-        .arg("status")
-        .arg("--porcelain")
-        .status()
-        .unwrap();
     // node_modules with a nested package.json — should NOT be reported.
     let nm = ws.join("node_modules");
     std::fs::create_dir_all(&nm).unwrap();
@@ -366,11 +359,7 @@ fn discovery_prunes_target_from_descent() {
     // Add a target/ with a Cargo.toml inside.
     let target = ws.join("target");
     std::fs::create_dir_all(target.join("debug/deep")).unwrap();
-    write_file(
-        &target.join("debug/deep/Cargo.toml"),
-        "Cargo.toml",
-        "[package]",
-    );
+    write_file(&target.join("debug/deep"), "Cargo.toml", "[package]");
 
     let (ok, out) = run_discovery(&[&ws], 4);
     assert!(ok, "discovery failed: {out}");

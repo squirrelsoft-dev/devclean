@@ -275,9 +275,10 @@ not followed, and `WalkDir` is instructed via `filter_entry` to never descend
 into a `.git` directory (git internals are never candidate projects). The
 safelist catalog (`BUILT_IN_DEFAULTS` plus each user-supplied `safe_delete`
 entry) is the single source of truth for what is a non-project artifact: each
-`**/<single-segment>` pattern contributes its basename to the descent-prune
-set, so `node_modules`, `target`, `dist`, `build`, `.next`, `.venv`, and
-other built-in junk dirs are not walked at all. Multi-segment patterns like
+`**/<single-segment>` pattern — or an equivalent bare `<single-segment>`
+entry — contributes its basename to the descent-prune set, so
+`node_modules`, `target`, `dist`, `build`, `.next`, `.venv`, and other
+built-in junk dirs are not walked at all. Multi-segment patterns like
 `**/bin/obj` remain clean-time-only (not over-pruned on bare `obj`). A
 project's `.git` marker is still detected via `fs::read_dir` on its own
 children — only descent into `.git/` internals is skipped. Each git project
