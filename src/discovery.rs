@@ -279,7 +279,7 @@ fn build_prune_set(user_patterns: &[String]) -> std::collections::HashSet<String
 /// pruned — but `find_marker_in` reads the parent's children directly so a
 /// parent containing a `.git` is still detected as a project.
 ///
-/// `progress` is the live single-line progress writer (issue #27): each
+/// `progress` is the live single-line progress writer: each
 /// visited directory is rendered on one line that overwrites itself in place
 /// via a carriage return on a TTY, giving the user feedback that devclean is
 /// working on a large workspace. When not a TTY the writer is a no-op.
@@ -321,7 +321,7 @@ fn walk_root(
             continue;
         }
         // Emit the current directory path on one line that overwrites itself
-        // in place via a carriage return (issue #27). Each visited directory
+        // in place via a carriage return. Each visited directory
         // is reported so the user sees devclean working on a large workspace
         // rather than appearing hung. The writer is TTY-gated: when not a TTY
         // this is a no-op (no carriage-return garbage in a pipe or log file).
