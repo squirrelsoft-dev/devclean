@@ -61,7 +61,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Integrated into `src/discovery.rs`: `discover()` constructs a `ProgressWriter::new(std::io::stdout())`, threads it through each `walk_root` call, and calls `finish()` once the walk ends — on success after all roots and on a `walk_root` error before returning it, so no partial progress line lingers ahead of the error. Every subcommand that runs discovery (`devclean discovery`, `devclean list`, `devclean classification`, the default run / `devclean clean`) gets the indicator automatically — no per-subcommand wiring.
 - Classification and cleaning phases: `main.rs::classify_projects` is the single shared classify-with-progress loop (used by `run_listing`, `run_classification`, `run_cleaning`) rendering `classifying N/M`; do not re-inline per-caller copies. The clean execution loop in `run_cleaning` renders `cleaning N/M` around the actual `clean::clean` call and `clear()`s before each interleaved per-project output block.
 - Unit tests in `src/progress.rs` inject a buffer instead of a real terminal — no real TTYs are spawned; see that module's `tests` for the covered cases (TTY gating, truncation incl. multibyte paths and tiny widths, overwrite, clear, finish).
-- Owners: `README.md` "Discovery" section; `src/progress.rs` module docs and rustdoc; the `walk_root` rustdoc in `src/discovery.rs`; unit tests in `src/progress.rs`.
+- Owners: `README.md` "Discovery" section; `src/progress.rs` module docs and rustdoc; the `walk_root` rustdoc in `src/discovery.rs`; unit tests in `src/progress.rs`, CLI-level tests in `tests/progress_cli.rs`.
 
 ## Disk savings (issue #18)
 

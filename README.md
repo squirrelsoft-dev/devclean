@@ -323,7 +323,8 @@ line starts on a fresh line.
 
 See `src/discovery.rs` for the matching and nesting rules;
 `src/progress.rs` for the live indicator; `tests/discovery_cli.rs` for
-integration tests of the subcommand.
+integration tests of the subcommand; `tests/progress_cli.rs` for
+integration tests of the classification/cleaning progress phases.
 
 ## Classification
 
