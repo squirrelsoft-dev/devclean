@@ -346,7 +346,8 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
     let mut rows: Vec<(String, classify::Status)> = Vec::new();
-    for d in &projects {
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    for (i, d) in projects.iter().enumerate() {
         let ignore_set = match ignore::IgnoreSet::load(&d.path) {
             Ok(set) => set,
             Err(e) => {
@@ -357,9 +358,11 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
+        progress.update_phase("classifying", i + 1, projects.len(), &d.path);
         let status = classify::classify(&d.path, &ignore_set);
         rows.push((d.path.display().to_string(), status));
     }
+    progress.finish();
     rows.sort_by_key(|&(_, status)| status);
 
     // Compute reclaimable size per project (only for cleanable rows) and
@@ -530,7 +533,8 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
     let mut rows: Vec<(String, classify::Status)> = Vec::new();
-    for d in &projects {
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    for (i, d) in projects.iter().enumerate() {
         // Classification is a read-only survey over independent projects, so
         // one project with an unreadable `.devcleanignore` must not abort the
         // whole report. Skip just that project: falling back to an empty set
@@ -546,9 +550,11 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
+        progress.update_phase("classifying", i + 1, projects.len(), &d.path);
         let status = classify::classify(&d.path, &ignore_set);
         rows.push((d.path.display().to_string(), status));
     }
+    progress.finish();
     rows.sort_by_key(|&(_, status)| status);
 
     println!(
@@ -589,7 +595,8 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // would otherwise mask a protected file as cleanable, and the engine
     // acts destructively on that verdict.
     let mut all_projects: Vec<(PathBuf, classify::Status, ignore::IgnoreSet)> = Vec::new();
-    for d in &projects {
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    for (i, d) in projects.iter().enumerate() {
         let ignore_set = match ignore::IgnoreSet::load(&d.path) {
             Ok(set) => set,
             Err(e) => {
@@ -600,9 +607,11 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
+        progress.update_phase("classifying", i + 1, projects.len(), &d.path);
         let status = classify::classify(&d.path, &ignore_set);
         all_projects.push((d.path.clone(), status, ignore_set));
     }
+    progress.finish();
     all_projects.sort_by_key(|&(_, status, _)| status);
 
     // Report phase: each non-cleanable project gets a one-line reason; cleanable
@@ -730,8 +739,10 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // same order as `cleanable_meta`. Print each project's outcome, then
     // execute the approved ones (execution is always suppressed by
     // --dry-run; --force approved everything without prompting).
-    for (r, (idx, safe_set)) in results.iter().zip(&cleanable_meta) {
+    let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
+    for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
         let will_execute = r.project_approved && !cli.dry_run;
+        clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
         println!(
             "clean {}: {} — {}",
             r.path.display(),
@@ -804,6 +815,7 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    clean_progress.finish();
     Ok(())
 }
 
