@@ -86,7 +86,11 @@ impl<W: Write> ProgressWriter<W> {
             let ellipsis_len = ellipsis.len();
             // Right-align: the leaf (current dir) stays visible. We slice from
             // the right, accounting for the ellipsis at the left.
-            let start = display.len().saturating_sub(max_len - ellipsis_len);
+            let keep = max_len.saturating_sub(ellipsis_len);
+            let mut start = display.len().saturating_sub(keep);
+            while !display.is_char_boundary(start) {
+                start += 1;
+            }
             format!("{}{}", ellipsis, &display[start..])
         } else {
             display
@@ -219,6 +223,52 @@ mod tests {
         assert!(
             !bytes.ends_with('\n'),
             "update must not end with newline: {:?}",
+            bytes
+        );
+    }
+
+    /// Truncating a path with multibyte UTF-8 segments must not panic: the
+    /// slice start is snapped forward to the next char boundary.
+    #[test]
+    fn truncates_multibyte_paths_without_panicking() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 20,
+            active: true,
+        };
+        // With width 20 the slice start lands mid-character in the CJK leaf,
+        // so this panics unless the start is snapped to a char boundary.
+        pw.update(Path::new("/Users/séb/工程/项目文件夹"));
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        assert!(
+            bytes.contains('\u{2026}'),
+            "long multibyte path must be ellipsized: {:?}",
+            bytes
+        );
+        assert!(
+            bytes.contains("件夹"),
+            "leaf tail must stay visible: {:?}",
+            bytes
+        );
+    }
+
+    /// A terminal narrower than the label plus the ellipsis must not underflow
+    /// or panic; the update degrades to the ellipsis alone.
+    #[test]
+    fn tiny_width_does_not_panic() {
+        let buf: Vec<u8> = Vec::new();
+        let mut pw = ProgressWriter {
+            writer: buf,
+            width: 10,
+            active: true,
+        };
+        pw.update(Path::new("/some/deep/path"));
+        pw.finish();
+        let bytes = String::from_utf8_lossy(&pw.writer);
+        assert!(
+            bytes.contains("walking: "),
+            "label still emitted: {:?}",
             bytes
         );
     }

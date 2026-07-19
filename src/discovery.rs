@@ -206,14 +206,17 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
     let mut results: Vec<DiscoveredProject> = Vec::new();
     let mut progress = ProgressWriter::new(std::io::stdout());
     for root in &cfg.workspace_roots {
-        walk_root(
+        if let Err(e) = walk_root(
             root,
             max_depth,
             &markers,
             &prune_basenames,
             &mut results,
             &mut progress,
-        )?;
+        ) {
+            progress.finish();
+            return Err(e);
+        }
     }
     progress.finish();
 
