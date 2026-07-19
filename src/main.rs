@@ -29,7 +29,10 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     workspace: Vec<String>,
 
-    /// Alternate config file path. Must exist — devclean exits non-zero if it does not.
+    /// Alternate config file path. Must exist for all subcommands except
+    /// `init`, which creates it — an explicit --config target that does not
+    /// exist is a hard error for every subcommand other than init; init
+    /// refuses to clobber an existing target.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -233,7 +236,12 @@ fn run_init(cli: &Cli, workspace: &PathBuf) -> Result<(), Box<dyn std::error::Er
         None => config::default_config_path().ok_or("could not determine platform config dir")?,
     };
 
-    // Idempotency: refuse to clobber an existing file.
+    // Idempotency: refuse to clobber an existing file. A target that exists
+    // as anything other than a file (directory, symlink, etc.) also fails
+    // clearly — nothing is lost; the error names the target.
+    if target.exists() && !target.is_file() {
+        return Err(format!("target exists and is not a file: {}", target.display()).into());
+    }
     if target.is_file() {
         return Err(format!("config file already exists: {}", target.display()).into());
     }
@@ -283,8 +291,8 @@ const TEMPLATE_HEADER: &str = r#"# devclean config — each field is documented 
 #   is shown below; add your own markers alongside the built-ins).
 # default_mode: "interactive" (default) or "force".
 #
-# Example additional roots (commented out):
-# workspace_roots = ["/home/me/work", "/home/me/other"]
+# Example additional roots (uncomment to add):
+# (add each root as a separate entry on the active line below)
 "#;
 
 /// `devclean config`: print the resolved configuration (workspace roots,
