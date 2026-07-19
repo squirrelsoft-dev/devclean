@@ -88,8 +88,8 @@ $ devclean --version             # crate version (devclean 0.1.0)
 
 To get started: `devclean init ~/code` writes a pre-populated config file under
 the platform config dir with `~/code` as the active workspace root, each other
-`Config` field documented with its default alongside commented example roots.
-`devclean init --help` for details.
+`Config` field documented with its default, and a comment explaining how to add
+more workspace roots. `devclean init --help` for details.
 
 See `src/main.rs` for the CLI surface and `src/output.rs` for the
 formatting; `src/clean.rs` for the deletion engine and
@@ -337,11 +337,12 @@ falling back to defaults.
 
 First run? `devclean init <path>` writes a pre-populated config file under the
 platform config dir with the given path as the active workspace root, each
-other `Config` field documented with its default alongside commented example
-roots. Re-running `init` on the same target does not clobber — it exits
-non-zero with the existing path. `devclean --config <other>` writes to `<other>`
-instead (creating parent directories); an explicit `--config` target that
-already exists is also honored.
+other `Config` field documented with its default, and a comment explaining how
+to add more workspace roots. `init` refuses to overwrite an existing file at
+the target — it exits non-zero with the existing path, and does not read or
+use that file. `devclean --config <other>` writes to `<other>` instead
+(creating parent directories); the same refuse-to-overwrite rule applies to an
+explicit `--config` target.
 
 ```toml
 # ~/.config/devclean/config.toml
