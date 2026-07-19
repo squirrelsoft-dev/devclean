@@ -54,6 +54,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Public API seam driven by the interactive flow (#8, `src/interactive.rs`): `clean(project, ignore_set, safe_set, approved, force, dry_run)` and `dry_run(...)`; `build_exclusions` is the exclusion-list builder. The `devclean clean` CLI hook is **destructive**: it deletes via `clean()` only for a project the user approved (or under `--force`), and never under `--dry-run`. Each subcommand — `devclean` (no subcommand, the default run) and `devclean clean` — runs the destructive interactive flow; `devclean list` only lists statuses.
 - Owners: `README.md` "Cleaning" section; `src/clean.rs` module docs and rustdoc; unit tests in `src/clean.rs`, CLI-level tests in `tests/clean_cli.rs`.
 
+## Disk savings (issue #18)
+
+- `src/disk.rs` computes per-project reclaimable size (each cleanable project's `Safe` + `Surfaced` items summed via `WalkDir`, `symlink_metadata` for symlinks, tolerant of permission-denied paths and non-UTF-8 names).
+- `src/output.rs` owns the display shape: `format_project_row` carries an optional size on each cleanable row (`path — cleanable (~2.3 GB)`); non-cleanable rows carry no size. `format_summary` carries an optional cleanable-count and an optional aggregate size (`listing: N project(s), M cleanable, ~X reclaimable`).
+- `--dry-run` shows the same sizes without deleting anything; the computation reuses `clean::dry_run`.
+- Sizes are human-readable (KB / MB / GB, 1024-based, ≥ 1.0 picks each unit) and approximate (the `~` form). The walk does not follow symlinks; each symlink counts its own size only. Permission-denied paths contribute 0, not an abort.
+- Tests: unit tests in `src/disk.rs` and `src/output.rs`; integration tests in `tests/clean_cli.rs` verify the rendered output.
+- Owners: `README.md` "Disk savings" section; `src/disk.rs` module docs; `src/output.rs` formatting contract; `src/main.rs` `run_listing` / `run_cleaning` callers.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
