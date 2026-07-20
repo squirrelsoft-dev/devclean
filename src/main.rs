@@ -639,21 +639,23 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             let ignore_set = &all_projects[idx].2;
             match clean::dry_run(path, ignore_set, &safe_set) {
-                Ok(items) => match disk::compute_reclaimable_size(path, &items) {
-                    Ok(bytes) => {
-                        per_project_bytes[idx] = Some(bytes);
-                        per_project_size[idx] = Some(disk::format_size(bytes));
-                        per_project_items[idx] = Some(items);
-                        per_project_safe_set[idx] = Some(safe_set);
+                Ok(items) => {
+                    match disk::compute_reclaimable_size(path, &items) {
+                        Ok(bytes) => {
+                            per_project_bytes[idx] = Some(bytes);
+                            per_project_size[idx] = Some(disk::format_size(bytes));
+                        }
+                        Err(e) => {
+                            progress.clear();
+                            eprintln!(
+                                "warning: {}: could not compute reclaimable size: {e}",
+                                path.display()
+                            );
+                        }
                     }
-                    Err(e) => {
-                        progress.clear();
-                        eprintln!(
-                            "warning: {}: could not compute reclaimable size: {e}",
-                            path.display()
-                        );
-                    }
-                },
+                    per_project_items[idx] = Some(items);
+                    per_project_safe_set[idx] = Some(safe_set);
+                }
                 Err(e) => {
                     progress.clear();
                     eprintln!("warning: {}: dry_run failed: {e}", path.display());
@@ -692,25 +694,12 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     for (idx, (path, status, _ignore_set)) in all_projects.iter().enumerate() {
         match status {
             classify::Status::Cleanable => {
-                let items = match &per_project_items[idx] {
-                    Some(items) => items.clone(),
-                    None => {
-                        eprintln!(
-                            "warning: {}: skipped, dry_run did not produce items in sizing pass",
-                            path.display()
-                        );
-                        continue;
-                    }
-                };
-                let safe_set = match &per_project_safe_set[idx] {
-                    Some(s) => s.clone(),
-                    None => {
-                        eprintln!(
-                            "warning: {}: skipped, safe-to-delete set could not be built in sizing pass",
-                            path.display()
-                        );
-                        continue;
-                    }
+                let (items, safe_set) = match (
+                    per_project_items[idx].take(),
+                    per_project_safe_set[idx].take(),
+                ) {
+                    (Some(items), Some(safe_set)) => (items, safe_set),
+                    _ => continue,
                 };
                 println!(
                     "{}",
