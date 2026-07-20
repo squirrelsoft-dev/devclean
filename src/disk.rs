@@ -95,27 +95,28 @@ fn symlink_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
     Ok(meta.len())
 }
 
-/// Size of one regular file: `Read::read_to_end` sums every chunk.
+/// Size of one regular file: `stat` via `fs::metadata`, not a full read.
 ///
-/// Uses a `BufReader` so the full file is read in reasonable chunks; the
-/// size is `bytes_total`. A 0-byte file returns 0 — counted, not skipped.
-/// A permission-denied read returns `Ok(0)`.
+/// `metadata().len()` returns the file's logical size from the inode in O(1)
+/// (one syscall) without reading file content — the same approach `du`, `ncdu`,
+/// and `dust` use. A 0-byte file returns 0 (counted, not skipped). A
+/// permission‑denied `stat` returns `Ok(0)` so one unreadable file does not zero
+/// out the whole listing.
 fn file_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
-    let f = File::open(path)?;
-    let mut reader = BufReader::new(f);
-    let mut buf = [0u8; 8192];
-    let mut bytes_total: u64 = 0;
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => return Ok(bytes_total),
-            Ok(n) => {
-                bytes_total += n as u64;
+    match File::open(path) {
+        Ok(f) => {
+            // File opened successfully; use its metadata for size.
+            match f.metadata() {
+                Ok(meta) => Ok(meta.len()),
+                Err(e) => {
+                    eprintln!("warning: {}: could not stat after opening: {}", path.display(), e);
+                    Ok(0)
+                }
             }
-            Err(e) => {
-                // Permission-denied (or similar) — count as 0.
-                eprintln!("warning: {}: could not read: {}", path.display(), e);
-                return Ok(0);
-            }
+        }
+        Err(e) => {
+            eprintln!("warning: {}: could not open for size: {}", path.display(), e);
+            Ok(0)
         }
     }
 }
