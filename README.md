@@ -309,7 +309,7 @@ live single-line progress indicator while walking each workspace root:
 `walking: <path>` overwrites itself in place via a carriage return on a TTY,
 so the display never scrolls. The same indicator continues through the later
 phases: while each project's git state is examined the line reads
-`classifying N/M: <path>`, each cleanable project's reclaimable size is
+`classifying N/M: <path>`, while each cleanable project's reclaimable size is
 computed the line reads `sizing N/M: <path>` (single-pass — bytes are stored
 once and the aggregate is the sum of those already-computed bytes, not a
 second walk), and while an approved project's untracked junk is deleted it

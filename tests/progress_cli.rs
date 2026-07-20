@@ -69,6 +69,19 @@ fn init_repo_with_commit(root: &Path) {
     git_in(root, &["commit", "-m", "initial"]);
 }
 
+fn add_pushed_remote(root: &Path) -> PathBuf {
+    let bare = root_for(&format!(
+        "{}-bare",
+        root.file_stem().unwrap().to_string_lossy()
+    ));
+    git_in(&bare, &["init", "--bare"]);
+    git_in(root, &["remote", "add", "origin", &bare.to_string_lossy()]);
+    git_in(root, &["config", "branch.main.remote", "origin"]);
+    git_in(root, &["config", "branch.main.merge", "refs/heads/main"]);
+    git_in(root, &["push", "origin", "main"]);
+    bare
+}
+
 /// Run the devclean binary with the given args, returning stdout.
 fn run<I, S>(args: I) -> String
 where
@@ -121,6 +134,41 @@ fn classification_emits_no_progress_when_piped() {
     assert!(
         out.contains("classification"),
         "piped output must still contain the report: {out}"
+    );
+}
+
+/// Test that `list` over a cleanable project emits no sizing progress when
+/// piped, while the per-project size and aggregate still render.
+#[test]
+fn list_emits_no_sizing_progress_when_piped() {
+    let ws = root_for("size-pipe");
+
+    let p1 = ws.join("p1");
+    std::fs::create_dir_all(&p1).unwrap();
+    init_repo_with_commit(&p1);
+    add_pushed_remote(&p1);
+    std::fs::create_dir_all(p1.join("target")).unwrap();
+    std::fs::write(p1.join("target/bin"), vec![0u8; 4096]).unwrap();
+
+    let home = root_for("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[ws.to_str().unwrap()], 2);
+
+    let out = run(["--config", config.to_str().unwrap(), "list"]);
+
+    // No sizing lines — the TTY gate short-circuits each update.
+    assert!(
+        !out.contains("sizing"),
+        "piped output must not contain sizing lines: {out}"
+    );
+    // The sized listing still appears.
+    assert!(
+        out.contains("cleanable (~"),
+        "piped output must still carry the per-project size: {out}"
+    );
+    assert!(
+        out.contains("reclaimable"),
+        "piped output must still carry the aggregate size: {out}"
     );
 }
 
