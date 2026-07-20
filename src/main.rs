@@ -612,6 +612,8 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // project, summed into the aggregate total. Mirrors `run_listing`'s pattern.
     let mut per_project_size: Vec<Option<String>> = vec![None; all_projects.len()];
     let mut per_project_bytes: Vec<Option<u64>> = vec![None; all_projects.len()];
+    let mut per_project_items: Vec<Option<Vec<clean::CleanItem>>> = vec![None; all_projects.len()];
+    let mut per_project_safe_set: Vec<Option<safelist::SafeSet>> = vec![None; all_projects.len()];
     {
         let cleanable_indices: Vec<usize> = all_projects
             .iter()
@@ -641,6 +643,8 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     Ok(bytes) => {
                         per_project_bytes[idx] = Some(bytes);
                         per_project_size[idx] = Some(disk::format_size(bytes));
+                        per_project_items[idx] = Some(items);
+                        per_project_safe_set[idx] = Some(safe_set);
                     }
                     Err(e) => {
                         progress.clear();
@@ -685,23 +689,26 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
     let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
-    for (idx, (path, status, ignore_set)) in all_projects.iter().enumerate() {
+    for (idx, (path, status, _ignore_set)) in all_projects.iter().enumerate() {
         match status {
             classify::Status::Cleanable => {
-                let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
-                    Ok(s) => s,
-                    Err(e) => {
+                let items = match &per_project_items[idx] {
+                    Some(items) => items.clone(),
+                    None => {
                         eprintln!(
-                            "warning: {}: skipped, could not build safe-to-delete set: {e}",
+                            "warning: {}: skipped, dry_run did not produce items in sizing pass",
                             path.display()
                         );
                         continue;
                     }
                 };
-                let items = match clean::dry_run(path, ignore_set, &safe_set) {
-                    Ok(items) => items,
-                    Err(e) => {
-                        eprintln!("warning: {}: clean failed: {e}", path.display());
+                let safe_set = match &per_project_safe_set[idx] {
+                    Some(s) => s.clone(),
+                    None => {
+                        eprintln!(
+                            "warning: {}: skipped, safe-to-delete set could not be built in sizing pass",
+                            path.display()
+                        );
                         continue;
                     }
                 };
