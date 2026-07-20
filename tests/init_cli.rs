@@ -1,4 +1,4 @@
-/// Integration tests for `devclean init`.
+/// Integration tests for `offcut init`.
 ///
 /// Each test spins up a fresh temp config dir, runs the binary against it, and
 /// asserts the resulting file exists, parses, and behaves as expected.
@@ -16,15 +16,11 @@ fn stderr(out: &std::process::Output) -> String {
 fn init_creates_config_file_at_target() {
     let dir = std::env::temp_dir();
     let n: u64 = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let config_dir = dir.join(format!(
-        "devclean-init-cli-test-{}-{}",
-        std::process::id(),
-        n
-    ));
-    let config_path = config_dir.join("devclean").join("config.toml");
+    let config_dir = dir.join(format!("offcut-init-cli-test-{}-{}", std::process::id(), n));
+    let config_path = config_dir.join("offcut").join("config.toml");
     let workspace = "/tmp/cli-test-workspace";
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .arg("--config")
         .arg(&config_path)
         .arg("init")
@@ -53,16 +49,12 @@ fn init_creates_config_file_at_target() {
 fn init_exits_nonzero_when_file_already_exists() {
     let dir = std::env::temp_dir();
     let n: u64 = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let config_dir = dir.join(format!(
-        "devclean-init-cli-test-{}-{}",
-        std::process::id(),
-        n
-    ));
-    let config_path = config_dir.join("devclean").join("config.toml");
+    let config_dir = dir.join(format!("offcut-init-cli-test-{}-{}", std::process::id(), n));
+    let config_path = config_dir.join("offcut").join("config.toml");
     fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     fs::write(&config_path, "existing = true\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .arg("--config")
         .arg(&config_path)
         .arg("init")
@@ -90,16 +82,12 @@ fn init_exits_nonzero_when_file_already_exists() {
 fn init_creates_parent_directories() {
     let dir = std::env::temp_dir();
     let n: u64 = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let config_dir = dir.join(format!(
-        "devclean-init-cli-test-{}-{}",
-        std::process::id(),
-        n
-    ));
+    let config_dir = dir.join(format!("offcut-init-cli-test-{}-{}", std::process::id(), n));
     let _ = fs::remove_dir_all(&config_dir);
 
-    let config_path = config_dir.join("devclean").join("config.toml");
+    let config_path = config_dir.join("offcut").join("config.toml");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .arg("--config")
         .arg(&config_path)
         .arg("init")
@@ -122,15 +110,11 @@ fn init_creates_parent_directories() {
 fn init_file_parses_back_to_valid_config() {
     let dir = std::env::temp_dir();
     let n: u64 = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let config_dir = dir.join(format!(
-        "devclean-init-cli-test-{}-{}",
-        std::process::id(),
-        n
-    ));
-    let config_path = config_dir.join("devclean").join("config.toml");
+    let config_dir = dir.join(format!("offcut-init-cli-test-{}-{}", std::process::id(), n));
+    let config_path = config_dir.join("offcut").join("config.toml");
     let workspace = "/tmp/cli-test-workspace";
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .arg("--config")
         .arg(&config_path)
         .arg("init")
@@ -174,14 +158,10 @@ fn init_file_parses_back_to_valid_config() {
 fn init_prints_created_path_to_stdout() {
     let dir = std::env::temp_dir();
     let n: u64 = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let config_dir = dir.join(format!(
-        "devclean-init-cli-test-{}-{}",
-        std::process::id(),
-        n
-    ));
-    let config_path = config_dir.join("devclean").join("config.toml");
+    let config_dir = dir.join(format!("offcut-init-cli-test-{}-{}", std::process::id(), n));
+    let config_path = config_dir.join("offcut").join("config.toml");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .arg("--config")
         .arg(&config_path)
         .arg("init")

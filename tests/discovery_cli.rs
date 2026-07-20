@@ -1,11 +1,11 @@
-//! Integration tests for the `devclean discovery` subcommand, which is the
+//! Integration tests for the `offcut discovery` subcommand, which is the
 //! observable hook for the project-discovery walker (issue #5). The walker
 //! itself is unit-tested in `src/discovery.rs`; these tests exercise the full
 //! CLI path: a real config file naming real workspace roots on disk, walked by
 //! the real binary, with the printed report as the assertion surface.
 //!
 //! They use an explicit `HOME` override so the child never picks up the
-//! developer's real `~/.config/devclean/config.toml`.
+//! developer's real `~/.config/offcut/config.toml`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ fn unique_dir(label: &str) -> PathBuf {
     let mut d = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     d.push(format!(
-        "devclean-discovery-cli-{}-{}-{}",
+        "offcut-discovery-cli-{}-{}-{}",
         label,
         std::process::id(),
         n
@@ -55,7 +55,7 @@ fn workspace_fixture(label: &str) -> PathBuf {
 }
 
 /// Write a config naming `roots` as the workspace roots, and run
-/// `devclean --config <cfg> discovery`. Returns (success, stdout+stderr).
+/// `offcut --config <cfg> discovery`. Returns (success, stdout+stderr).
 fn run_discovery(roots: &[&Path], max_depth: usize) -> (bool, String) {
     let home = unique_dir("home");
     let cfg_dir = unique_dir("cfg");
@@ -71,7 +71,7 @@ fn run_discovery(roots: &[&Path], max_depth: usize) -> (bool, String) {
         &format!("workspace_roots = [{root_list}]\nmax_depth = {max_depth}\n"),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .env("HOME", &home)
         .arg("--config")
         .arg(&cfg)
@@ -260,7 +260,7 @@ fn discovery_honors_workspace_roots_supplied_on_the_cli() {
         "workspace_roots = []\nmax_depth = 4\n",
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .env("HOME", &home)
         .arg("--config")
         .arg(cfg_dir.join("config.toml"))
@@ -395,7 +395,7 @@ fn discovery_prunes_user_safe_delete_artifact() {
         ),
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_devclean"))
+    let out = Command::new(env!("CARGO_BIN_EXE_offcut"))
         .env("HOME", &home)
         .arg("--config")
         .arg(&cfg)

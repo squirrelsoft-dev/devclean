@@ -4,7 +4,7 @@
 //! Each time walk_root visits a directory, this module renders the current
 //! path on one line that overwrites itself in place via a carriage return
 //! (CR), so the display never scrolls -- a TUI-style spinner that tells the
-//! user devclean is working on a large workspace rather than appearing hung.
+//! user offcut is working on a large workspace rather than appearing hung.
 //!
 //! The same mechanism also emits counted phase labels during classification,
 //! sizing, and cleaning: each project classified, each cleanable project

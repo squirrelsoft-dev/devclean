@@ -1,4 +1,4 @@
-//! Project discovery for devclean.
+//! Project discovery for offcut.
 //!
 //! Walks each configured workspace root and identifies project folders by
 //! marker files (`.git`, `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml`,
@@ -198,7 +198,7 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
 
     if cfg.workspace_roots.is_empty() {
         println!(
-            "discovery: no workspace roots configured; nothing to walk — try `devclean init <path>` to create a config file"
+            "discovery: no workspace roots configured; nothing to walk — try `offcut init <path>` to create a config file"
         );
         return Ok(Vec::new());
     }
@@ -281,7 +281,7 @@ fn build_prune_set(user_patterns: &[String]) -> std::collections::HashSet<String
 ///
 /// `progress` is the live single-line progress writer: each
 /// visited directory is rendered on one line that overwrites itself in place
-/// via a carriage return on a TTY, giving the user feedback that devclean is
+/// via a carriage return on a TTY, giving the user feedback that offcut is
 /// working on a large workspace. When not a TTY the writer is a no-op.
 fn walk_root(
     root: &Path,
@@ -322,7 +322,7 @@ fn walk_root(
         }
         // Emit the current directory path on one line that overwrites itself
         // in place via a carriage return. Each visited directory
-        // is reported so the user sees devclean working on a large workspace
+        // is reported so the user sees offcut working on a large workspace
         // rather than appearing hung. The writer is TTY-gated: when not a TTY
         // this is a no-op (no carriage-return garbage in a pipe or log file).
         progress.update(entry.path());
@@ -442,7 +442,7 @@ mod tests {
     fn tmp_root(label: &str) -> PathBuf {
         let d = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let out = d.join(format!("devclean-discovery-test-{}-{}", label, n));
+        let out = d.join(format!("offcut-discovery-test-{}-{}", label, n));
         fs::create_dir_all(&out).unwrap();
         out
     }

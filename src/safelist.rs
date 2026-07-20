@@ -1,4 +1,4 @@
-//! Safe-to-delete catalog for devclean.
+//! Safe-to-delete catalog for offcut.
 //!
 //! Maintains a merged list of patterns (each a gitignore-style glob, anchored
 //! at the project root) that the cleaning engine treats as safe to auto-delete

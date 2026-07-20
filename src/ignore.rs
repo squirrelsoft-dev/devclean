@@ -1,16 +1,16 @@
-//! `.devcleanignore` parsing and matching for devclean.
+//! `.offcutignore` parsing and matching for offcut.
 //!
 //! Implements gitignore-style ignore semantics layered across two scopes:
 //!
-//! - A **global** `~/.devcleanignore` that applies to every project (analogous
+//! - A **global** `~/.offcutignore` that applies to every project (analogous
 //!   to git's `core.excludesfile`). Its patterns are anchored at the project
 //!   root, so a leading `/` matches top-level entries of the project.
-//! - **Per-folder** `.devcleanignore` files anywhere inside a project tree.
+//! - **Per-folder** `.offcutignore` files anywhere inside a project tree.
 //!   Each applies to the subtree rooted at its own directory; a leading `/`
 //!   in such a file anchors to that file's directory.
 //!
 //! Precedence follows gitignore: the closest (deepest, most-specific)
-//! `.devcleanignore` wins, and the global file is the weakest layer. Within a
+//! `.offcutignore` wins, and the global file is the weakest layer. Within a
 //! single file the last matching pattern wins, and `!` re-includes a path that
 //! an earlier pattern excluded — both handled by the underlying `ignore`
 //! crate's per-file matcher.
@@ -18,7 +18,7 @@
 //! Paths are expressed **relative to the project root** throughout this module.
 //! Each ignore layer stores its own anchor as a path relative to the project
 //! root (the empty path for the project root / global layer, e.g. `sub` for a
-//! `.devcleanignore` in `<root>/sub`). Matching a path therefore reduces to
+//! `.offcutignore` in `<root>/sub`). Matching a path therefore reduces to
 //! "strip the layer's anchor, then run gitignore matching on the remainder",
 //! which keeps the matcher pure and side-effect-free apart from reading ignore
 //! files at load time. Because the anchor is stripped here, every layer's
@@ -49,7 +49,7 @@ struct Entry {
     gi: Gitignore,
 }
 
-/// A loaded, immutable set of `.devcleanignore` rules for a single project.
+/// A loaded, immutable set of `.offcutignore` rules for a single project.
 ///
 /// Entries are stored outermost-first (global, then shallowest local, ...,
 /// deepest local). Matching iterates innermost-first so the most specific
@@ -79,13 +79,13 @@ impl IgnoreSet {
 
     /// Load the ignore set for a project rooted at `project_root`.
     ///
-    /// Reads the global `~/.devcleanignore` (if present) and every
-    /// `.devcleanignore` found by walking the project tree. Missing files are
+    /// Reads the global `~/.offcutignore` (if present) and every
+    /// `.offcutignore` found by walking the project tree. Missing files are
     /// silently skipped — an absent ignore file means "no rules", never an
     /// error. Read errors (permissions, IO) are propagated.
     pub fn load(project_root: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let global = dirs::home_dir()
-            .map(|h| h.join(".devcleanignore"))
+            .map(|h| h.join(".offcutignore"))
             .filter(|p| p.is_file());
         Self::load_with(project_root, global.as_deref())
     }
@@ -217,7 +217,7 @@ fn absolute_root(project_root: &Path) -> PathBuf {
     std::path::absolute(project_root).unwrap_or_else(|_| project_root.to_path_buf())
 }
 
-/// Compile a `.devcleanignore`-style file into a `Gitignore`. The matcher is
+/// Compile a `.offcutignore`-style file into a `Gitignore`. The matcher is
 /// built with an empty root because [`IgnoreSet::is_ignored_path`] strips the
 /// layer's anchor itself; giving the builder the anchor too would strip it
 /// twice. Returns `Ok(None)` when the file is empty of patterns (blank lines
@@ -240,7 +240,7 @@ fn build_matcher(file: &Path) -> Result<Option<Gitignore>, Box<dyn std::error::E
     Ok(Some(b.build()?))
 }
 
-/// Recursively collect every `.devcleanignore` under `dir` (starting at
+/// Recursively collect every `.offcutignore` under `dir` (starting at
 /// `base`, the project root), recording each with its anchor as a path
 /// relative to `base`. Results are pushed in shallowest-first order (pre-order
 /// traversal). Symlinks are not followed; unreadable subdirectories and
@@ -249,7 +249,7 @@ fn build_matcher(file: &Path) -> Result<Option<Gitignore>, Box<dyn std::error::E
 /// `.git` directories are pruned: they never hold user ignore rules and are
 /// the single largest source of wasted stats in a real repository. Heavy build
 /// directories (`node_modules`, `target`, ...) are deliberately *not* pruned —
-/// a `.devcleanignore` inside one is exactly how a user pins something that
+/// a `.offcutignore` inside one is exactly how a user pins something that
 /// cleaning would otherwise remove, so skipping them would silently drop
 /// protection.
 fn collect_local_ignore_files(
@@ -257,7 +257,7 @@ fn collect_local_ignore_files(
     dir: &Path,
     out: &mut Vec<Entry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ignore_file = dir.join(".devcleanignore");
+    let ignore_file = dir.join(".offcutignore");
     if ignore_file.is_file() {
         let root = dir
             .strip_prefix(base)
@@ -347,7 +347,7 @@ mod tests {
         let mut d = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         d.push(format!(
-            "devclean-ignore-{}-{}-{}",
+            "offcut-ignore-{}-{}-{}",
             label,
             std::process::id(),
             n
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn protected_path_is_reported_ignored() {
-        // A "protected path" in devclean terms is one a user has pinned via an
+        // A "protected path" in offcut terms is one a user has pinned via an
         // ignore rule; cleaning must not remove it. The matcher's contract: a
         // protected path returns is_ignored == true.
         let set = layers(&[(ROOT, &["/important"])]);
@@ -516,12 +516,12 @@ mod tests {
         // Use an explicit global file so the test does not depend on the real
         // home directory. The global layer is anchored at the project root.
         let root = unique_dir("load");
-        write_file(&root, ".devcleanignore", "*.log\n");
+        write_file(&root, ".offcutignore", "*.log\n");
         let sub = root.join("sub");
         fs::create_dir_all(&sub).unwrap();
-        write_file(&sub, ".devcleanignore", "!keep.log\n");
+        write_file(&sub, ".offcutignore", "!keep.log\n");
 
-        let global = write_file(&root, "global.devcleanignore", "*.bak\n");
+        let global = write_file(&root, "global.offcutignore", "*.bak\n");
         let set = IgnoreSet::load_with(&root, Some(&global)).unwrap();
         assert!(set.is_ignored_path(p("debug.log"), false));
         assert!(set.is_ignored_path(p("archive.bak"), false));
@@ -543,7 +543,7 @@ mod tests {
         // so a cwd-relative stat would report `build` as a file and the
         // directory-only rule would not fire.
         let root = unique_dir("stat");
-        write_file(&root, ".devcleanignore", "build/\n");
+        write_file(&root, ".offcutignore", "build/\n");
         fs::create_dir_all(root.join("build")).unwrap();
 
         let set = IgnoreSet::load_with(&root, None).unwrap();
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn load_prunes_git_directories() {
         let root = unique_dir("git");
-        write_file(&root, ".git/.devcleanignore", "*.log\n");
+        write_file(&root, ".git/.offcutignore", "*.log\n");
         let set = IgnoreSet::load_with(&root, None).unwrap();
         assert_eq!(set.layer_count(), 0);
     }
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn load_skips_comment_only_files() {
         let root = unique_dir("comments");
-        write_file(&root, ".devcleanignore", "# only a comment\n\n");
+        write_file(&root, ".offcutignore", "# only a comment\n\n");
         let set = IgnoreSet::load_with(&root, None).unwrap();
         assert_eq!(set.layer_count(), 0);
     }

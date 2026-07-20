@@ -1,9 +1,9 @@
-//! Integration tests for the `devclean ignore` debug subcommand, which is the
-//! observable hook for the `.devcleanignore` matcher (issue #3). The matcher
+//! Integration tests for the `offcut ignore` debug subcommand, which is the
+//! observable hook for the `.offcutignore` matcher (issue #3). The matcher
 //! module itself is unit-tested in `src/ignore.rs`; these tests exercise the
-//! full CLI path: loading real `.devcleanignore` files from a temp project tree
+//! full CLI path: loading real `.offcutignore` files from a temp project tree
 //! and reporting per-path results. They use an explicit `HOME` override so the
-//! global `~/.devcleanignore` is never read from the real home directory.
+//! global `~/.offcutignore` is never read from the real home directory.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,15 +12,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn devclean() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_devclean"))
+fn offcut() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_offcut"))
 }
 
 fn unique_dir(label: &str) -> PathBuf {
     let mut d = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     d.push(format!(
-        "devclean-ignore-cli-{}-{}-{}",
+        "offcut-ignore-cli-{}-{}-{}",
         label,
         std::process::id(),
         n
@@ -38,9 +38,9 @@ fn write_file(dir: &Path, name: &str, contents: &str) {
     f.write_all(contents.as_bytes()).unwrap();
 }
 
-/// Run `devclean ignore <path>` inside `cwd`, returning the trimmed stdout.
+/// Run `offcut ignore <path>` inside `cwd`, returning the trimmed stdout.
 /// HOME is pointed at an empty temp dir so the child never reads the real
-/// `~/.devcleanignore`.
+/// `~/.offcutignore`.
 fn run_in(cwd: &Path, path: &str) -> (bool, String) {
     let home = unique_dir("home");
     let result = run_in_with_home(cwd, &home, path);
@@ -49,10 +49,10 @@ fn run_in(cwd: &Path, path: &str) -> (bool, String) {
 }
 
 /// Same as [`run_in`] but with a caller-controlled HOME, so a test can place a
-/// global `~/.devcleanignore` where the binary's own `dirs::home_dir()` lookup
+/// global `~/.offcutignore` where the binary's own `dirs::home_dir()` lookup
 /// will find it.
 fn run_in_with_home(cwd: &Path, home: &Path, path: &str) -> (bool, String) {
-    let out = devclean()
+    let out = offcut()
         .current_dir(cwd)
         .env("HOME", home)
         .arg("ignore")
@@ -67,10 +67,10 @@ fn run_in_with_home(cwd: &Path, home: &Path, path: &str) -> (bool, String) {
 #[test]
 fn ignore_subcommand_reports_ignored_and_not_ignored() {
     let root = unique_dir("basic");
-    write_file(&root, ".devcleanignore", "*.log\n");
+    write_file(&root, ".offcutignore", "*.log\n");
     let sub = root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    write_file(&sub, ".devcleanignore", "!keep.log\n");
+    write_file(&sub, ".offcutignore", "!keep.log\n");
 
     let (ok, out) = run_in(&root, "debug.log");
     assert!(ok, "{out}");
@@ -89,12 +89,12 @@ fn ignore_subcommand_reports_ignored_and_not_ignored() {
 fn ignore_subcommand_nested_precedence_overrides_global_anchoring() {
     let root = unique_dir("anchor");
     // Root-level anchored pattern ignores only top-level `build`.
-    write_file(&root, ".devcleanignore", "/build\n");
+    write_file(&root, ".offcutignore", "/build\n");
     let sub = root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
     // Nested file re-includes nothing but tests anchoring: /build in sub
     // matches sub/build, not sub/deep/build.
-    write_file(&sub, ".devcleanignore", "/local\n");
+    write_file(&sub, ".offcutignore", "/local\n");
 
     let (ok, out) = run_in(&root, "build");
     assert!(ok, "{out}");
@@ -114,16 +114,16 @@ fn ignore_subcommand_nested_precedence_overrides_global_anchoring() {
 #[test]
 fn ignore_subcommand_reads_the_real_global_ignore_file() {
     // The other tests point HOME at an empty dir, so nothing exercises
-    // `IgnoreSet::load`'s own `dirs::home_dir()` lookup of `~/.devcleanignore`.
+    // `IgnoreSet::load`'s own `dirs::home_dir()` lookup of `~/.offcutignore`.
     // A user's global file is half the feature, so cover the whole precedence
     // chain here: global (weakest) -> project root -> nested -> deepest.
     let home = unique_dir("global-home");
-    write_file(&home, ".devcleanignore", "# global rules\n*.bak\n/vendor\n");
+    write_file(&home, ".offcutignore", "# global rules\n*.bak\n/vendor\n");
 
     let root = unique_dir("global-project");
-    write_file(&root, ".devcleanignore", "*.log\nbuild/\n");
-    write_file(&root, "sub/.devcleanignore", "!important.log\n");
-    write_file(&root, "sub/deep/.devcleanignore", "important.log\n");
+    write_file(&root, ".offcutignore", "*.log\nbuild/\n");
+    write_file(&root, "sub/.offcutignore", "!important.log\n");
+    write_file(&root, "sub/deep/.offcutignore", "important.log\n");
     // `build/` is directory-only, so the path must really be a directory.
     std::fs::create_dir_all(root.join("build/nested")).unwrap();
     std::fs::create_dir_all(root.join("vendor")).unwrap();
@@ -156,11 +156,11 @@ fn ignore_subcommand_reads_the_real_global_ignore_file() {
 #[test]
 fn ignore_subcommand_reads_ignore_files_inside_node_modules() {
     // The load walk deliberately does not prune heavy build dirs: a
-    // `.devcleanignore` inside one is how a user pins something that cleaning
+    // `.offcutignore` inside one is how a user pins something that cleaning
     // would otherwise remove. Pruning would silently drop that protection.
     let home = unique_dir("nm-home");
     let root = unique_dir("nm-project");
-    write_file(&root, "node_modules/.devcleanignore", "/patched-pkg\n");
+    write_file(&root, "node_modules/.offcutignore", "/patched-pkg\n");
     std::fs::create_dir_all(root.join("node_modules/patched-pkg")).unwrap();
 
     let check = |path: &str, expected: &str| {

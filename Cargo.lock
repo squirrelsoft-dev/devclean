@@ -155,22 +155,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
-name = "devclean"
-version = "0.1.0"
-dependencies = [
- "clap",
- "dirs",
- "glob",
- "ignore",
- "owo-colors",
- "serde",
- "terminal_size",
- "toml",
- "unicode-width",
- "walkdir",
-]
-
-[[package]]
 name = "dirs"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -313,6 +297,22 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "offcut"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "glob",
+ "ignore",
+ "owo-colors",
+ "serde",
+ "terminal_size",
+ "toml",
+ "unicode-width",
+ "walkdir",
+]
 
 [[package]]
 name = "once_cell_polyfill"

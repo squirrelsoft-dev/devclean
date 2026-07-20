@@ -1,13 +1,13 @@
-//! Integration tests for the `devclean clean` subcommand (issues #7/#8).
+//! Integration tests for the `offcut clean` subcommand (issues #7/#8).
 //!
 //! Each test creates a real workspace root on disk, configures it, and runs
-//! the real `devclean` binary against it. `--dry-run` must never delete
+//! the real `offcut` binary against it. `--dry-run` must never delete
 //! anything (even combined with `--force`); a real run — interactive
 //! approvals piped over stdin, or `--force` — must delete exactly the safe
 //! and approved surfaced items while protected and unapproved items
 //! survive. We use an explicit `HOME`/`XDG_CONFIG_HOME` override so the
 //! child never picks up the developer's real config or global
-//! `~/.devcleanignore`.
+//! `~/.offcutignore`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ fn root_for(label: &str) -> PathBuf {
     let d = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let out = d.join(format!(
-        "devclean-clean-cli-{label}-{}-{n}",
+        "offcut-clean-cli-{label}-{}-{n}",
         std::process::id()
     ));
     std::fs::create_dir_all(&out).unwrap();
@@ -100,7 +100,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let exe = env!("CARGO_BIN_EXE_devclean");
+    let exe = env!("CARGO_BIN_EXE_offcut");
     let mut child = std::process::Command::new(exe)
         .args(args)
         .env("HOME", "/nonexistent-home")
@@ -121,7 +121,7 @@ where
 }
 
 /// A cleanable (status-5) project: committed + pushed, with untracked junk
-/// that is not devcleanignored. `devclean clean --dry-run` prints a preview of
+/// that is not offcutignored. `offcut clean --dry-run` prints a preview of
 /// each untracked item's classification and deletes nothing.
 #[test]
 fn clean_dry_run_prints_classifications_without_deleting() {
@@ -129,10 +129,10 @@ fn clean_dry_run_prints_classifications_without_deleting() {
     init_repo_with_commit(&root);
 
     // Untracked junk: a safe-list dir, a protected file, an ambiguous file.
-    // `.devcleanignore` is committed BEFORE the push so the repo stays
+    // `.offcutignore` is committed BEFORE the push so the repo stays
     // pushed (cleanable); committing after the push would make it "ahead 1".
-    std::fs::write(root.join(".devcleanignore"), "important.dat\n").unwrap();
-    git_in(&root, &["add", ".devcleanignore"]);
+    std::fs::write(root.join(".offcutignore"), "important.dat\n").unwrap();
+    git_in(&root, &["add", ".offcutignore"]);
     git_in(&root, &["commit", "-m", "ignore rules"]);
     add_pushed_remote(&root);
 
@@ -204,8 +204,8 @@ fn clean_force_dry_run_auto_approves_each_item() {
 fn clean_interactive_deletes_only_approved_items() {
     let root = root_for("interactive");
     init_repo_with_commit(&root);
-    std::fs::write(root.join(".devcleanignore"), "important.dat\n").unwrap();
-    git_in(&root, &["add", ".devcleanignore"]);
+    std::fs::write(root.join(".offcutignore"), "important.dat\n").unwrap();
+    git_in(&root, &["add", ".offcutignore"]);
     git_in(&root, &["commit", "-m", "ignore rules"]);
     add_pushed_remote(&root);
 
@@ -262,8 +262,8 @@ fn clean_interactive_deletes_only_approved_items() {
 fn clean_force_deletes_without_prompting() {
     let root = root_for("force-real");
     init_repo_with_commit(&root);
-    std::fs::write(root.join(".devcleanignore"), "important.dat\n").unwrap();
-    git_in(&root, &["add", ".devcleanignore"]);
+    std::fs::write(root.join(".offcutignore"), "important.dat\n").unwrap();
+    git_in(&root, &["add", ".offcutignore"]);
     git_in(&root, &["commit", "-m", "ignore rules"]);
     add_pushed_remote(&root);
 
@@ -299,7 +299,7 @@ fn clean_force_deletes_without_prompting() {
     );
 }
 
-/// `devclean clean --dry-run` skips non-cleanable projects (nothing
+/// `offcut clean --dry-run` skips non-cleanable projects (nothing
 /// printed for them unless --verbose) and still deletes nothing.
 #[test]
 fn clean_dry_run_skips_non_cleanable_projects() {
@@ -354,7 +354,7 @@ fn clean_dry_run_shows_per_project_and_aggregate_sizes() {
     );
 }
 
-/// Issue #18: `devclean list` shows the same per-project size on each
+/// Issue #18: `offcut list` shows the same per-project size on each
 /// cleanable row plus the aggregate in the summary line.
 #[test]
 fn list_shows_per_project_and_aggregate_sizes() {

@@ -2,9 +2,9 @@
 //! and cleaning phases (issue #30).
 //!
 //! Each test creates a real workspace root on disk, configures it, and runs
-//! the real `devclean` binary against it. The printed output is the assertion
+//! the real `offcut` binary against it. The printed output is the assertion
 //! surface. We use an explicit `HOME` override so the child never picks up
-//! the developer's real `~/.config/devclean/config.toml`.
+//! the developer's real `~/.config/offcut/config.toml`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ fn root_for(label: &str) -> PathBuf {
     let d = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let out = d.join(format!(
-        "devclean-progress-cli-{label}-{}-{n}",
+        "offcut-progress-cli-{label}-{}-{n}",
         std::process::id()
     ));
     std::fs::create_dir_all(&out).unwrap();
@@ -82,13 +82,13 @@ fn add_pushed_remote(root: &Path) -> PathBuf {
     bare
 }
 
-/// Run the devclean binary with the given args, returning stdout.
+/// Run the offcut binary with the given args, returning stdout.
 fn run<I, S>(args: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let exe = env!("CARGO_BIN_EXE_devclean");
+    let exe = env!("CARGO_BIN_EXE_offcut");
     let child = std::process::Command::new(exe)
         .args(args)
         .env("HOME", "/nonexistent-home")
