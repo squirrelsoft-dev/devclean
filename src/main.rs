@@ -703,7 +703,12 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 println!(
                     "{}",
-                    output::format_project_row(path, *status, None, per_project_size[idx].as_deref())
+                    output::format_project_row(
+                        path,
+                        *status,
+                        None,
+                        per_project_size[idx].as_deref()
+                    )
                 );
                 cleanable_items.push((path.clone(), items));
                 cleanable_meta.push((idx, safe_set));
