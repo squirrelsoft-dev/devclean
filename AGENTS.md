@@ -16,6 +16,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Build, run, and test commands: see `README.md`.
 - `Cargo.lock` is committed (binary crate); `.gitignore` deliberately omits it.
 
+## Release
+
+- `Cargo.toml` package `version` is the single release version source. The
+  tag-triggered workflow in `.github/workflows/release.yml` requires release
+  tags to match it exactly as `vX.Y.Z`, then builds/package-checks the release.
+- Release archives and checksums are documented in `README.md`; macOS binaries
+  are currently unsigned/unnotarized.
+
 ## Config surface
 
 - User-facing config docs (file location, TOML keys, defaults, CLI flags) live in `README.md`; the resolution logic is `config::default_config_path`. Output formatting lives in `src/output.rs`.

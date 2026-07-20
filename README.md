@@ -30,6 +30,19 @@ cargo run -- clean
 cargo test
 ```
 
+## Release
+
+`Cargo.toml`'s package `version` is the release version source of truth. To
+release, merge the version bump, create a tag named `vX.Y.Z` from that commit,
+and push the tag. The tag-triggered GitHub Actions release workflow verifies
+that the tag exactly matches `Cargo.toml`, runs `cargo test --locked`, builds
+stripped archives for macOS arm64, macOS x86_64, Linux x86_64, and Linux
+aarch64, writes SHA256 checksums, and publishes a GitHub Release with generated
+notes.
+
+Release archives are named `devclean-vX.Y.Z-<target>.tar.gz` and each has a
+matching `.sha256` file. macOS binaries are currently unsigned and unnotarized.
+
 ## CLI surface
 
 Each subcommand is optional — running with no subcommand runs the default

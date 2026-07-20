@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify-version:
+    name: Verify release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Verify tag matches Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME:?missing GITHUB_REF_NAME}"
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python3 -c 'import json, sys; data = json.load(sys.stdin); members = set(data["workspace_default_members"]); matches = [pkg for pkg in data["packages"] if pkg["id"] in members and pkg["name"] == "devclean"]; len(matches) == 1 or sys.exit(f"expected exactly one devclean workspace package, found {len(matches)}"); print(matches[0]["version"])'
+          )"
+          expected="v${version}"
+
+          if [[ "${tag}" != "${expected}" ]]; then
+            echo "Release tag ${tag} does not match Cargo.toml version ${version}; expected ${expected}." >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    needs: verify-version
+    steps:
+      - name: Checkout
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs:
+      - verify-version
+      - test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+            strip: strip
+            apt_packages: ""
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            strip: strip
+            apt_packages: ""
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            strip: strip
+            apt_packages: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04
+            strip: aarch64-linux-gnu-strip
+            apt_packages: gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Linux cross compiler
+        if: ${{ runner.os == 'Linux' && matrix.apt_packages != '' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ${{ matrix.apt_packages }}
+
+      - name: Install Rust target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package archive and checksum
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          STRIP: ${{ matrix.strip }}
+        run: |
+          set -euo pipefail
+
+          archive="devclean-v${VERSION}-${TARGET}.tar.gz"
+          mkdir -p staging dist
+          cp "target/${TARGET}/release/devclean" staging/devclean
+          "${STRIP}" staging/devclean
+          chmod 755 staging/devclean
+
+          tar -C staging -czf "dist/${archive}" devclean
+          (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+          file staging/devclean
+
+      - name: Upload release asset
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - verify-version
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums
+        run: |
+          set -euo pipefail
+          for checksum in dist/*.sha256; do
+            (cd dist && shasum -a 256 --check "$(basename "${checksum}")")
+          done
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "devclean ${VERSION}" \
+            --generate-notes \
+            --verify-tag
