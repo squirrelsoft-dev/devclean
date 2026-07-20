@@ -65,7 +65,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Disk savings (issue #18)
 
-- `src/disk.rs` computes per-project reclaimable size (each cleanable project's `Safe` + `Surfaced` items summed via `WalkDir`, `symlink_metadata` for symlinks, tolerant of permission-denied paths and non-UTF-8 names).
+- `src/disk.rs` computes per-project reclaimable size (each cleanable project's `Safe` + `Surfaced` items summed via `WalkDir`; file sizes via `fs::metadata` — `stat`, O(1) per file, contents never read; `symlink_metadata` for symlinks; tolerant of permission-denied paths and non-UTF-8 names).
 - `src/output.rs` owns the display shape: `format_project_row` carries an optional size on each cleanable row (`path — cleanable (~2.3 GB)`); non-cleanable rows carry no size. `format_summary` carries an optional cleanable-count and an optional aggregate size (`listing: N project(s), M cleanable, ~X reclaimable`).
 - Single-pass sizing in `run_listing`: per-project bytes are stored in `per_project_bytes: Vec<Option<u64>>` alongside `per_project_size: Vec<Option<String>>`; the aggregate `total_reclaimable` is the sum of those already-computed bytes, so `dry_run` and `compute_reclaimable_size` each run exactly once per cleanable project. No second walk for the total.
 - `--dry-run` shows the same sizes without deleting anything; the computation reuses `clean::dry_run`.
@@ -79,6 +79,3 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file or command instead.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
-
-**Note:** Sizing now uses `stat` (O(1) per file) for fast disk‑savings estimation.
-

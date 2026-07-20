@@ -215,6 +215,8 @@ The aggregate across all cleanable projects is shown in the summary line:
 an estimate — the walk tolerates permission-denied paths (counted as 0) and
 non-UTF-8 names without aborting the listing. Sizes are 1024-based
 KB / MB / GB and each symlink counts its own size only (no target recursion).
+Each file's size comes from its metadata (`stat`, O(1) per file) — contents
+are never read, so sizing stays fast even for large build artifacts.
 
 Both `devclean list` and `devclean clean` (including `--dry-run` and
 `--force --dry-run`) carry the same per-project and total sizes — the
@@ -429,7 +431,4 @@ For example:
 ```sh
 devclean --config ./devclean.toml --workspace ~/code --force clean
 devclean --workspace ~/code --dry-run classification
-
-**Note:** Sizing now uses `stat` (O(1) per file) for fast disk‑savings estimation.
-
 ```

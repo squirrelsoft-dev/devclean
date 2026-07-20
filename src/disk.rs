@@ -25,7 +25,6 @@
 //! cleanable project's size into an aggregate for the summary line).
 
 use std::fs::{self, File};
-
 use std::path::Path;
 
 use crate::clean::Classification;
