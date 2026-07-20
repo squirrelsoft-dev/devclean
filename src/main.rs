@@ -603,29 +603,62 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // safe set built here, so execution below does not rebuild or re-find either.
     // Each row uses the formatted shape with color gating on TTY.
     // The header is prefixed with "clean:" — this is the destructive run, so
-    // the reader knows which flow is about to execute. The aggregate
-    // reclaimable across all cleanable projects is computed below from
-    // each cleanable project's raw size, formatted once for the summary.
+    // the reader knows which flow is about to execute.
     let cleanable_count = all_projects
         .iter()
         .filter(|&(_, status, _)| *status == classify::Status::Cleanable)
         .count();
-    // Each cleanable project's reclaimable size is summed into an
-    // aggregate — the per-project rows below each carry their own size
-    // too, but the total is what the user actually wants.
-    let total_reclaimable: u64 = all_projects
-        .iter()
-        .filter(|&(_, status, _)| *status == classify::Status::Cleanable)
-        .filter_map(|(path, _, ignore_set)| {
+    // Per-project sizing in a single pass: raw bytes computed once per cleanable
+    // project, summed into the aggregate total. Mirrors `run_listing`'s pattern.
+    let mut per_project_size: Vec<Option<String>> = vec![None; all_projects.len()];
+    let mut per_project_bytes: Vec<Option<u64>> = vec![None; all_projects.len()];
+    {
+        let cleanable_indices: Vec<usize> = all_projects
+            .iter()
+            .enumerate()
+            .filter(|&(_, (_, status, _))| *status == classify::Status::Cleanable)
+            .map(|(i, _)| i)
+            .collect();
+        let m = cleanable_indices.len();
+        let mut progress = progress::ProgressWriter::new(std::io::stdout());
+        for (i, &idx) in cleanable_indices.iter().enumerate() {
+            let path = &all_projects[idx].0;
+            progress.update_phase("sizing", i + 1, m, path);
             let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
                 Ok(s) => s,
-                Err(_) => return None,
+                Err(e) => {
+                    progress.clear();
+                    eprintln!(
+                        "warning: {}: skipped, could not build safe-to-delete set: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
             };
-            clean::dry_run(path, ignore_set, &safe_set)
-                .ok()
-                .and_then(|items| disk::compute_reclaimable_size(path, &items).ok())
-        })
-        .sum();
+            let ignore_set = &all_projects[idx].2;
+            match clean::dry_run(path, ignore_set, &safe_set) {
+                Ok(items) => match disk::compute_reclaimable_size(path, &items) {
+                    Ok(bytes) => {
+                        per_project_bytes[idx] = Some(bytes);
+                        per_project_size[idx] = Some(disk::format_size(bytes));
+                    }
+                    Err(e) => {
+                        progress.clear();
+                        eprintln!(
+                            "warning: {}: could not compute reclaimable size: {e}",
+                            path.display()
+                        );
+                    }
+                },
+                Err(e) => {
+                    progress.clear();
+                    eprintln!("warning: {}: dry_run failed: {e}", path.display());
+                }
+            }
+        }
+        progress.finish();
+    }
+    let total_reclaimable: u64 = per_project_bytes.iter().filter_map(|opt| *opt).sum();
     let total_reclaimable_str = if total_reclaimable > 0 {
         Some(disk::format_size(total_reclaimable))
     } else {
@@ -672,19 +705,9 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                let size = match disk::compute_reclaimable_size(path, &items) {
-                    Ok(bytes) => Some(disk::format_size(bytes)),
-                    Err(e) => {
-                        eprintln!(
-                            "warning: {}: could not compute reclaimable size: {e}",
-                            path.display()
-                        );
-                        None
-                    }
-                };
                 println!(
                     "{}",
-                    output::format_project_row(path, *status, None, size.as_deref())
+                    output::format_project_row(path, *status, None, per_project_size[idx].as_deref())
                 );
                 cleanable_items.push((path.clone(), items));
                 cleanable_meta.push((idx, safe_set));
