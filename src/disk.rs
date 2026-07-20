@@ -25,7 +25,7 @@
 //! cleanable project's size into an aggregate for the summary line).
 
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
+
 use std::path::Path;
 
 use crate::clean::Classification;
@@ -109,13 +109,21 @@ fn file_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
             match f.metadata() {
                 Ok(meta) => Ok(meta.len()),
                 Err(e) => {
-                    eprintln!("warning: {}: could not stat after opening: {}", path.display(), e);
+                    eprintln!(
+                        "warning: {}: could not stat after opening: {}",
+                        path.display(),
+                        e
+                    );
                     Ok(0)
                 }
             }
         }
         Err(e) => {
-            eprintln!("warning: {}: could not open for size: {}", path.display(), e);
+            eprintln!(
+                "warning: {}: could not open for size: {}",
+                path.display(),
+                e
+            );
             Ok(0)
         }
     }

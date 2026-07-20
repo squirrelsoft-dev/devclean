@@ -429,4 +429,7 @@ For example:
 ```sh
 devclean --config ./devclean.toml --workspace ~/code --force clean
 devclean --workspace ~/code --dry-run classification
+
+**Note:** Sizing now uses `stat` (O(1) per file) for fast disk‑savings estimation.
+
 ```
