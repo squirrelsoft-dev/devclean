@@ -18,11 +18,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Release
 
-- `Cargo.toml` package `version` is the single release version source. The
-  tag-triggered workflow in `.github/workflows/release.yml` requires release
-  tags to match it exactly as `vX.Y.Z`, then builds/package-checks the release.
-- Release archives and checksums are documented in `README.md`; macOS binaries
-  are currently unsigned/unnotarized.
+- `Cargo.toml` package `version` is the single release version source: the
+  tag-triggered workflow in `.github/workflows/release.yml` hard-fails unless
+  the pushed tag is exactly `v<Cargo.toml version>`. Never bump a version
+  anywhere else.
+- Release operation details (tagging flow, build targets, archive naming,
+  checksums, macOS signing status): see `README.md` "Release".
 
 ## Config surface
 
