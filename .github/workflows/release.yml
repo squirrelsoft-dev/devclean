@@ -160,6 +160,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.verify-version.outputs.version }}
         run: |
           set -euo pipefail
