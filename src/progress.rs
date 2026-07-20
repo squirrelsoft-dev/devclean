@@ -1,16 +1,17 @@
-//! Live single-line progress indicator for discovery, classification, and
-//! cleaning phases.
+//! Live single-line progress indicator for discovery, classification,
+//! sizing, and cleaning phases.
 //!
 //! Each time walk_root visits a directory, this module renders the current
 //! path on one line that overwrites itself in place via a carriage return
 //! (CR), so the display never scrolls -- a TUI-style spinner that tells the
 //! user devclean is working on a large workspace rather than appearing hung.
 //!
-//! The same mechanism also emits counted phase labels during classification
-//! and cleaning: each project classified or each cleanable project cleaned
-//! gets `classifying N/M: <project>` or `cleaning N/M: <project>` rendered
-//! in place, so the screen is never blank during the long git-classification
-//! stretch. The discovery walk keeps its own `walking: <path>` line.
+//! The same mechanism also emits counted phase labels during classification,
+//! sizing, and cleaning: each project classified, each cleanable project
+//! sized, or each cleanable project cleaned gets `classifying N/M: <project>`,
+//! `sizing N/M: <project>`, or `cleaning N/M: <project>` rendered in place,
+//! so the screen is never blank during the long git-classification stretch.
+//! The discovery walk keeps its own `walking: <path>` line.
 //!
 //! ## TTY gating
 //!
