@@ -1,9 +1,9 @@
-//! Integration tests for the `devclean classification` subcommand (issue #6).
+//! Integration tests for the `offcut classification` subcommand (issue #6).
 //!
 //! Each test creates a real workspace root on disk, configures it, and runs the
-//! real `devclean` binary against it. The printed report is the assertion
+//! real `offcut` binary against it. The printed report is the assertion
 //! surface. We use an explicit `HOME` override so the child never picks up the
-//! developer's real `~/.config/devclean/config.toml`.
+//! developer's real `~/.config/offcut/config.toml`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ fn root_for(label: &str) -> PathBuf {
     let d = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let out = d.join(format!(
-        "devclean-classify-cli-{label}-{}-{n}",
+        "offcut-classify-cli-{label}-{}-{n}",
         std::process::id()
     ));
     std::fs::create_dir_all(&out).unwrap();
@@ -99,7 +99,7 @@ fn add_pushed_remote(root: &Path) -> PathBuf {
     bare
 }
 
-/// Run the devclean binary with the given args, returning stdout. The child
+/// Run the offcut binary with the given args, returning stdout. The child
 /// inherits HOME so the explicit TOML file is found at the right location.
 /// Generic over the arg iterable so call sites can pass a plain array literal
 /// (`run(["--config", p, "classification"])`) without tripping clippy's
@@ -109,7 +109,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let exe = env!("CARGO_BIN_EXE_devclean");
+    let exe = env!("CARGO_BIN_EXE_offcut");
     let child = std::process::Command::new(exe)
         .args(args)
         .env("HOME", "/nonexistent-home")
@@ -131,7 +131,7 @@ fn classification_reports_each_project_with_status_label() {
     let home = root_for("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
-    // Point devclean at the explicit config.
+    // Point offcut at the explicit config.
     let out = run(["--config", config.to_str().unwrap(), "classification"]);
     assert!(
         out.contains("no-git") || out.contains("no-remote") || out.contains("wip"),
@@ -205,7 +205,7 @@ fn classification_sorts_by_status() {
 /// single workspace, classified in one run. This is the report a user actually
 /// sees, so it pins down the three things the other tests leave implicit —
 /// that `cleanable` and `clean` are reachable through the CLI at all, that
-/// `cleanable` is separated from `clean` by the devcleanignore matcher rather
+/// `cleanable` is separated from `clean` by the offcutignore matcher rather
 /// than the project's own `.gitignore`, and that precedence holds where it
 /// matters most: a repo with BOTH uncommitted work and untracked junk reports
 /// `wip`, never `cleanable`.
@@ -242,7 +242,7 @@ fn classification_reports_every_status_in_severity_order() {
     std::fs::write(p4.join("node_modules/junk.js"), "junk").unwrap();
 
     // 5 cleanable: pushed with a clean index; the junk is gitignored by the
-    // PROJECT but not devcleanignored, so devclean must still see it.
+    // PROJECT but not offcutignored, so offcut must still see it.
     let p5 = proj("p5");
     init_repo_with_commit(&p5);
     std::fs::write(p5.join(".gitignore"), "node_modules\n").unwrap();
@@ -252,13 +252,13 @@ fn classification_reports_every_status_in_severity_order() {
     std::fs::create_dir_all(p5.join("node_modules")).unwrap();
     std::fs::write(p5.join("node_modules/junk.js"), "junk").unwrap();
 
-    // 6 clean: pushed, and its only untracked path IS devcleanignored, i.e.
+    // 6 clean: pushed, and its only untracked path IS offcutignored, i.e.
     // protected — so it is clean, not cleanable.
     let p6 = proj("p6");
     init_repo_with_commit(&p6);
-    std::fs::write(p6.join(".devcleanignore"), "vendor/\n").unwrap();
-    git_in(&p6, &["add", ".devcleanignore"]);
-    git_in(&p6, &["commit", "-m", "devcleanignore"]);
+    std::fs::write(p6.join(".offcutignore"), "vendor/\n").unwrap();
+    git_in(&p6, &["add", ".offcutignore"]);
+    git_in(&p6, &["commit", "-m", "offcutignore"]);
     add_pushed_remote(&p6);
     std::fs::create_dir_all(p6.join("vendor")).unwrap();
     std::fs::write(p6.join("vendor/lib.rb"), "protected").unwrap();

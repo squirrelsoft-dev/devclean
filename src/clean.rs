@@ -1,4 +1,4 @@
-//! Cleaning engine for devclean (issue #7).
+//! Cleaning engine for offcut (issue #7).
 //!
 //! For each cleanable (status-5) project, enumerate untracked items,
 //! partition them into three classes, surface the ambiguous ones for
@@ -10,7 +10,7 @@
 //!
 //! | class       | condition                       | outcome              |
 //! |-------------|---------------------------------|----------------------|
-//! | `Protected` | `.devcleanignore` match         | never removed        |
+//! | `Protected` | `.offcutignore` match         | never removed        |
 //! | `Safe`      | safe-to-delete catalog match    | auto-removed         |
 //! | `Surfaced`  | everything else                 | per-project approval |
 //!
@@ -24,9 +24,9 @@
 //!
 //! ## Safety contract
 //!
-//! devclean only ever deletes safe-list items or items the user approves. It
-//! never silently deletes ambiguous items. `.devcleanignored` items are
-//! always protected.
+//! offcut only ever deletes safe-list items or items the user approves. It
+//! never silently deletes ambiguous items. `.offcutignore`-matched items
+//! are always protected.
 //!
 //! ## Exclusion list
 //!
@@ -39,8 +39,8 @@
 //!
 //! `Safe` and approved-`Surfaced` items contribute nothing, so `git clean`
 //! deletes them. Anchoring each exclusion at the root (rather than re-using
-//! each `.devcleanignore` layer's source pattern verbatim) is what makes
-//! nested-layer rules correct: a `/foo` rule in `<root>/sub/.devcleanignore`
+//! each `.offcutignore` layer's source pattern verbatim) is what makes
+//! nested-layer rules correct: a `/foo` rule in `<root>/sub/.offcutignore`
 //! protects `sub/foo`, and the exclusion `/sub/foo` excludes exactly that
 //! path. Re-using the layer pattern `/foo` verbatim would instead exclude
 //! `<root>/foo` — the wrong path. The original zshrc only read the global
@@ -51,12 +51,12 @@
 //!
 //! Untracked items are enumerated via `git ls-files --others --directory -z`
 //! (without `--exclude-standard`, deliberately — build junk like
-//! `node_modules`/`target/` is gitignored by the *project*, but devclean
+//! `node_modules`/`target/` is gitignored by the *project*, but offcut
 //! exists to clean it, so gitignored files must stay visible; the
-//! `.devcleanignore` matcher is the sole judge of protection). Each entry is
+//! `.offcutignore` matcher is the sole judge of protection). Each entry is
 //! a relative path; directories end with `/`. Empty untracked directories
 //! are enumerated too (no `--no-empty-directory`): an empty dir is
-//! classified like any other item — a `.devcleanignore`-matching empty dir
+//! classified like any other item — a `.offcutignore`-matching empty dir
 //! is `Protected` (excluded, never deleted), a safe-list empty dir is
 //! `Safe`, and any other empty dir is `Surfaced` for approval. Omitting
 //! empty dirs from classification would let `git clean -xfd` delete them
@@ -77,7 +77,7 @@
 //!
 //! The re-listing enumerates files only, so it is paired with an on-disk walk
 //! that discovers nested file-less directories (directories whose whole
-//! subtree contains no files): a `.devcleanignore`-matching directory is
+//! subtree contains no files): a `.offcutignore`-matching directory is
 //! recorded once as `Protected`, and each remaining maximal file-less
 //! directory is recorded as `Safe` or `Surfaced`. Without this, a nested
 //! empty directory would get no classification and no exclusion, and
@@ -114,7 +114,7 @@ use crate::safelist::SafeSet;
 /// Classification of one untracked item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {
-    /// `.devcleanignore` match (or absolute-path fail-safe): protected, never
+    /// `.offcutignore` match (or absolute-path fail-safe): protected, never
     /// removed.
     Protected,
     /// safe-to-delete catalog match: auto-removed (not excluded).
@@ -231,15 +231,15 @@ fn git_cmd(project_path: &Path, args: &[&str]) -> Result<String, String> {
 /// Enumerate untracked items for `project_path` and classify each one.
 ///
 /// Runs `git ls-files --others --directory -z` (no `--exclude-standard`:
-/// gitignored-by-project build junk must stay visible so devclean can clean
-/// it; `.devcleanignore` is the sole protection judge). Empty untracked
+/// gitignored-by-project build junk must stay visible so offcut can clean
+/// it; `.offcutignore` is the sole protection judge). Empty untracked
 /// directories are included (no `--no-empty-directory`) so they are
 /// classified like any other item rather than silently deleted by
 /// `git clean -xfd`.
 ///
 /// Per-item precedence:
 /// 1. absolute path → `Protected` (fail-safe, never deleted);
-/// 2. `.devcleanignore` match → `Protected`;
+/// 2. `.offcutignore` match → `Protected`;
 /// 3. directory that is not protected and not safe → recurse into its files
 ///    so content patterns (e.g. `*.js`) still match each file inside; if the
 ///    directory is empty (no files to recurse into), record the directory
@@ -275,7 +275,7 @@ pub fn enumerate_untracked(
             continue;
         }
 
-        // 2. .devcleanignore match → protected.
+        // 2. .offcutignore match → protected.
         if ignore_set.is_ignored_path(&rel_path, is_dir) {
             items.push(CleanItem {
                 rel_path,
@@ -400,9 +400,9 @@ fn enumerate_subtree_files(
 /// directories whose subtree contains no files. `git ls-files --others`
 /// enumerates files only, so such directories would otherwise get no
 /// classification and no exclusion, and `git clean -xfd` would silently
-/// delete them — including `.devcleanignore`-protected ones.
+/// delete them — including `.offcutignore`-protected ones.
 ///
-/// A `.devcleanignore`-matching directory is recorded once as `Protected`
+/// A `.offcutignore`-matching directory is recorded once as `Protected`
 /// without recursing (parent-match semantics; one exclusion covers the whole
 /// tree) and counts as kept content, so no ancestor is treated as file-less
 /// around it. Each remaining *maximal* file-less directory (its whole subtree
@@ -565,7 +565,7 @@ mod tests {
         let mut d = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         d.push(format!(
-            "devclean-clean-{}-{}-{}",
+            "offcut-clean-{}-{}-{}",
             label,
             std::process::id(),
             n
@@ -626,12 +626,12 @@ mod tests {
         SafeSet::merge(root, BUILT_IN_DEFAULTS, &[]).unwrap()
     }
 
-    /// An untracked file matching a `.devcleanignore` rule is classified
+    /// An untracked file matching a `.offcutignore` rule is classified
     /// `Protected`.
     #[test]
-    fn devcleanignored_file_is_protected() {
+    fn offcutignored_file_is_protected() {
         let root = fixture("protected_file");
-        write_file(&root, ".devcleanignore", "*.log\n");
+        write_file(&root, ".offcutignore", "*.log\n");
         write_file(&root, "debug.log", "junk");
 
         let ignore_set = IgnoreSet::load(&root).unwrap();
@@ -647,13 +647,13 @@ mod tests {
         );
     }
 
-    /// An untracked directory matching a `.devcleanignore` rule is recorded
+    /// An untracked directory matching a `.offcutignore` rule is recorded
     /// once as `Protected` (its contents are protected by parent-match; one
     /// exclusion covers the whole tree).
     #[test]
-    fn devcleanignored_directory_is_protected_once() {
+    fn offcutignored_directory_is_protected_once() {
         let root = fixture("protected_dir");
-        write_file(&root, ".devcleanignore", "build/\n");
+        write_file(&root, ".offcutignore", "build/\n");
         write_file(&root, "build/out.o", "junk");
         write_file(&root, "build/deep/nested.o", "junk");
 
@@ -721,19 +721,19 @@ mod tests {
     #[test]
     fn absolute_path_is_never_selected_for_deletion() {
         // Direct unit check: classify an absolute path as protected.
-        let abs = Path::new("/tmp/devclean-noise");
+        let abs = Path::new("/tmp/offcut-noise");
         assert!(abs.has_root());
         // The fail-safe lives in enumerate_untracked; verify via
         // build_exclusions that a hand-constructed absolute Protected item is
         // excluded (kept), never deleted.
         let items = vec![CleanItem {
-            rel_path: PathBuf::from("/tmp/devclean-noise"),
+            rel_path: PathBuf::from("/tmp/offcut-noise"),
             is_dir: false,
             classification: Classification::Protected,
         }];
         let excl = build_exclusions(&items, &[], false);
         assert!(
-            excl.iter().any(|e| e == "//tmp/devclean-noise"),
+            excl.iter().any(|e| e == "//tmp/offcut-noise"),
             "absolute protected path should be excluded: {:?}",
             excl,
         );
@@ -832,8 +832,8 @@ mod tests {
     #[test]
     fn clean_keeps_protected_file_with_glob_metacharacters_in_name() {
         let root = fixture("glob_escape");
-        write_file(&root, ".devcleanignore", "important*\n");
-        git_run(&root, &["add", ".devcleanignore"]);
+        write_file(&root, ".offcutignore", "important*\n");
+        git_run(&root, &["add", ".offcutignore"]);
         git_run(&root, &["commit", "-m", "ignore rules"]);
         write_file(&root, "important [backup].dat", "keep me");
         write_file(&root, "ambiguous.tmp", "surfaced junk");
@@ -873,13 +873,13 @@ mod tests {
 
     /// Content-pattern granularity: an untracked directory that is not
     /// protected as a whole still has its files matched against
-    /// `.devcleanignore` content patterns. A `*.js` rule protects
+    /// `.offcutignore` content patterns. A `*.js` rule protects
     /// `junk/keep.js` inside an untracked `junk/` directory, while
     /// `junk/other.txt` is surfaced.
     #[test]
     fn content_patterns_apply_inside_untracked_directories() {
         let root = fixture("content_patterns");
-        write_file(&root, ".devcleanignore", "*.js\n");
+        write_file(&root, ".offcutignore", "*.js\n");
         write_file(&root, "junk/keep.js", "js");
         write_file(&root, "junk/other.txt", "txt");
 
@@ -911,8 +911,8 @@ mod tests {
     #[test]
     fn clean_force_removes_safe_and_surfaced_keeps_protected() {
         let root = fixture("clean_force");
-        write_file(&root, ".devcleanignore", "important.dat\n");
-        git_run(&root, &["add", ".devcleanignore"]);
+        write_file(&root, ".offcutignore", "important.dat\n");
+        git_run(&root, &["add", ".offcutignore"]);
         git_run(&root, &["commit", "-m", "ignore rules"]);
         write_file(&root, "important.dat", "keep me");
         write_file(&root, "target/debugbin", "safe junk");
@@ -934,20 +934,20 @@ mod tests {
         assert!(!root.join("ambiguous.tmp").exists());
     }
 
-    /// An empty untracked directory matching `.devcleanignore` is classified
+    /// An empty untracked directory matching `.offcutignore` is classified
     /// `Protected` (excluded, never deleted) — not silently removed by
     /// `git clean -xfd`. Empty dirs flow through the same classification as
     /// other items (the empty-dir-unclassified-deletion safety fix).
     #[test]
-    fn empty_devcleanignored_directory_is_protected() {
+    fn empty_offcutignored_directory_is_protected() {
         let root = fixture("empty_protected_dir");
         write_file(
             &root,
-            ".devcleanignore",
+            ".offcutignore",
             "keepempty/
 ",
         );
-        git_run(&root, &["add", ".devcleanignore"]);
+        git_run(&root, &["add", ".offcutignore"]);
         git_run(&root, &["commit", "-m", "ignore rules"]);
         fs::create_dir_all(root.join("keepempty")).unwrap();
 
@@ -1002,18 +1002,18 @@ mod tests {
     }
 
     /// End-to-end empty-dir safety: `clean` with `force = true` removes an
-    /// empty surfaced directory but keeps an empty `.devcleanignore`-protected
+    /// empty surfaced directory but keeps an empty `.offcutignore`-protected
     /// directory.
     #[test]
     fn clean_force_keeps_empty_protected_dir_removes_empty_surfaced_dir() {
         let root = fixture("empty_dir_e2e");
         write_file(
             &root,
-            ".devcleanignore",
+            ".offcutignore",
             "keepempty/
 ",
         );
-        git_run(&root, &["add", ".devcleanignore"]);
+        git_run(&root, &["add", ".offcutignore"]);
         git_run(&root, &["commit", "-m", "ignore rules"]);
         fs::create_dir_all(root.join("keepempty")).unwrap();
         fs::create_dir_all(root.join("emptyjunk")).unwrap();
@@ -1034,14 +1034,14 @@ mod tests {
 
     /// Nested empty directories inside a re-listed untracked directory flow
     /// through classification instead of escaping enumeration: a
-    /// `.devcleanignore`-matching one is `Protected`, any other file-less one
+    /// `.offcutignore`-matching one is `Protected`, any other file-less one
     /// is `Surfaced`, and only the maximal file-less directory is recorded
     /// (its file-less children are subsumed).
     #[test]
     fn nested_empty_directories_are_classified() {
         let root = fixture("nested_empty_dirs");
-        write_file(&root, ".devcleanignore", "keepempty/\n");
-        git_run(&root, &["add", ".devcleanignore"]);
+        write_file(&root, ".offcutignore", "keepempty/\n");
+        git_run(&root, &["add", ".offcutignore"]);
         git_run(&root, &["commit", "-m", "ignore rules"]);
         write_file(&root, "junk/data.tmp", "junk");
         fs::create_dir_all(root.join("junk/keepempty")).unwrap();
@@ -1060,7 +1060,7 @@ mod tests {
         assert_eq!(
             by_class("junk/keepempty"),
             Some(Classification::Protected),
-            "nested empty devcleanignored dir should be Protected: {items:?}",
+            "nested empty offcutignored dir should be Protected: {items:?}",
         );
         assert_eq!(
             by_class("junk/emptyjunk"),
@@ -1080,14 +1080,14 @@ mod tests {
     }
 
     /// End-to-end nested empty-dir safety: `clean` with `force = true` keeps
-    /// a `.devcleanignore`-protected empty directory nested inside a
+    /// a `.offcutignore`-protected empty directory nested inside a
     /// re-listed untracked directory, while removing that directory's junk
     /// files and its unprotected empty siblings.
     #[test]
     fn clean_force_keeps_nested_protected_empty_dir() {
         let root = fixture("nested_empty_e2e");
-        write_file(&root, ".devcleanignore", "keepempty/\n");
-        git_run(&root, &["add", ".devcleanignore"]);
+        write_file(&root, ".offcutignore", "keepempty/\n");
+        git_run(&root, &["add", ".offcutignore"]);
         git_run(&root, &["commit", "-m", "ignore rules"]);
         write_file(&root, "junk/data.tmp", "junk");
         fs::create_dir_all(root.join("junk/keepempty")).unwrap();

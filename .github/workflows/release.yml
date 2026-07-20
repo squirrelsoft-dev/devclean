@@ -38,7 +38,7 @@ jobs:
           tag="${GITHUB_REF_NAME:?missing GITHUB_REF_NAME}"
           version="$(
             cargo metadata --locked --no-deps --format-version 1 |
-              python3 -c 'import json, sys; data = json.load(sys.stdin); members = set(data["workspace_default_members"]); matches = [pkg for pkg in data["packages"] if pkg["id"] in members and pkg["name"] == "devclean"]; len(matches) == 1 or sys.exit(f"expected exactly one devclean workspace package, found {len(matches)}"); print(matches[0]["version"])'
+              python3 -c 'import json, sys; data = json.load(sys.stdin); members = set(data["workspace_default_members"]); matches = [pkg for pkg in data["packages"] if pkg["id"] in members and pkg["name"] == "offcut"]; len(matches) == 1 or sys.exit(f"expected exactly one offcut workspace package, found {len(matches)}"); print(matches[0]["version"])'
           )"
           expected="v${version}"
 
@@ -115,15 +115,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          archive="devclean-v${VERSION}-${TARGET}.tar.gz"
+          archive="offcut-v${VERSION}-${TARGET}.tar.gz"
           mkdir -p staging dist
-          cp "target/${TARGET}/release/devclean" staging/devclean
-          "${STRIP}" staging/devclean
-          chmod 755 staging/devclean
+          cp "target/${TARGET}/release/offcut" staging/offcut
+          "${STRIP}" staging/offcut
+          chmod 755 staging/offcut
 
-          tar -C staging -czf "dist/${archive}" devclean
+          tar -C staging -czf "dist/${archive}" offcut
           (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
-          file staging/devclean
+          file staging/offcut
 
       - name: Upload release asset
         # actions/upload-artifact v4.6.2
@@ -165,6 +165,6 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "devclean ${VERSION}" \
+            --title "offcut ${VERSION}" \
             --generate-notes \
             --verify-tag

@@ -1,13 +1,13 @@
-//! Configuration loading and merging for devclean.
+//! Configuration loading and merging for offcut.
 //!
 //! Config is read from a TOML file under the platform config dir, e.g.
-//! `~/.config/devclean/config.toml` on Linux,
-//! `~/Library/Application Support/devclean/config.toml` on macOS,
-//! `%APPDATA%\\devclean\\config.toml` on Windows. A missing file at that
+//! `~/.config/offcut/config.toml` on Linux,
+//! `~/Library/Application Support/offcut/config.toml` on macOS,
+//! `%APPDATA%\\offcut\\config.toml` on Windows. A missing file at that
 //! *default* location is not an error: built-in defaults are used. A path the
 //! user passed explicitly via `--config` is required to exist; that check lives
 //! in `main::load_cli_config`, since this module has no notion of where a path
-//! came from (`devclean init` is the exception: it creates the file — see
+//! came from (`offcut init` is the exception: it creates the file — see
 //! `main::run_init`). CLI flags override the loaded config.
 
 use std::fs;
@@ -35,7 +35,7 @@ impl std::fmt::Display for Mode {
     }
 }
 
-/// Resolved devclean configuration.
+/// Resolved offcut configuration.
 ///
 /// Fields map 1:1 to the TOML keys documented in the README. Every field has a
 /// built-in default, so a partial (or missing) config file still yields a valid
@@ -43,7 +43,7 @@ impl std::fmt::Display for Mode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Paths devclean scans for projects.
+    /// Paths offcut scans for projects.
     pub workspace_roots: Vec<PathBuf>,
     /// Glob patterns extending the built-in safe-to-delete catalog.
     pub safe_delete: Vec<String>,
@@ -125,14 +125,14 @@ impl Config {
 }
 
 /// Return the default config file path for this platform, e.g.
-/// `~/.config/devclean/config.toml` on Linux. Returns `None` if the platform
+/// `~/.config/offcut/config.toml` on Linux. Returns `None` if the platform
 /// config dir cannot be determined.
 ///
-/// The file lives *inside* a `devclean` directory rather than being an
-/// extensionless `devclean` file directly under the config dir: the latter
+/// The file lives *inside* an `offcut` directory rather than being an
+/// extensionless `offcut` file directly under the config dir: the latter
 /// collides with the directory users and other tools expect to create there.
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("devclean").join("config.toml"))
+    dirs::config_dir().map(|d| d.join("offcut").join("config.toml"))
 }
 
 #[cfg(test)]
@@ -149,7 +149,7 @@ mod tests {
         let mut dir = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         dir.push(format!(
-            "devclean-test-{}-{}-{}.toml",
+            "offcut-test-{}-{}-{}.toml",
             std::process::id(),
             n,
             std::time::SystemTime::now()
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn missing_file_falls_back_to_default() {
-        let cfg = Config::load_or_default(Path::new("/nonexistent/devclean.toml")).unwrap();
+        let cfg = Config::load_or_default(Path::new("/nonexistent/offcut.toml")).unwrap();
         assert_eq!(cfg, Config::default());
     }
 
@@ -236,7 +236,7 @@ max_depth = 2
     fn directory_at_config_path_falls_back_to_default() {
         let mut dir = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        dir.push(format!("devclean-test-dir-{}-{}", std::process::id(), n));
+        dir.push(format!("offcut-test-dir-{}-{}", std::process::id(), n));
         fs::create_dir_all(&dir).unwrap();
         assert_eq!(Config::load(&dir).unwrap(), None);
         assert_eq!(Config::load_or_default(&dir).unwrap(), Config::default());
@@ -324,7 +324,7 @@ default_mode = "interactive"
         // Smoke test: on dev hosts this should resolve to something non-empty.
         // We only assert the structure, not a specific platform path.
         if let Some(p) = default_config_path() {
-            assert!(p.ends_with("devclean/config.toml"));
+            assert!(p.ends_with("offcut/config.toml"));
         }
     }
 }

@@ -16,15 +16,15 @@ use clap::{Parser, Subcommand};
 
 use config::{CliOverrides, Config};
 
-/// devclean — development environment cleanup CLI.
+/// offcut — development environment cleanup CLI.
 ///
 /// Discovers projects under each configured workspace root, classifies each
 /// project by its git state, and (by default) runs the interactive clean
-/// flow on each cleanable project. `devclean list` prints each project's
-/// status without cleaning; `devclean clean` runs the destructive interactive
-/// flow; `devclean` (no subcommand) is the default run.
+/// flow on each cleanable project. `offcut list` prints each project's
+/// status without cleaning; `offcut clean` runs the destructive interactive
+/// flow; `offcut` (no subcommand) is the default run.
 #[derive(Parser, Debug)]
-#[command(name = "devclean", version, about)]
+#[command(name = "offcut", version, about)]
 struct Cli {
     /// Override/append workspace roots (repeatable).
     #[arg(long, value_name = "PATH")]
@@ -64,7 +64,7 @@ enum Command {
     /// Print the resolved configuration (workspace roots, max_depth, etc.).
     /// Preserves the original list-of-resolved-configuration behavior.
     Config,
-    /// Debug helper: report whether a path is ignored by the loaded `.devcleanignore` rules.
+    /// Debug helper: report whether a path is ignored by the loaded `.offcutignore` rules.
     Ignore {
         /// Path to test, relative to the current directory.
         path: String,
@@ -100,57 +100,57 @@ fn main() {
         None => {
             // Default run: discover, classify, report each project sorted by
             // status, and run the interactive clean flow on each cleanable
-            // project. Same code path as `devclean clean`.
+            // project. Same code path as `offcut clean`.
             if let Err(e) = run_cleaning(&cli) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::List) => {
             if let Err(e) = run_listing(&cli) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::Config) => {
             if let Err(e) = run_config(&cli) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::Ignore { path }) => {
             if let Err(e) = run_ignore(path) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::Safelist { path }) => {
             if let Err(e) = run_safelist(&cli, path) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::Discovery) => {
             if let Err(e) = run_discovery(&cli) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::Classification) => {
             if let Err(e) = run_classification(&cli) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::Clean) => {
             if let Err(e) = run_cleaning(&cli) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
         Some(Command::Init { workspace }) => {
             if let Err(e) = run_init(&cli, workspace) {
-                eprintln!("devclean: {e}");
+                eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
         }
@@ -219,10 +219,10 @@ fn load_cli_config(cli: &Cli) -> Result<(Option<PathBuf>, Config), Box<dyn std::
     Ok((config_path, cfg))
 }
 
-/// `devclean init <WORKSPACE_PATH>`: create a TOML config file pre-populated
+/// `offcut init <WORKSPACE_PATH>`: create a TOML config file pre-populated
 /// with every Config field's default and the given workspace root active.
 ///
-/// Creates the parent directory (the `devclean/` dir under the platform config
+/// Creates the parent directory (the `offcut/` dir under the platform config
 /// dir, or all parents of an explicit --config target). Does not clobber an
 /// existing file: if one is already present at the target, prints its path and
 /// exits non-zero so scripts can detect the no-op.
@@ -284,9 +284,9 @@ fn generate_init_template(workspace: &str) -> String {
     format!("{}\n{body}", TEMPLATE_HEADER)
 }
 
-const TEMPLATE_HEADER: &str = r#"# devclean config — each field is documented below.
+const TEMPLATE_HEADER: &str = r#"# offcut config — each field is documented below.
 #
-# workspace_roots: paths devclean scans for projects.
+# workspace_roots: paths offcut scans for projects.
 # safe_delete: glob patterns extending the built-in safe-to-delete catalog.
 # max_depth: recursion depth for project discovery (default 4).
 # project_markers: marker files used to detect projects (the default list
@@ -296,7 +296,7 @@ const TEMPLATE_HEADER: &str = r#"# devclean config — each field is documented 
 # To add more workspace roots, append them to the workspace_roots array below.
 "#;
 
-/// `devclean config`: print the resolved configuration (workspace roots,
+/// `offcut config`: print the resolved configuration (workspace roots,
 /// max_depth, default_mode, and per-invocation flags). Preserves the original
 /// list-of-resolved-configuration behavior as a clearly-named alternative.
 fn run_config(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -304,7 +304,7 @@ fn run_config(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let overrides = cli_overrides(cli);
     let cfg = cfg.apply_overrides(&overrides);
 
-    println!("devclean resolved config:");
+    println!("offcut resolved config:");
     match &config_path {
         Some(path) => println!("  config file: {}", path.display()),
         None => println!("  config file: (none)"),
@@ -332,7 +332,7 @@ fn run_config(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// set in discovery order.
 ///
 /// Classification is a read-only survey over independent projects, so one
-/// project with an unreadable `.devcleanignore` must not abort the whole
+/// project with an unreadable `.offcutignore` must not abort the whole
 /// report. Skip just that project: falling back to an empty set would treat
 /// nothing as protected and could report it `cleanable`, which is the one
 /// verdict the cleaning engine acts destructively on. The live progress line
@@ -349,7 +349,7 @@ fn classify_projects(
             Err(e) => {
                 progress.clear();
                 eprintln!(
-                    "warning: {}: skipped, could not load .devcleanignore: {e}",
+                    "warning: {}: skipped, could not load .offcutignore: {e}",
                     d.path.display()
                 );
                 continue;
@@ -363,7 +363,7 @@ fn classify_projects(
     out
 }
 
-/// `devclean list`: show each discovered project with its git status, sorted
+/// `offcut list`: show each discovered project with its git status, sorted
 /// by severity (most-needs-attention first). Read-only — no cleaning.
 ///
 /// Each row uses the formatted shape `[rank] path — label (reason)` with
@@ -479,7 +479,7 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `devclean ignore <path>`: load the ignore set for the current directory and
+/// `offcut ignore <path>`: load the ignore set for the current directory and
 /// print whether `path` is ignored. Minimal observable hook for the ignore
 /// matcher; cleaning is a separate issue.
 fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -497,7 +497,7 @@ fn run_ignore(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `devclean safelist <path>`: load the default config (or `--config`), build
+/// `offcut safelist <path>`: load the default config (or `--config`), build
 /// the safe-to-delete set from built-ins plus the loaded `safe_delete`, and
 /// report whether `path` is safe to delete. Minimal observable hook for the
 /// catalog; cleaning is a separate issue.
@@ -515,7 +515,7 @@ fn run_safelist(cli: &Cli, path: &str) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// `devclean discovery`: walk each configured workspace root and print the
+/// `offcut discovery`: walk each configured workspace root and print the
 /// list of discovered projects (paths with markers). Classifying them is
 /// `run_classification`; cleaning is a separate issue.
 fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -534,7 +534,7 @@ fn run_discovery(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `devclean classification`: walk each configured workspace root, classify
+/// `offcut classification`: walk each configured workspace root, classify
 /// each discovered project by its git state, and print each one with its
 /// status label, sorted by severity. Precedence is the lowest-numbered (most-
 /// severe) status; status 5 is cleanable only. See issue #6 for the full spec.
@@ -566,7 +566,7 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `devclean clean` (and the default run with no subcommand): the interactive
+/// `offcut clean` (and the default run with no subcommand): the interactive
 /// cleaning flow (issue #8). Sorts every discovered project by status, reports
 /// each non-cleanable one with a one-line reason, and lists each cleanable one.
 ///
@@ -576,7 +576,7 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// surfaced item; `--dry-run` shows what would be deleted, deletes nothing,
 /// skips prompts; `--force --dry-run` previews the force run.
 ///
-/// Destructive: `devclean clean` deletes files on approval or under `--force`.
+/// Destructive: `offcut clean` deletes files on approval or under `--force`.
 /// Only one subcommand runs the deletion; the default run runs it too.
 fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
@@ -589,7 +589,7 @@ fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Classify every project, keeping each status and ignore-set for the
-    // report and execution. Skip each project whose `.devcleanignore` could
+    // report and execution. Skip each project whose `.offcutignore` could
     // not be loaded — see `classify_projects` for the fail-safe rationale:
     // one bad set would otherwise mask a protected file as cleanable, and
     // the engine acts destructively on that verdict.
@@ -851,7 +851,7 @@ mod init_tests {
         let mut dir = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         dir.push(format!(
-            "devclean-init-test-{}-{}-{}.toml",
+            "offcut-init-test-{}-{}-{}.toml",
             std::process::id(),
             n,
             std::time::SystemTime::now()
@@ -940,11 +940,11 @@ mod init_tests {
         let mut dir = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         dir.push(format!(
-            "devclean-init-parent-test-{}-{}",
+            "offcut-init-parent-test-{}-{}",
             std::process::id(),
             n
         ));
-        let target = dir.join("devclean").join("config.toml");
+        let target = dir.join("offcut").join("config.toml");
         // Ensure the parent does not exist.
         let _ = fs::remove_dir_all(&dir);
         let result = run_init(
@@ -969,7 +969,7 @@ mod init_tests {
         let dir = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let target = dir.join(format!(
-            "devclean-init-root-test-{}-{}",
+            "offcut-init-root-test-{}-{}",
             std::process::id(),
             n
         ));
@@ -1003,7 +1003,7 @@ mod init_tests {
         let mut dir = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         dir.push(format!(
-            "devclean-init-explicit-test-{}-{}",
+            "offcut-init-explicit-test-{}-{}",
             std::process::id(),
             n
         ));

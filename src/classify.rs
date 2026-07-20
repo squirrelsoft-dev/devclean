@@ -1,8 +1,8 @@
-//! Project classification for devclean.
+//! Project classification for offcut.
 //!
 //! Determines each discovered project's dirty status by inspecting git state
 //! via git plumbing commands. The ignore matcher (issue #3) is consulted for
-//! status 5 / Clean decisions: untracked junk that is devcleanignored does not
+//! status 5 / Clean decisions: untracked junk that is offcutignored does not
 //! push a repo into Cleanable.
 //!
 //! ## Git backend choice
@@ -29,7 +29,7 @@ use crate::ignore::IgnoreSet;
 /// The five dirty statuses, ordered by severity (most-needs-attention first).
 ///
 /// Status 5 is the *cleanable* state: everything committed+pushed, with
-/// untracked junk that is not devcleanignored. Statuses 1..4 are all states
+/// untracked junk that is not offcutignored. Statuses 1..4 are all states
 /// where cleaning must wait — the repo still has outstanding git state.
 ///
 /// Precedence: a repo matching multiple conditions is reported by its
@@ -55,7 +55,7 @@ pub enum Status {
     /// changes sitting in the working tree or index.
     Wip,
     /// Git repo that is committed + pushed, and has untracked junk that is
-    /// **not** devcleanignored. Eligible for cleaning.
+    /// **not** offcutignored. Eligible for cleaning.
     Cleanable,
     /// All committed+pushed with **no** untracked non-ignored junk. Clean.
     Clean,
@@ -95,7 +95,7 @@ impl Status {
 /// dirty status; if none match, returns `Clean`.
 ///
 /// - `project_path` is the absolute path of the project to classify.
-/// - `ignore_set` is the project's loaded `.devcleanignore` rules — consulted
+/// - `ignore_set` is the project's loaded `.offcutignore` rules — consulted
 ///   only for untracked-junk decisions (status 5 vs Clean). The matcher's
 ///   contract is the source of truth: `is_ignored == true` means the path is
 ///   protected, so an untracked file that is `is_ignored` does not push the
@@ -258,28 +258,28 @@ fn status_wip(project_path: &Path) -> bool {
 }
 
 /// Status 5 vs Clean: git repo that is committed+pushed, with untracked junk
-/// that is either devcleanignored or absent entirely.
+/// that is either offcutignored or absent entirely.
 ///
 /// - Enumerate all untracked files, **including** gitignored ones. This is
 ///   deliberate: junk like `node_modules`/`target/` is gitignored by the
-///   project, but devclean exists to clean exactly that, so it must be
+///   project, but offcut exists to clean exactly that, so it must be
 ///   visible here. We use `git ls-files --others` (NO `--exclude-standard`,
-///   which would hide gitignored junk) so the devcleanignore matcher is the
+///   which would hide gitignored junk) so the offcutignore matcher is the
 ///   sole judge of what is protected.
 /// - For each untracked path, run it through the ignore set.
-/// - If ANY untracked path is **not** devcleanignored → Cleanable.
-/// - If ALL untracked paths are devcleanignored (or there are none) → Clean.
+/// - If ANY untracked path is **not** offcutignored → Cleanable.
+/// - If ALL untracked paths are offcutignored (or there are none) → Clean.
 ///
 /// Three `ls-files` flags are load-bearing and must stay:
 ///
 /// - `-z` emits NUL-separated raw paths. Without it git quotes and C-escapes
 ///   any path with non-ASCII or special characters (`café.txt` arrives as
-///   `"caf\303\251.txt"`), which matches no devcleanignore pattern, and a path
+///   `"caf\303\251.txt"`), which matches no offcutignore pattern, and a path
 ///   containing a newline splits into several bogus entries. Either one
 ///   silently reports a protected path as cleanable.
 /// - `--directory` collapses a wholly-untracked directory to one entry
 ///   (`node_modules/`) instead of recursing into every file beneath it. The
-///   common `Clean` case — everything devcleanignored — is exactly the worst
+///   common `Clean` case — everything offcutignored — is exactly the worst
 ///   case for the recursive form, since no entry short-circuits the loop.
 /// - `--no-empty-directory` keeps `--directory` from newly surfacing empty
 ///   untracked directories, which the recursive form never reported at all.
@@ -341,7 +341,7 @@ fn status_cleanable(project_path: &Path, ignore_set: &IgnoreSet) -> bool {
 }
 
 /// Whether an untracked directory holds at least one file that is not
-/// devcleanignored.
+/// offcutignored.
 ///
 /// Re-lists `dir` without `--directory` so every file beneath it is matched at
 /// the granularity patterns are written against: a `logs/` holding only `*.js`
@@ -420,7 +420,7 @@ mod tests {
         let mut d = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         d.push(format!(
-            "devclean-classify-{}-{}-{}",
+            "offcut-classify-{}-{}-{}",
             label,
             std::process::id(),
             n
@@ -560,7 +560,7 @@ mod tests {
         git_run(&root, &["config", "branch.main.remote", "origin"]);
         git_run(&root, &["config", "branch.main.merge", "refs/heads/main"]);
         git_run(&root, &["push", "origin", "main"]);
-        // Leave an untracked file that is not devcleanignored.
+        // Leave an untracked file that is not offcutignored.
         write_file(&root, "secret.txt", "top secret");
         let ignore_set = IgnoreSet::empty(); // nothing is ignored
         let status = classify(&root, &ignore_set);
@@ -579,7 +579,7 @@ mod tests {
         git_run(&root, &["config", "branch.main.remote", "origin"]);
         git_run(&root, &["config", "branch.main.merge", "refs/heads/main"]);
         git_run(&root, &["push", "origin", "main"]);
-        // Leave an untracked file that IS devcleanignored.
+        // Leave an untracked file that IS offcutignored.
         write_file(&root, "node_modules", "ignored");
         let ignore_set =
             IgnoreSet::from_layers(&root, &[(&PathBuf::new(), &["**/node_modules"])]).unwrap();
@@ -588,11 +588,11 @@ mod tests {
     }
 
     #[test]
-    fn cleanable_when_junk_is_gitignored_but_not_devcleanignored() {
-        // The whole point of devclean: build junk like `node_modules` is
+    fn cleanable_when_junk_is_gitignored_but_not_offcutignored() {
+        // The whole point of offcut: build junk like `node_modules` is
         // gitignored by the *project*, so `git ls-files --exclude-standard`
         // would hide it. We must still see it (and, since it is NOT
-        // devcleanignored, classify as Cleanable) so it can be cleaned.
+        // offcutignored, classify as Cleanable) so it can be cleaned.
         // Use `ls-files --others` (no --exclude-standard) for this.
         let root = fixture("gitignored_junk");
         let bare = unique_dir(&format!(
@@ -604,14 +604,14 @@ mod tests {
         git_run(&root, &["config", "branch.main.remote", "origin"]);
         git_run(&root, &["config", "branch.main.merge", "refs/heads/main"]);
         git_run(&root, &["push", "origin", "main"]);
-        // Project ignores node_modules via its own .gitignore (NOT devcleanignore).
+        // Project ignores node_modules via its own .gitignore (NOT offcutignore).
         write_file(&root, ".gitignore", "node_modules\n");
         git_run(&root, &["add", ".gitignore"]);
         git_run(&root, &["commit", "-m", "ignore node_modules"]);
         git_run(&root, &["push", "origin", "main"]);
-        // Drop build junk that the project gitignores but devclean does not.
+        // Drop build junk that the project gitignores but offcut does not.
         write_file(&root, "node_modules/junk.txt", "junk");
-        let ignore_set = IgnoreSet::empty(); // nothing devcleanignored
+        let ignore_set = IgnoreSet::empty(); // nothing offcutignored
         let status = classify(&root, &ignore_set);
         assert_eq!(status, Status::Cleanable);
     }
@@ -620,7 +620,7 @@ mod tests {
     fn clean_when_ignored_untracked_path_is_non_ascii() {
         // `ls-files --others` without `-z` quotes and C-escapes a non-ASCII
         // path (`café.txt` → `"caf\303\251.txt"`), which matches no
-        // devcleanignore pattern and wrongly reports a protected file as
+        // offcutignore pattern and wrongly reports a protected file as
         // Cleanable. With `-z` the raw path reaches the matcher.
         let root = fixture("non_ascii");
         fixture_with_remote(&root);

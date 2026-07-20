@@ -1,12 +1,12 @@
-# devclean
+# offcut
 
 Development environment cleanup CLI.
 
 The binary loads configuration, discovers projects, classifies their git
-state, and cleans the cleanable ones. `devclean list` prints each project's
-status sorted by severity without cleaning; `devclean config` prints the
+state, and cleans the cleanable ones. `offcut list` prints each project's
+status sorted by severity without cleaning; `offcut config` prints the
 resolved configuration (preserved from the original list-of-resolved-config
-behavior); `devclean` (no subcommand) and `devclean clean` each run the
+behavior); `offcut` (no subcommand) and `offcut clean` each run the
 interactive clean flow — sorted report, each cleanable project enumerated,
 interactive prompts, and deletion. Each command is documented below.
 
@@ -40,7 +40,7 @@ stripped archives for macOS arm64, macOS x86_64, Linux x86_64, and Linux
 aarch64, writes SHA256 checksums, and publishes a GitHub Release with generated
 notes.
 
-Release archives are named `devclean-vX.Y.Z-<target>.tar.gz` and each has a
+Release archives are named `offcut-vX.Y.Z-<target>.tar.gz` and each has a
 matching `.sha256` file. macOS binaries are currently unsigned and unnotarized.
 
 ## CLI surface
@@ -50,24 +50,24 @@ interactive clean flow.
 
 | command | behavior |
 |---------|----------|
-| `devclean` | default run: discover → classify → report each project sorted by status → interactive clean for each cleanable project |
-| `devclean list` | read-only: show each project's git status, sorted by severity (most-needs-attention first). No cleaning. |
-| `devclean config` | print the resolved configuration (workspace roots, max_depth, default_mode, each invocation's flags) |
-| `devclean clean` | interactive: report each project sorted by status, each cleanable project enumerated, prompts, deletion. Destructive. |
-| `devclean discovery` | walk each workspace root and report discovered projects (paths + markers) |
-| `devclean classification` | classify each discovered project by its git state, print each status |
-| `devclean ignore <path>` | test whether `path` is ignored by the loaded `.devcleanignore` |
-| `devclean safelist <path>` | test whether `path` is safe to delete according to the catalog |
-| `devclean init <path>` | create a TOML config file pre-populated with each `Config` field's default and the given workspace root active; idempotent (does not clobber an existing file) |
+| `offcut` | default run: discover → classify → report each project sorted by status → interactive clean for each cleanable project |
+| `offcut list` | read-only: show each project's git status, sorted by severity (most-needs-attention first). No cleaning. |
+| `offcut config` | print the resolved configuration (workspace roots, max_depth, default_mode, each invocation's flags) |
+| `offcut clean` | interactive: report each project sorted by status, each cleanable project enumerated, prompts, deletion. Destructive. |
+| `offcut discovery` | walk each workspace root and report discovered projects (paths + markers) |
+| `offcut classification` | classify each discovered project by its git state, print each status |
+| `offcut ignore <path>` | test whether `path` is ignored by the loaded `.offcutignore` |
+| `offcut safelist <path>` | test whether `path` is safe to delete according to the catalog |
+| `offcut init <path>` | create a TOML config file pre-populated with each `Config` field's default and the given workspace root active; idempotent (does not clobber an existing file) |
 
 ### Top-level flags
 
 Each flag is top-level and must be given *before* the subcommand:
 
 ```sh
-devclean [FLAGS] list              # list projects + statuses
-devclean [FLAGS] clean             # interactive clean flow (destructive)
-devclean [FLAGS] config            # print the resolved config
+offcut [FLAGS] list              # list projects + statuses
+offcut [FLAGS] clean             # interactive clean flow (destructive)
+offcut [FLAGS] config            # print the resolved config
 
   --workspace <path>               # append a workspace root (repeatable)
   --config <path>                  # alternate config file (must exist; `init` creates it)
@@ -82,27 +82,27 @@ force run without deleting. Runtime precedence lives in one place each:
 `dry_run` alone gates execution, `force` alone gates
 prompting/auto-approval.
 
-For each cleanable project, `devclean clean` enumerates untracked items,
+For each cleanable project, `offcut clean` enumerates untracked items,
 prompts each `Surfaced` item (delete or keep), prompts each project (clean?
 y/n), then executes `git clean -xfd -e <globs>` if approved. `--force` skips
 each prompt and auto-approves each surfaced item. `--dry-run` previews each
 item's fate and deletes nothing.
 
 ```sh
-$ devclean                       # default run: list + interactive clean
-$ devclean list                  # read-only project listing
-$ devclean clean                 # destructive interactive flow
-$ devclean --force clean         # DESTRUCTIVE: each prompt skipped
-$ devclean --dry-run clean       # preview only; each item printed
-$ devclean --force --dry-run clean  # preview of the force run; deletes nothing
-$ devclean --verbose clean       # verbose output
-$ devclean --version             # crate version (devclean 0.1.0)
+$ offcut                       # default run: list + interactive clean
+$ offcut list                  # read-only project listing
+$ offcut clean                 # destructive interactive flow
+$ offcut --force clean         # DESTRUCTIVE: each prompt skipped
+$ offcut --dry-run clean       # preview only; each item printed
+$ offcut --force --dry-run clean  # preview of the force run; deletes nothing
+$ offcut --verbose clean       # verbose output
+$ offcut --version             # crate version (offcut 0.1.0)
 ```
 
-To get started: `devclean init ~/code` writes a pre-populated config file under
+To get started: `offcut init ~/code` writes a pre-populated config file under
 the platform config dir with `~/code` as the active workspace root, each other
 `Config` field documented with its default, and a comment explaining how to add
-more workspace roots. `devclean init --help` for details.
+more workspace roots. `offcut init --help` for details.
 
 See `src/main.rs` for the CLI surface and `src/output.rs` for the
 formatting; `src/clean.rs` for the deletion engine and
@@ -112,18 +112,18 @@ formatting; `src/clean.rs` for the deletion engine and
 
 Output is colored when stdout is a TTY and plain when piped or redirected.
 Setting the `NO_COLOR` environment variable (to any value) or `CLICOLOR=0`
-disables color even on a TTY. Known limitation: devclean emits standard ANSI
+disables color even on a TTY. Known limitation: offcut emits standard ANSI
 escapes and does not enable virtual-terminal processing on legacy Windows
 conhost (plain `cmd.exe`), where colored output may render as escape
 sequences — modern Windows Terminal, macOS, and Linux terminals are fine.
 
-## `.devcleanignore`
+## `.offcutignore`
 
-devclean honors gitignore-style ignore files in two scopes:
+offcut honors gitignore-style ignore files in two scopes:
 
-- **Global** — `~/.devcleanignore` applies to every project. Its patterns are
+- **Global** — `~/.offcutignore` applies to every project. Its patterns are
   anchored at the project root (like git's `core.excludesfile`).
-- **Per-folder** — a `.devcleanignore` file inside a project tree applies to
+- **Per-folder** — a `.offcutignore` file inside a project tree applies to
   the subtree rooted at its own directory, at any depth.
 
 Patterns use gitignore semantics: `*` and `**` globs, a leading `/` that
@@ -133,13 +133,13 @@ lines starting with `#` are ignored. Matching a directory also covers
 everything inside it, so `build/` protects `build/out.o` too.
 
 Precedence follows gitignore: the closest (deepest, most-specific)
-`.devcleanignore` wins, layered on top of the global file. A path matched by
+`.offcutignore` wins, layered on top of the global file. A path matched by
 an ignore rule is **protected** — cleaning never removes it. A `!` pattern
 **un-protects** (re-includes) a path an earlier rule excluded, per gitignore
 semantics: a `!`-whitelisted path is NOT protected and is eligible for
 cleaning (subject to the safe-list and approval rules below).
 
-Example `~/.devcleanignore`:
+Example `~/.offcutignore`:
 
 ```gitignore
 # global: never touch these anywhere in a project
@@ -148,7 +148,7 @@ Example `~/.devcleanignore`:
 /secrets
 ```
 
-A per-folder `<project>/sub/.devcleanignore`:
+A per-folder `<project>/sub/.offcutignore`:
 
 ```gitignore
 # ignore this subtree's build output
@@ -160,18 +160,18 @@ build/
 There is a small debug helper to inspect the loaded rules:
 
 ```sh
-$ devclean ignore path/to/check
+$ offcut ignore path/to/check
 path/to/check: ignored
 ```
 
 It treats the current directory as the project root, loads the global file plus
-every `.devcleanignore` beneath it, and tests the given path. The path may be
+every `.offcutignore` beneath it, and tests the given path. The path may be
 relative to the current directory or absolute inside it; a path outside the
 project root is an error rather than a reported "not-ignored".
 
 ## Cleaning
 
-devclean cleans each **cleanable** (status-5) project by enumerating its
+offcut cleans each **cleanable** (status-5) project by enumerating its
 untracked items, classifying each, surfacing the ambiguous ones for approval,
 then deleting via `git clean -xfd -e <exclusion globs>` — mirroring the
 original zshrc approach (build an exclusion list, run `git clean`).
@@ -180,20 +180,20 @@ Each untracked item is classified into one of three classes:
 
 | class        | condition                       | outcome              |
 |--------------|---------------------------------|----------------------|
-| `protected`  | `.devcleanignore` match         | never removed        |
+| `protected`  | `.offcutignore` match         | never removed        |
 | `safe`       | safe-to-delete catalog match    | auto-removed         |
 | `surfaced`   | everything else                 | per-project approval |
 
 Untracked items are enumerated *without* git's `--exclude-standard`, so
 project-gitignored build junk like `node_modules`/`target/` stays visible —
-devclean exists to clean it, and `.devcleanignore` is the sole judge of
+offcut exists to clean it, and `.offcutignore` is the sole judge of
 protection. The exclusion list passed to `git clean -e` is built from every
 protected item plus every surfaced item the user does **not** approve; safe
 items and approved surfaced items are left un-excluded so `git clean` deletes
 them. An absolute path on the cleaning path is treated as **protected**
 (fail-safe toward not-deleting, never fail-open).
 
-`devclean clean` runs the interactive flow (#8): it reports every project
+`offcut clean` runs the interactive flow (#8): it reports every project
 sorted by status (statuses 1–4 need manual attention; status-5 projects are
 the cleanable subjects), asks "Clean the N cleanable projects? (y/n)", then
 loops over the cleanable projects one at a time — showing the items that
@@ -211,7 +211,7 @@ Flags:
   `would prompt` (a real interactive run asks about them). Combined with
   `--force` it previews the force run: every non-protected item is shown as
   `would delete`, and still nothing is deleted.
-- `--verbose` — accepted and echoed in the `devclean config` flags line;
+- `--verbose` — accepted and echoed in the `offcut config` flags line;
   currently produces no additional output elsewhere.
 
 ### Disk savings (issue #18)
@@ -220,7 +220,7 @@ Each cleanable (status-5) project row carries a reclaimable-size estimate
 next to the path: `path — cleanable (~2.3 GB)`. The estimate is computed
 from the items the cleaning engine would delete — every `Safe` item (the
 built-in catalog) plus every `Surfaced` item (in `dry_run` mode every
-surfaced item is auto-approved). `Protected` items match `.devcleanignore`
+surfaced item is auto-approved). `Protected` items match `.offcutignore`
 (or the absolute-path fail-safe), so they are never counted.
 
 The aggregate across all cleanable projects is shown in the summary line:
@@ -231,7 +231,7 @@ KB / MB / GB and each symlink counts its own size only (no target recursion).
 Each file's size comes from its metadata (`stat`, O(1) per file) — contents
 are never read, so sizing stays fast even for large build artifacts.
 
-Both `devclean list` and `devclean clean` (including `--dry-run` and
+Both `offcut list` and `offcut clean` (including `--dry-run` and
 `--force --dry-run`) carry the same per-project and total sizes — the
 enumeration is the same, the display is the same.
 
@@ -239,15 +239,15 @@ Statuses 1–4 (manual-attention) show no reclaimable size — each is not yet
 cleanable. Only status-5 rows and the aggregate carry the savings.
 
 ```sh
-$ devclean clean                    # interactive: report, approve, then delete
-$ devclean --dry-run clean          # preview only; deletes nothing
-$ devclean --force clean            # DESTRUCTIVE: each prompt skipped
-$ devclean --force --dry-run clean  # preview of the force run; deletes nothing
-$ devclean --verbose clean          # verbose output
+$ offcut clean                    # interactive: report, approve, then delete
+$ offcut --dry-run clean          # preview only; deletes nothing
+$ offcut --force clean            # DESTRUCTIVE: each prompt skipped
+$ offcut --force --dry-run clean  # preview of the force run; deletes nothing
+$ offcut --verbose clean          # verbose output
 ```
 
-Each subcommand — `devclean` (no subcommand, the default run) and
-`devclean clean` — runs the destructive interactive flow; only `devclean
+Each subcommand — `offcut` (no subcommand, the default run) and
+`offcut clean` — runs the destructive interactive flow; only `offcut
 list` lists each project's status without cleaning.
 
 See `src/clean.rs` for the deletion engine and `src/interactive.rs` for the
@@ -256,8 +256,8 @@ the seam the interactive flow drives).
 
 ## Safe-to-delete catalog
 
-devclean keeps a catalog of paths that are safe to auto-delete — the ones a
-cleaning run may remove without asking. `devclean safelist <path>` reports
+offcut keeps a catalog of paths that are safe to auto-delete — the ones a
+cleaning run may remove without asking. `offcut safelist <path>` reports
 whether a given path is in it. The catalog is:
 
 - **Built-in defaults** — compiled into `src/safelist.rs` as `BUILT_IN_DEFAULTS` (a non-exhaustive list of common build/cache dirs/files: `node_modules`, `target`, `.next`, `.turbo`, `dist`, `build`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.gradle`, `bin/obj`, `out`, `coverage`, `.nuxt`, `.svelte-kit`, `.cache`, `.parcel-cache`).
@@ -266,7 +266,7 @@ whether a given path is in it. The catalog is:
   without asking for approval (see "Cleaning" above), and the discovery walk,
   which derives its descent-prune set from the same catalog (see "Discovery"
   below).
-- **Observable hook** — `devclean safelist <path>` is the minimal diagnostic
+- **Observable hook** — `offcut safelist <path>` is the minimal diagnostic
   for the catalog.
 
 A path is reported `safe` or `not-safe`, interpreted relative to the current
@@ -279,7 +279,7 @@ See `src/safelist.rs` for the implementation; `tests/safelist_cli.rs` for integr
 
 ## Discovery
 
-`devclean discovery` walks each configured `workspace_roots` entry up to
+`offcut discovery` walks each configured `workspace_roots` entry up to
 `max_depth` and reports every folder that contains one of the configured
 `project_markers` (`.git`, `package.json`, `Cargo.toml`, `go.mod`,
 `pyproject.toml`, `pom.xml`, `build.gradle`, `*.csproj`, or any user-supplied
@@ -310,16 +310,16 @@ paths are printed as they were walked from the workspace root, so configuring
 absolute roots (the usual case) yields absolute output.
 
 ```
-devclean discovery                        # uses workspace_roots from config
-devclean --workspace ~/code discovery     # append a root from the CLI
+offcut discovery                        # uses workspace_roots from config
+offcut --workspace ~/code discovery     # append a root from the CLI
 ```
 
 With no workspace roots configured, discovery reports that and exits without
 error. An unreadable or missing root is a hard error rather than a silent
 empty result.
 
-Each subcommand that runs discovery — `devclean discovery`, `devclean list`,
-`devclean classification`, and the default run / `devclean clean` — renders a
+Each subcommand that runs discovery — `offcut discovery`, `offcut list`,
+`offcut classification`, and the default run / `offcut clean` — renders a
 live single-line progress indicator while walking each workspace root:
 `walking: <path>` overwrites itself in place via a carriage return on a TTY,
 so the display never scrolls. The same indicator continues through the later
@@ -346,7 +346,7 @@ integration tests of the classification/cleaning/sizing progress phases.
 
 ## Classification
 
-`devclean classification` runs discovery, then classifies each project by
+`offcut classification` runs discovery, then classifies each project by
 its git state and prints the results sorted by severity (most-needs-attention
 first). Only status 5 is cleanable; statuses 1-4 each mean cleaning must wait.
 
@@ -356,46 +356,46 @@ first). Only status 5 is cleanable; statuses 1-4 each mean cleaning must wait.
 | 2 | `no-remote` | Git repo with no remote configured. |
 | 3 | `unpushed` | Git repo with a remote but unpushed commits (or no upstream). |
 | 4 | `wip` | Git repo with uncommitted work-in-progress (modified/staged tracked changes). |
-| 5 | `cleanable` | Committed + pushed, AND has untracked junk that is NOT devcleanignored. |
-| 6 | `clean` | Committed + pushed with no untracked non-devcleanignored junk. Not a dirty status; sorts last. |
+| 5 | `cleanable` | Committed + pushed, AND has untracked junk that is NOT offcutignored. |
+| 6 | `clean` | Committed + pushed with no untracked non-offcutignored junk. Not a dirty status; sorts last. |
 
 Precedence is the lowest-numbered (most-severe) status. A repo with both WIP
 (4) and untracked junk is status 4, not 5 — it must not be cleaned while it has
-uncommitted work. The `.devcleanignore` matcher (see above) decides whether
+uncommitted work. The `.offcutignore` matcher (see above) decides whether
 untracked junk is protected, which separates `cleanable` from `clean`.
 
 ```
-devclean classification                 # uses workspace_roots from config
-devclean --workspace ~/code classification
+offcut classification                 # uses workspace_roots from config
+offcut --workspace ~/code classification
 ```
 
 See `src/classify.rs` for the git-plumbing logic and status precedence;
 `tests/classification_cli.rs` for integration tests. The interactive
-cleaning flow that acts on these statuses is `devclean clean` (see
+cleaning flow that acts on these statuses is `offcut clean` (see
 "Cleaning" above).
 
 ## Configuration
 
-devclean reads a TOML config file from the platform config dir
-(`~/.config/devclean/config.toml` on Linux,
-`~/Library/Application Support/devclean/config.toml` on macOS,
-`%APPDATA%\devclean\config.toml` on Windows). A missing file at that default
+offcut reads a TOML config file from the platform config dir
+(`~/.config/offcut/config.toml` on Linux,
+`~/Library/Application Support/offcut/config.toml` on macOS,
+`%APPDATA%\offcut\config.toml` on Windows). A missing file at that default
 location is not an error: built-in defaults are used. A path you pass explicitly
-with `--config` must exist — devclean exits non-zero rather than silently
-falling back to defaults. The one exception is `devclean init`, which creates
+with `--config` must exist — offcut exits non-zero rather than silently
+falling back to defaults. The one exception is `offcut init`, which creates
 the file (see below).
 
-First run? `devclean init <path>` writes a pre-populated config file under the
+First run? `offcut init <path>` writes a pre-populated config file under the
 platform config dir with the given path as the active workspace root, each
 other `Config` field documented with its default, and a comment explaining how
 to add more workspace roots. `init` refuses to overwrite an existing file at
 the target — it exits non-zero with the existing path, and does not read or
-use that file. `devclean --config <other>` writes to `<other>` instead
+use that file. `offcut --config <other>` writes to `<other>` instead
 (creating parent directories); the same refuse-to-overwrite rule applies to an
 explicit `--config` target.
 
 ```toml
-# ~/.config/devclean/config.toml
+# ~/.config/offcut/config.toml
 workspace_roots = ["/home/me/code", "/home/me/work"]
 safe_delete = ["**/my_build_artifact"]   # added to the built-ins, not a replacement
 max_depth = 4
@@ -417,14 +417,14 @@ Defaults:
 Each flag is top-level and must be given *before* the subcommand:
 
 ```sh
-devclean [FLAGS] list              # read-only: each project's git status
-devclean [FLAGS] config            # print the resolved config (preserved)
-devclean [FLAGS] clean             # destructive: interactive flow, each prompt
-devclean [FLAGS] discovery         # each project with markers
-devclean [FLAGS] classification    # each project classified, sorted
-devclean [FLAGS] ignore <path>     # see `.devcleanignore` above
-devclean [FLAGS] safelist <path>   # see "Safe-to-delete catalog" above
-devclean [FLAGS] init <path>       # create a pre-populated config file (see above)
+offcut [FLAGS] list              # read-only: each project's git status
+offcut [FLAGS] config            # print the resolved config (preserved)
+offcut [FLAGS] clean             # destructive: interactive flow, each prompt
+offcut [FLAGS] discovery         # each project with markers
+offcut [FLAGS] classification    # each project classified, sorted
+offcut [FLAGS] ignore <path>     # see `.offcutignore` above
+offcut [FLAGS] safelist <path>   # see "Safe-to-delete catalog" above
+offcut [FLAGS] init <path>       # create a pre-populated config file (see above)
 
   --workspace <path>               # append a workspace root (repeatable)
   --config <path>                  # alternate config file (must exist; `init` creates it)
@@ -442,6 +442,6 @@ prompting/auto-approval.
 For example:
 
 ```sh
-devclean --config ./devclean.toml --workspace ~/code --force clean
-devclean --workspace ~/code --dry-run classification
+offcut --config ./offcut.toml --workspace ~/code --force clean
+offcut --workspace ~/code --dry-run classification
 ```

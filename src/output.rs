@@ -1,4 +1,4 @@
-//! Output formatting for devclean: colored, sorted, gated on TTY.
+//! Output formatting for offcut: colored, sorted, gated on TTY.
 //!
 //! Owns everything about how each line of output reads — labels, ranks,
 //! color coding per status, the cleanable indicator, and the TTY-vs-piped

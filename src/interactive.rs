@@ -1,4 +1,4 @@
-//! Interactive cleaning flow for devclean (issue #8).
+//! Interactive cleaning flow for offcut (issue #8).
 //!
 //! Drives the interactive state machine across every cleanable project:
 //! sort, report, collect approvals, then execute. The decision state machine

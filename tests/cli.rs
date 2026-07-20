@@ -2,8 +2,8 @@ use std::io::Write;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-fn devclean() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_devclean"))
+fn offcut() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_offcut"))
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -11,11 +11,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn write_config(contents: &str) -> String {
     let mut dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    dir.push(format!(
-        "devclean-cli-test-{}-{}.toml",
-        std::process::id(),
-        n
-    ));
+    dir.push(format!("offcut-cli-test-{}-{}.toml", std::process::id(), n));
     let mut f = std::fs::File::create(&dir).unwrap();
     f.write_all(contents.as_bytes()).unwrap();
     dir.to_string_lossy().to_string()
@@ -28,7 +24,7 @@ fn write_config(contents: &str) -> String {
 /// developer's real config (whose workspace roots would yield projects).
 #[test]
 fn no_args_runs_the_default_clean_flow() {
-    let out = devclean()
+    let out = offcut()
         .env("HOME", "/nonexistent-home")
         .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
         .output()
@@ -45,27 +41,31 @@ fn no_args_runs_the_default_clean_flow() {
 
 #[test]
 fn version_flag_prints_crate_version() {
-    let out = devclean().arg("--version").output().unwrap();
+    let out = offcut().arg("--version").output().unwrap();
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        format!("devclean {}", env!("CARGO_PKG_VERSION"))
+        format!("offcut {}", env!("CARGO_PKG_VERSION"))
     );
 }
 
 #[test]
 fn help_flag_lists_version_and_help_options() {
-    let out = devclean().arg("--help").output().unwrap();
+    let out = offcut().arg("--help").output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("development environment cleanup CLI"));
     assert!(stdout.contains("--version"));
     assert!(stdout.contains("--help"));
+    assert!(
+        !stdout.contains("devclean"),
+        "help output should not mention the old binary name: {stdout}"
+    );
 }
 
 #[test]
 fn unknown_argument_is_rejected() {
-    let out = devclean().arg("--bogus").output().unwrap();
+    let out = offcut().arg("--bogus").output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected argument"));
 }
@@ -73,10 +73,10 @@ fn unknown_argument_is_rejected() {
 #[test]
 fn list_prints_defaults_when_no_config() {
     // The original `list` subcommand printed the resolved config. Now `list`
-    // lists projects + statuses; the old behavior lives under `devclean
+    // lists projects + statuses; the old behavior lives under `offcut
     // config`. This test verifies the preserved behavior.
     let cfg = write_config("");
-    let out = devclean()
+    let out = offcut()
         .args(["--config", &cfg, "config"])
         .output()
         .unwrap();
@@ -101,11 +101,11 @@ fn explicit_missing_config_is_an_error() {
     let mut missing = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     missing.push(format!(
-        "devclean-cli-absent-{}-{}.toml",
+        "offcut-cli-absent-{}-{}.toml",
         std::process::id(),
         n
     ));
-    let out = devclean()
+    let out = offcut()
         .args(["--config", &missing.to_string_lossy(), "list"])
         .output()
         .unwrap();
@@ -120,14 +120,14 @@ fn force_and_dry_run_combine_as_force_preview() {
     // previews the force run. This test only confirms clap accepts both
     // flags together; the preview semantics are covered by
     // `clean_force_dry_run_auto_approves_each_item` in tests/clean_cli.rs.
-    let each_dir = std::env::temp_dir().join("devclean-cli-test-each");
+    let each_dir = std::env::temp_dir().join("offcut-cli-test-each");
     std::fs::create_dir_all(&each_dir).unwrap();
     let toml = &format!(
         "workspace_roots = [\"{}\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n",
         each_dir.to_str().unwrap()
     );
     let cfg = write_config(toml);
-    let out = devclean()
+    let out = offcut()
         .args(["--force", "--dry-run", "--config", &cfg, "clean"])
         .env("HOME", "/nonexistent-home")
         .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
@@ -144,12 +144,12 @@ fn force_and_dry_run_combine_as_force_preview() {
 #[test]
 fn list_reflects_config_file_and_cli_overrides() {
     // The original `list` subcommand printed the resolved config. Now `list`
-    // lists projects + statuses; the old behavior lives under `devclean
+    // lists projects + statuses; the old behavior lives under `offcut
     // config`. This test verifies the preserved behavior.
     let toml =
         "workspace_roots = [\"/from/config\"]\nmax_depth = 6\ndefault_mode = \"interactive\"\n";
     let cfg = write_config(toml);
-    let out = devclean()
+    let out = offcut()
         .args([
             "--config",
             &cfg,

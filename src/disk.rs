@@ -1,10 +1,10 @@
-//! Disk-savings computation for devclean (issue #18).
+//! Disk-savings computation for offcut (issue #18).
 //!
 //! For each cleanable (status-5) project, sum the on-disk size of the items
 //! that the cleaning engine would delete — `Safe` + `Surfaced` items (in
 //! `dry_run` mode every surfaced item is auto-approved, so every non-Protected
 //! item is deletable). `Protected` items are excluded from the count:
-//! `.devcleanignore`-matched items stay on disk, never deleted.
+//! `.offcutignore`-matched items stay on disk, never deleted.
 //!
 //! The walk is cross-platform and safe:
 //!
@@ -35,7 +35,7 @@ use crate::clean::CleanItem;
 /// Each `Safe` item is always deletable; each `Surfaced` item is deletable in
 /// `dry_run` mode (the dry-run preview auto-approves every item — see
 /// `dry_run`'s contract). `Protected` items are excluded from the count
-/// (they carry an `.devcleanignore` match or an absolute-path fail-safe).
+/// (they carry an `.offcutignore` match or an absolute-path fail-safe).
 ///
 /// Returns the sum in bytes (unformatted). Returns `Ok(0)` if no deletable
 /// items exist (or all paths could not be read).
@@ -199,11 +199,7 @@ mod tests {
     fn unique_dir(label: &str) -> PathBuf {
         let mut d = std::env::temp_dir();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        d.push(format!(
-            "devclean-disk-{}-{}-{n}",
-            label,
-            std::process::id()
-        ));
+        d.push(format!("offcut-disk-{}-{}-{n}", label, std::process::id()));
         fs::create_dir_all(&d).unwrap();
         d
     }
