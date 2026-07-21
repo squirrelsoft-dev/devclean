@@ -851,3 +851,73 @@ fn clean_project_path_no_notice_without_workspace_flag() {
         "targeted project must still be cleaned"
     );
 }
+
+/// A path beginning with a literal `~` (the shell did not expand it, e.g. a
+/// quoted path or a non-shell invocation) produces the normal "not found"
+/// error plus a concise hint pointing at shell tilde expansion — closing the
+/// loop on the documented sharp edge without implementing tilde expansion
+/// inside offcut.
+#[test]
+fn clean_project_path_tilde_hint_when_shell_did_not_expand() {
+    let home = root_for("home-target-tilde");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--dry-run",
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            "~/offcut-definitely-does-not-exist-xyz",
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("not a directory"),
+        "error should name the missing path: {stderr}"
+    );
+    assert!(
+        stderr.contains("~"),
+        "error should echo the literal tilde path: {stderr}"
+    );
+    assert!(
+        stderr.contains("shell"),
+        "error should hint at shell expansion: {stderr}"
+    );
+}
+
+/// A missing path that does NOT start with `~` gets the plain error and no
+/// tilde hint — guarding against a spurious hint on ordinary misspelled paths.
+#[test]
+fn clean_project_path_no_tilde_hint_for_plain_missing_path() {
+    let home = root_for("home-target-no-tilde");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+    let missing = std::env::temp_dir().join("offcut-plain-missing-xyz");
+
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--dry-run",
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            missing.to_str().unwrap(),
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("shell"),
+        "no tilde hint for a plain missing path: {stderr}"
+    );
+}

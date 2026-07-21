@@ -258,11 +258,21 @@ pub fn discover_single(
     cfg: &Config,
 ) -> Result<DiscoveredProject, Box<dyn std::error::Error>> {
     if !path.is_dir() {
-        return Err(format!(
+        let mut msg = format!(
             "project path not found or not a directory: {}",
             path.display()
-        )
-        .into());
+        );
+        // offcut does not expand `~` itself (the caller's shell does). A
+        // quoted `~` or an invocation without a shell reaches this error
+        // with the literal `~` intact; point the user at the cause rather
+        // than leaving them to guess why a path that "looks right" failed.
+        if path.to_string_lossy().starts_with('~') {
+            msg.push_str(
+                "\n  hint: `~` is expanded by your shell — pass an absolute \
+                 path, or leave `~` unquoted so the shell expands it",
+            );
+        }
+        return Err(msg.into());
     }
     // Canonicalize to a stable absolute path so the report and `git -C` use
     // the same form regardless of how the caller typed it. Canonicalization
