@@ -20,6 +20,16 @@
 //! folder being the git project (the one git project for its descendants),
 //! not as an ancestor — all deeper items inherit that git project.
 //!
+//! `discover_single` (the `offcut clean <PROJECT_PATH>` entry point) bypasses
+//! the walk and enforces the subfolder half of this rule directly: a path
+//! inside a git worktree that is not that worktree's root is rejected
+//! outright, so single-project targeting cannot reach a subfolder the walk
+//! would never have reported as a project. The suppression half does not
+//! carry over — a nested worktree or submodule root, which the walk suppresses
+//! in favor of its ancestor, is its own root and so is a valid explicit
+//! target: the caller named that project instead of asking what lives under a
+//! workspace root.
+//!
 //! ## Walk pruning
 //!
 //! `WalkDir` is instructed via `filter_entry` to never descend into a `.git`
@@ -223,6 +233,326 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
     Ok(results)
 }
 
+/// Discover a single project at `path`, bypassing the workspace-root walk
+/// entirely. Used by `offcut clean <PROJECT_PATH>` to scope discovery and
+/// deletion strictly to the one project the caller named — no neighboring
+/// project is discovered or cleaned, even if `path` sits inside a configured
+/// workspace root.
+///
+/// `path` may be absolute or relative to the process's current directory.
+/// It is canonicalized when it exists so downstream classification and
+/// cleaning operate on a stable absolute path; a non-directory or missing
+/// path is a hard error (fail-fast, mirroring `walk_root`'s missing-root
+/// check). The directory is checked for a marker via the same `MarkerSet` as
+/// the walk; a directory with no marker is still returned (tagged
+/// `"(none)"`) so classification can report it — e.g. as `no-git` — rather
+/// than silently dropping the caller's explicit target.
+///
+/// The walk's nesting rule applies here too: a path that sits *inside* a git
+/// worktree without being its root is a subfolder of that project, not a
+/// project, and is rejected with an error naming the root. This is
+/// defense-in-depth, not the only guard: `classify::status_no_git` already
+/// refuses such a path — a subdirectory has no `.git` of its own, so it
+/// classifies as `NoGit`, which is never cleanable. This check rejects it
+/// earlier, before any classification or deletion, and with an actionable
+/// error naming the root instead of a confusing `no-git` report.
+///
+/// No progress indicator is rendered: there is no walk to report on.
+pub fn discover_single(
+    path: &Path,
+    cfg: &Config,
+) -> Result<DiscoveredProject, Box<dyn std::error::Error>> {
+    if !path.is_dir() {
+        let mut msg = format!(
+            "project path not found or not a directory: {}",
+            path.display()
+        );
+        // offcut does not expand `~` itself (the caller's shell does). A
+        // quoted `~` or an invocation without a shell reaches this error
+        // with the literal `~` intact; point the user at the cause rather
+        // than leaving them to guess why a path that "looks right" failed.
+        if path.to_string_lossy().starts_with('~') {
+            msg.push_str(
+                "\n  hint: `~` is expanded by your shell — pass an absolute \
+                 path, or leave `~` unquoted so the shell expands it",
+            );
+        }
+        return Err(msg.into());
+    }
+    // Canonicalize to a stable absolute path so the report row, `git -C`, and
+    // the classification and cleaning that follow all use the same form
+    // regardless of how the caller typed it. Canonicalization resolves
+    // symlinks too, which is the safe direction for deletion. When
+    // canonicalization fails (rare, but possible without breaking `is_dir`),
+    // fall back to a lexically normalized absolute path rather than the
+    // caller's typed path: a relative path stored in `DiscoveredProject` would
+    // be reported and re-interpreted against whatever cwd each later step
+    // runs with.
+    let resolved = resolve_path(path)?;
+    // Decide whether `resolved` is a git worktree root using git's own path
+    // resolution (`rev-parse --show-prefix` is empty iff `dir` is the
+    // toplevel) rather than a `git_root != resolved` string comparison.
+    // The comparison would false-reject a real root on a case-insensitive
+    // volume (macOS default): `canonicalize` preserves the caller's typed
+    // case while `--show-toplevel` returns the on-disk case, so
+    // `offcut clean ~/Code/looper` against an on-disk `~/code/looper` would
+    // be rejected for a case-only difference. `--show-prefix` sidesteps
+    // that because git computes the prefix relative to its own root using
+    // its own path resolution. `--show-toplevel` is kept only to name the
+    // enclosing root in the rejection error.
+    if let Some(prefix) = git_show_prefix(&resolved)
+        && !prefix.is_empty()
+    {
+        // `git_show_prefix` proved `resolved` is inside a worktree (git is
+        // available and answered), so `enclosing_git_root` should normally
+        // resolve the root. If it cannot (e.g. the root path is non-UTF-8,
+        // which `git_rev_parse` refuses to lossily decode), omit the
+        // enclosing-root clause rather than echoing the user's own path back
+        // at them — "it is inside the git project at <P> — pass that path
+        // instead" is self-contradictory when <P> is the path they just
+        // passed.
+        return Err(match enclosing_git_root(&resolved) {
+            Some(git_root) => format!(
+                "project path is not a project root: {}\n\
+                 it is inside the git project at {} — pass that path instead",
+                resolved.display(),
+                git_root.display()
+            ),
+            None => format!(
+                "project path is not a project root: {}\n\
+                 it is inside a git worktree but the enclosing root could not be resolved",
+                resolved.display()
+            ),
+        }
+        .into());
+    }
+    let markers = MarkerSet::from_entries(&cfg.project_markers)?;
+    let marker = find_marker_in(&resolved, &markers)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    Ok(DiscoveredProject {
+        path: resolved,
+        marker,
+    })
+}
+
+/// Return the path of `dir` relative to its git worktree root, with a
+/// trailing slash, as printed by `git rev-parse --show-prefix`. Empty output
+/// means `dir` IS the worktree root; `None` means `dir` is not inside a git
+/// worktree, or git's answer was unusable (see [`git_rev_parse`] for every
+/// `None` case) — classification then reports the path as `no-git` and
+/// nothing is cleaned.
+///
+/// Used by `discover_single` to decide whether an explicit target is a
+/// project root. Unlike a `git_root != resolved` string comparison, this is
+/// case-correct on case-insensitive volumes (macOS default): git computes
+/// the prefix relative to its own root using its own path resolution, so a
+/// caller's typed case that differs from the on-disk case does not
+/// false-reject a real root.
+///
+/// Only the trailing CR/LF of the command output is stripped, never
+/// surrounding whitespace: a directory name may legitimately begin or end
+/// with a space, so `.trim()` here would silently corrupt its prefix.
+fn git_show_prefix(dir: &Path) -> Option<String> {
+    git_rev_parse(dir, "--show-prefix")
+}
+
+/// Run `git -C <dir> rev-parse <arg>` and return stdout with only the
+/// trailing CR/LF stripped (not surrounding whitespace — a path component
+/// may legitimately begin or end with a space, which `.trim()` would
+/// corrupt). Returns `None` on a spawn failure (e.g. `git` is unavailable),
+/// on a non-zero exit (e.g. `dir` is not inside a git worktree), and on
+/// non-UTF-8 output, which is refused rather than lossily decoded. The single
+/// shared implementation ensures both `git_show_prefix` and
+/// `enclosing_git_root` apply the same output handling and hardening.
+fn git_rev_parse(dir: &Path, arg: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", arg])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Refuse non-UTF-8 output rather than lossily converting it: a mangled
+    // path would flow into `resolve_path`/`enclosing_git_root` and silently
+    // break the root comparison or name the wrong path in an error. This
+    // mirrors `clean::git_cmd`'s fail-safe (src/clean.rs), which refuses
+    // non-UTF-8 git output rather than risk deleting the wrong path.
+    let text = String::from_utf8(out.stdout).ok()?;
+    Some(
+        text.trim_end_matches([char::from(13), char::from(10)])
+            .to_string(),
+    )
+}
+
+/// Return the root of the git worktree containing `dir`, or `None` when `dir`
+/// is not inside a git worktree or git's answer was unusable (see
+/// [`git_rev_parse`] for every `None` case) — classification then reports the
+/// path as `no-git` and nothing is cleaned.
+///
+/// Shells out to `git rev-parse --show-toplevel` like the rest of the crate's
+/// git inspection rather than scanning ancestors for a `.git` entry: git is
+/// the authority on where a worktree starts, so a linked worktree or submodule
+/// (whose `.git` is a file pointer) correctly reports itself as a root instead
+/// of being mistaken for a subfolder of the repo above it.
+///
+/// As in [`git_show_prefix`], only the trailing CR/LF of the command output
+/// is stripped — `.trim()` would corrupt a worktree path whose leading or
+/// trailing component legitimately contains whitespace.
+fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
+    let top = git_rev_parse(dir, "--show-toplevel")?;
+    if top.is_empty() {
+        return None;
+    }
+    let top = PathBuf::from(top);
+    // Mirror `discover_single`'s resolution strategy via the shared
+    // `resolve_path` helper so the root named in the rejection error has the
+    // same shape as the target path printed beside it, even when
+    // canonicalization is unavailable on either side. `--show-toplevel`
+    // always prints an absolute path, so the helper's relative-path branch is
+    // not reached here; `.ok()` maps a resolution failure to `None`, which the
+    // caller treats as "not inside a worktree" (classification then reports
+    // the path as `no-git` and nothing is cleaned).
+    resolve_path(&top).ok()
+}
+
+/// Resolve `path` to a stable absolute path: `std::fs::canonicalize` when it
+/// succeeds, otherwise a lexically normalized absolute path via
+/// [`normalized_absolute`]. The single shared implementation of the
+/// canonicalize-with-lexical-fallback strategy — used by both
+/// `discover_single` (the target) and `enclosing_git_root` (the git root) —
+/// so the two paths `discover_single` prints side by side in its rejection
+/// error keep the same shape rather than relying on two copies staying in
+/// sync.
+///
+/// Only a *relative* `path` needs the process cwd as a base, so `current_dir`
+/// is read on that branch alone: an absolute target must not fail merely
+/// because the cwd is gone or unreadable. A failure to read the cwd for a
+/// relative path is propagated as an error naming the path.
+fn resolve_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => Ok(resolved),
+        Err(_) if path.is_absolute() => Ok(normalized_absolute(path, Path::new(""))),
+        Err(_) => {
+            let cwd = std::env::current_dir().map_err(|e| {
+                format!(
+                    "cannot resolve relative path {}: the current directory is unavailable ({e})",
+                    path.display()
+                )
+            })?;
+            Ok(normalized_absolute(path, &cwd))
+        }
+    }
+}
+
+/// Convert `path` into an absolute, lexically normalized path using `cwd`
+/// as the base when `path` is relative. Pure: no filesystem access, so it is
+/// safe to call as a fallback when `std::fs::canonicalize` has already
+/// failed and as the implementation under test in unit tests.
+///
+/// Normalization collapses `.` components, resolves `..` against the
+/// preceding components (without dropping the leading root, nor a Windows
+/// drive `Prefix` such as `C:` — popping either would yield an invalid
+/// path), and drops trailing slashes — the same shape
+/// `git rev-parse --show-toplevel` and
+/// `std::fs::canonicalize` yield on success. Symlinks are NOT resolved
+/// (that needs the filesystem), so this is a fallback only; the primary
+/// path is always `canonicalize`.
+///
+/// The result is always absolute for an absolute `cwd`. A Windows
+/// drive-relative path (`C:proj` — a `Prefix` with no following `RootDir`,
+/// which the OS resolves against that drive's own current directory) is
+/// resolved against `cwd` when `cwd` sits on that same drive (compared as
+/// Windows compares drives — see [`same_drive`]), and anchored at that
+/// drive's root otherwise (the drive's own current directory is not knowable
+/// here), since a drive-relative [`DiscoveredProject::path`] would be
+/// re-interpreted by every later `git -C` call.
+fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
+    use std::path::Component::*;
+    let mut out = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        cwd.to_path_buf()
+    };
+    let mut comps = path.components().peekable();
+    while let Some(comp) = comps.next() {
+        match comp {
+            RootDir => {
+                // An absolute `path` starts here; reset the accumulator to
+                // the root so any leading components from `cwd` are dropped.
+                // On Windows a `Prefix` (e.g. `C:`) may already be in `out`
+                // from a prior component or the cwd base — preserve it so
+                // `C:\foo` does not collapse to the driveless `\foo`.
+                let prefix = match out.components().next() {
+                    Some(Prefix(p)) => Some(p.as_os_str().to_owned()),
+                    _ => None,
+                };
+                out = PathBuf::new();
+                if let Some(p) = prefix {
+                    out.push(p);
+                }
+                out.push(comp.as_os_str());
+            }
+            CurDir => {} // collapse `.`
+            ParentDir => match out.components().next_back() {
+                // Pop a real component; otherwise drop the `..` rather than
+                // pushing it (mirrors `Path::canonicalize`, which clamps at
+                // the root instead of producing `/..` segments), so the
+                // fallback keeps the canonicalize-shaped form the rest of the
+                // flow expects.
+                Some(c) if !matches!(c, RootDir | ParentDir | CurDir | Prefix(_)) => {
+                    out.pop();
+                }
+                _ => {}
+            },
+            Prefix(p) => {
+                // A Windows drive-relative path like `C:proj` means "relative
+                // to drive C's current directory". If `cwd` is on the same
+                // drive (`C:\base`), Windows resolves `C:proj` to
+                // `C:\base\proj` — so preserve `out` (which starts as `cwd`)
+                // rather than resetting to the drive root. Only reset when
+                // the prefix names a different drive than cwd's (we don't
+                // know that drive's per-drive cwd, so anchoring at its root
+                // is the safe, absolute fallback). `C:\proj` (with a
+                // `RootDir`) still resets via the `RootDir` arm above.
+                let is_relative_drive = !path.is_absolute()
+                    && matches!(cwd.components().next(), Some(Prefix(cp)) if same_drive(p.kind(), cp.kind()));
+                if !is_relative_drive {
+                    out = PathBuf::new();
+                    out.push(p.as_os_str());
+                    // `C:proj` yields a `Prefix` with no `RootDir` behind
+                    // it — anchor at the drive root so the result stays
+                    // absolute rather than a bare `C:`.
+                    if !matches!(comps.peek(), Some(RootDir)) {
+                        out.push(RootDir.as_os_str());
+                    }
+                }
+            }
+            Normal(s) => out.push(s),
+        }
+    }
+    out
+}
+
+/// Whether two Windows path prefixes name the same drive.
+///
+/// Drive letters are case-insensitive on Windows, so `c:` and `C:` are one
+/// drive: comparing the prefixes as raw `OsStr`s would make
+/// [`normalized_absolute`] treat `c:proj` under a `C:\base` cwd as a foreign
+/// drive and anchor it at `c:\proj` — a different real directory that the
+/// clean flow would then classify and delete from. A non-disk prefix (UNC,
+/// device namespace) names no drive and never matches; the verbatim disk form
+/// (`\\?\C:`) does, since it denotes the same drive.
+fn same_drive(a: std::path::Prefix<'_>, b: std::path::Prefix<'_>) -> bool {
+    use std::path::Prefix::{Disk, VerbatimDisk};
+    match (a, b) {
+        (Disk(x) | VerbatimDisk(x), Disk(y) | VerbatimDisk(y)) => x.eq_ignore_ascii_case(&y),
+        _ => false,
+    }
+}
+
 /// Derive the descent-prune basename set from the safelist catalog.
 ///
 /// The catalog is `BUILT_IN_DEFAULTS` plus `user_patterns` (the caller's
@@ -413,6 +743,7 @@ fn find_marker_in<'a>(dir: &Path, markers: &'a MarkerSet) -> Option<&'a str> {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -661,6 +992,7 @@ mod tests {
         assert!(results[0].path.is_absolute());
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_dir_not_followed() {
         let root = tmp_root("sym");
@@ -1053,5 +1385,340 @@ mod tests {
             !paths.contains(&pkg),
             "node_modules/react must not be reported:"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // discover_single: single-project targeting for `offcut clean <path>`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn discover_single_returns_one_project_with_marker() {
+        let root = tmp_root("single_marker");
+        git_init(&root);
+        mkfixture(&root, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        let result = discover_single(&root, &cfg).unwrap();
+        assert_eq!(result.path, std::fs::canonicalize(&root).unwrap());
+        // .git wins over Cargo.toml per the marker precedence rule.
+        assert_eq!(result.marker, ".git");
+    }
+
+    #[test]
+    fn discover_single_returns_none_marker_for_unmarked_dir() {
+        let root = tmp_root("single_unmarked");
+        fs::create_dir_all(&root).unwrap();
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        let result = discover_single(&root, &cfg).unwrap();
+        assert_eq!(result.marker, "(none)");
+        assert!(result.path.is_absolute());
+    }
+
+    #[test]
+    fn discover_single_errors_on_missing_path() {
+        let root = tmp_root("single_missing");
+        let cfg = mkconfig(&root, &[".git"], 2);
+        let missing = root.join("does-not-exist");
+        assert!(discover_single(&missing, &cfg).is_err());
+    }
+
+    #[test]
+    fn discover_single_errors_on_file_not_directory() {
+        let root = tmp_root("single_file");
+        let file = root.join("not-a-dir.txt");
+        fs::write(&file, "hi").unwrap();
+        let cfg = mkconfig(&root, &[".git"], 2);
+        assert!(discover_single(&file, &cfg).is_err());
+    }
+
+    // Relative-path resolution is covered end-to-end by
+    // `clean_project_path_relative_resolves_against_cwd` in
+    // `tests/clean_cli.rs`, which sets the *child process's* cwd. A unit test
+    // would have to mutate this process's global cwd while the harness runs
+    // other tests in parallel.
+
+    #[test]
+    fn discover_single_rejects_subdirectory_of_git_project() {
+        let root = tmp_root("single_subdir");
+        git_init(&root);
+        let sub = root.join("crates").join("inner");
+        mkfixture(&sub, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 3);
+        let err = discover_single(&sub, &cfg).unwrap_err().to_string();
+        assert!(
+            err.contains("not a project root"),
+            "error should say the path is not a project root: {err}"
+        );
+        assert!(
+            err.contains(
+                std::fs::canonicalize(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "error should name the enclosing project root: {err}"
+        );
+    }
+
+    #[test]
+    fn discover_single_accepts_nested_git_project_root() {
+        let outer = tmp_root("single_nested");
+        git_init(&outer);
+        let inner = outer.join("vendor").join("lib");
+        fs::create_dir_all(&inner).unwrap();
+        git_init(&inner);
+        let cfg = mkconfig(&outer, &[".git"], 3);
+        // The inner repo is its own worktree root, so it is a valid target
+        // even though the walk would have suppressed it as nested.
+        let result = discover_single(&inner, &cfg).unwrap();
+        assert_eq!(result.path, std::fs::canonicalize(&inner).unwrap());
+        assert_eq!(result.marker, ".git");
+    }
+
+    // -----------------------------------------------------------------------
+    // git_show_prefix: the root-decision helper. Used by `discover_single`
+    // instead of a `git_root != resolved` string comparison so a real root
+    // is not false-rejected on a case-insensitive volume (macOS default)
+    // where `canonicalize` preserves typed case and `--show-toplevel`
+    // returns on-disk case. The case-variant scenario itself is not
+    // portable to a case-sensitive volume, so these tests pin the helper's
+    // decision shape (empty at root, non-empty in a subdir, None outside a
+    // repo) that the case fix relies on.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn git_show_prefix_empty_at_worktree_root() {
+        let root = tmp_root("prefix_root");
+        git_init(&root);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            git_show_prefix(&canonical).as_deref(),
+            Some(""),
+            "--show-prefix must be empty at the worktree root"
+        );
+    }
+
+    #[test]
+    fn git_show_prefix_non_empty_in_subdirectory() {
+        let root = tmp_root("prefix_sub");
+        git_init(&root);
+        let sub = root.join("crates").join("inner");
+        fs::create_dir_all(&sub).unwrap();
+        let canonical = std::fs::canonicalize(&sub).unwrap();
+        let prefix = git_show_prefix(&canonical).expect("subdir is in a repo");
+        assert!(
+            !prefix.is_empty(),
+            "--show-prefix must be non-empty inside a subdirectory: {prefix:?}"
+        );
+        assert!(
+            prefix.ends_with('/') || prefix.ends_with('\\'),
+            "--show-prefix is path-relative-to-root with a trailing separator: {prefix:?}"
+        );
+    }
+
+    #[test]
+    fn git_show_prefix_none_outside_a_repo() {
+        let dir = tmp_root("prefix_none");
+        // No git_init — a plain directory is not inside a worktree.
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(
+            git_show_prefix(&canonical),
+            None,
+            "--show-prefix must be None outside a git worktree"
+        );
+    }
+
+    /// The root-decision accepts a worktree root (show-prefix empty) even
+    /// though `enclosing_git_root` would return a toplevel that a string
+    /// comparison might reject on a case-insensitive volume. This is the
+    /// direct regression for the case-mismatch bug: a real root must not be
+    /// false-rejected.
+    #[test]
+    fn discover_single_accepts_worktree_root_via_show_prefix() {
+        let root = tmp_root("single_root_prefix");
+        git_init(&root);
+        mkfixture(&root, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        // The canonicalized root is its own toplevel, so show-prefix is
+        // empty and the root is accepted — not false-rejected by a
+        // toplevel-vs-resolved string comparison.
+        let result = discover_single(&root, &cfg).unwrap();
+        assert_eq!(result.path, std::fs::canonicalize(&root).unwrap());
+        assert_eq!(result.marker, ".git");
+    }
+
+    // -----------------------------------------------------------------------
+    // normalized_absolute: the canonicalize-failure fallback. Pure/unit-tested
+    // directly so its absolute-and-normalized shape is protected without an
+    // unportable filesystem-failure fixture. End-to-end relative-path
+    // behavior is still covered by
+    // `clean_project_path_relative_resolves_against_cwd` in
+    // `tests/clean_cli.rs` (subprocess cwd, no global-cwd mutation).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalized_absolute_joins_relative_path_against_cwd() {
+        let cwd = PathBuf::from("/home/me/work");
+        let got = normalized_absolute(Path::new("proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+    }
+
+    #[test]
+    fn normalized_absolute_collapses_curdir_components() {
+        let cwd = PathBuf::from("/home/me/work");
+        // `./proj` must collapse to the same form as `proj` so a stray `.`
+        // segment does not survive into the resolved project path.
+        let got = normalized_absolute(Path::new("./proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+        // A bare `.` collapses to the cwd itself.
+        assert_eq!(normalized_absolute(Path::new("."), &cwd), cwd);
+    }
+
+    #[test]
+    fn normalized_absolute_resolves_parent_dir_components() {
+        let cwd = PathBuf::from("/home/me/work/a/b");
+        let got = normalized_absolute(Path::new("../../proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+    }
+
+    #[test]
+    fn normalized_absolute_drops_trailing_slash() {
+        let cwd = PathBuf::from("/home/me/work");
+        // A trailing slash (e.g. from `./my-project/`) must not survive —
+        // neither `std::fs::canonicalize` nor `git rev-parse --show-toplevel`
+        // ever emits one, so the fallback must not either.
+        let got = normalized_absolute(Path::new("proj/"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+    }
+
+    #[test]
+    fn normalized_absolute_keeps_absolute_path_and_normalizes() {
+        let cwd = PathBuf::from("/irrelevant");
+        // An absolute input ignores `cwd` and normalizes in place.
+        let got = normalized_absolute(Path::new("/srv/apps/./looper/../looper"), &cwd);
+        assert_eq!(got, PathBuf::from("/srv/apps/looper"));
+    }
+
+    #[test]
+    fn normalized_absolute_does_not_pop_past_root() {
+        let cwd = PathBuf::from("/home/me");
+        // Over-normalized `..` past the root stays at the root rather than
+        // producing an invalid empty path.
+        let got = normalized_absolute(Path::new("../../../../proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/proj"));
+    }
+
+    /// The shape the fallback exists to produce: for a relative target it
+    /// must yield the same absolute path git itself reports for that project
+    /// root, so a canonicalize failure still leaves `discover_single` with a
+    /// path it can report, hand to `git -C`, and classify. Asserted against a
+    /// real repo and real `git rev-parse --show-toplevel` output — the shapes
+    /// the other `normalized_absolute` tests only describe literally. The
+    /// final assertion pins the regression itself: the un-normalized relative
+    /// path (what the fallback used to yield) is not that absolute path.
+    #[test]
+    fn normalized_absolute_fallback_matches_git_root_shape() {
+        let root = tmp_root("single_fallback_cmp");
+        git_init(&root);
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        let parent = canonical_root.parent().unwrap().to_path_buf();
+        let leaf = PathBuf::from(canonical_root.file_name().unwrap());
+        let git_root = enclosing_git_root(&canonical_root).expect("repo has a git root");
+
+        // Bare relative name resolved against the cwd, as `discover_single`
+        // does on the canonicalize-failure branch.
+        assert_eq!(normalized_absolute(&leaf, &parent), git_root);
+        // The `./name/` form a shell tab-completion produces resolves the
+        // same way — a stray `.` or trailing slash must not break equality.
+        let dotted = PathBuf::from(format!("./{}/", leaf.display()));
+        assert_eq!(normalized_absolute(&dotted, &parent), git_root);
+        // Pre-fallback shape: the relative path left as typed. Unequal to
+        // git's always-absolute answer — the drift being prevented.
+        assert_ne!(leaf, git_root);
+    }
+
+    // Windows drive-prefix preservation: a `RootDir` component must not
+    // discard a `Prefix` (e.g. `C:`) already accumulated in `out`. On Unix
+    // `Path::new("C:\\foo")` parses as a single `Normal` component, not a
+    // `Prefix`, so this code path is Windows-only and the test is gated
+    // accordingly — it documents and pins the behavior for Windows builds.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_preserves_windows_drive_prefix() {
+        let cwd = PathBuf::from("D:\\cwd");
+        // `C:\proj` is absolute; the `C:` prefix must survive the
+        // `RootDir` component so the result is `C:\proj`, not `\\proj`.
+        let got = normalized_absolute(Path::new("C:\\proj"), &cwd);
+        assert_eq!(got, PathBuf::from("C:\\proj"));
+        // A drive-relative `\\proj` against a `C:` cwd base preserves the
+        // inherited `C:` prefix too.
+        let got = normalized_absolute(Path::new("\\proj"), &PathBuf::from("C:\\base"));
+        assert_eq!(got, PathBuf::from("C:\\proj"));
+    }
+
+    /// A Windows drive-relative path (`C:proj`) must come back absolute: the
+    /// OS would resolve it against drive `C:`'s own current directory, so a
+    /// `DiscoveredProject.path` left in that form would be re-interpreted by
+    /// every later `git -C` call.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_anchors_drive_relative_path() {
+        // `C:proj` with cwd on a *different* drive: we don't know drive C's
+        // per-drive cwd, so the safe fallback anchors at the drive root.
+        let cwd = PathBuf::from("D:\\cwd");
+        let got = normalized_absolute(Path::new("C:proj"), &cwd);
+        assert!(
+            got.is_absolute(),
+            "drive-relative result: {}",
+            got.display()
+        );
+        assert_eq!(got, PathBuf::from("C:\\proj"));
+        // A bare prefix anchors at the drive root rather than the cwd.
+        let got = normalized_absolute(Path::new("C:"), &cwd);
+        assert!(
+            got.is_absolute(),
+            "drive-relative result: {}",
+            got.display()
+        );
+        assert_eq!(got, PathBuf::from("C:\\"));
+    }
+
+    /// A Windows drive-relative path whose drive matches the cwd's drive is
+    /// resolved against that drive's current directory (Windows semantics):
+    /// `C:proj` with cwd `C:\base` yields `C:\base\proj`, not `C:\proj`.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_drive_relative_preserves_cwd_on_same_drive() {
+        let cwd = PathBuf::from("C:\\base");
+        let got = normalized_absolute(Path::new("C:proj"), &cwd);
+        assert_eq!(got, PathBuf::from("C:\\base\\proj"));
+    }
+
+    /// Windows drive letters are case-insensitive, so a case-only difference
+    /// between the target's drive and the cwd's must still count as the same
+    /// drive. A case-sensitive comparison would anchor `c:proj` at `c:\proj`
+    /// instead of resolving it against the cwd — a different real directory
+    /// that the clean flow would then classify and delete from.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_drive_relative_matches_cwd_drive_case_insensitively() {
+        let got = normalized_absolute(Path::new("c:proj"), &PathBuf::from("C:\\base"));
+        assert_eq!(got, PathBuf::from("C:\\base\\proj"));
+        let got = normalized_absolute(Path::new("C:proj"), &PathBuf::from("c:\\base"));
+        assert_eq!(got, PathBuf::from("c:\\base\\proj"));
+        // A genuinely different drive still anchors at that drive's root.
+        let got = normalized_absolute(Path::new("c:proj"), &PathBuf::from("D:\\base"));
+        assert_eq!(got, PathBuf::from("c:\\proj"));
+    }
+
+    /// A `..` component must not pop a Windows drive `Prefix` (e.g. `C:`) —
+    /// doing so would drop the drive letter and yield an invalid path. The
+    /// `Prefix(_)` guard in the `ParentDir` arm prevents it.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_does_not_pop_windows_drive_prefix() {
+        let cwd = PathBuf::from("C:\\base");
+        // `..` at the root level must not pop the `C:` prefix.
+        let got = normalized_absolute(Path::new("..\\proj"), &cwd);
+        assert_eq!(got, PathBuf::from("C:\\proj"));
     }
 }

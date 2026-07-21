@@ -82,7 +82,25 @@ enum Command {
     /// Interactive cleaning flow: report each project sorted by status,
     /// then clean each cleanable project. Destructive: deletes on approval
     /// or under --force.
-    Clean,
+    ///
+    /// When an optional `<PROJECT_PATH>` is supplied, discovery and deletion
+    /// are scoped strictly to that one project — no other project is
+    /// discovered or cleaned, even if it sits inside a configured workspace
+    /// root. The path may be absolute or relative to the current directory;
+    /// the caller's shell expands `~` (offcut does not perform tilde
+    /// expansion itself). It must be the project root: a path inside a git
+    /// project is rejected before anything is deleted. Every top-level flag
+    /// (`--force`, `--dry-run`, `--config`) still applies to the targeted
+    /// project; `--workspace` is accepted but ignored — the path
+    /// alone scopes the run, and combining the two prints a notice saying so.
+    Clean {
+        /// Optional project root to clean. When supplied, discovery and
+        /// deletion are scoped strictly to that project — no neighboring
+        /// project is discovered or cleaned. Absolute or relative; the
+        /// caller's shell expands `~`. A subdirectory of a git project is
+        /// rejected — pass the project root.
+        project_path: Option<PathBuf>,
+    },
     /// Create a config file pre-populated with a workspace root. Writes a
     /// TOML template under the platform config dir (or an explicit --config
     /// target), with every Config field documented and the given workspace
@@ -100,8 +118,9 @@ fn main() {
         None => {
             // Default run: discover, classify, report each project sorted by
             // status, and run the interactive clean flow on each cleanable
-            // project. Same code path as `offcut clean`.
-            if let Err(e) = run_cleaning(&cli) {
+            // project. Same code path as `offcut clean` (without a project
+            // path — the default run never targets a single project).
+            if let Err(e) = run_cleaning(&cli, None) {
                 eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
@@ -142,8 +161,24 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Command::Clean) => {
-            if let Err(e) = run_cleaning(&cli) {
+        Some(Command::Clean { project_path }) => {
+            // When the caller explicitly combines `--workspace` with a
+            // `PROJECT_PATH`, the explicit path alone drives the run and
+            // `--workspace` is silently a no-op. Emit one concise stderr
+            // notice so a mistyped invocation is not mistaken for a wider
+            // run. (Config-file `workspace_roots` are not flagged here —
+            // they are a standing setting, not a per-invocation mistake.)
+            if project_path.is_some() && !cli.workspace.is_empty() {
+                eprintln!(
+                    "offcut: clean <PROJECT_PATH> scopes the run to that project; --workspace {}",
+                    if cli.workspace.len() == 1 {
+                        format!("{} is ignored", cli.workspace[0])
+                    } else {
+                        format!("({} paths) is ignored", cli.workspace.len())
+                    }
+                );
+            }
+            if let Err(e) = run_cleaning(&cli, project_path.as_deref()) {
                 eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
@@ -566,9 +601,22 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `offcut clean` (and the default run with no subcommand): the interactive
-/// cleaning flow (issue #8). Sorts every discovered project by status, reports
-/// each non-cleanable one with a one-line reason, and lists each cleanable one.
+/// `offcut clean [PROJECT_PATH]` (and the default run with no subcommand): the
+/// interactive cleaning flow (issue #8). Sorts every discovered project by
+/// status, reports each non-cleanable one with a one-line reason, and lists
+/// each cleanable one.
+///
+/// When `project_path` is `Some`, discovery is bypassed entirely and the
+/// flow operates on exactly that one project: no other project is discovered
+/// or cleaned, even if it lives inside a configured workspace root. The path
+/// is resolved to an absolute directory (canonicalized when it exists); a
+/// non-directory, missing, or non-root path (a directory inside a git
+/// project) is a hard error, raised before any classification or deletion.
+/// The caller's shell is expected to expand `~` — offcut does not perform
+/// tilde expansion itself.
+/// Every top-level flag (`--force`, `--dry-run`, `--config`) still applies
+/// to the targeted project, unchanged by path targeting (`--verbose` is
+/// accepted here too, and produces no additional output, as elsewhere).
 ///
 /// For each cleanable project, enumerates untracked items, prompts about each
 /// `Surfaced` item, prompts about the project itself, then executes `git
@@ -578,11 +626,17 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Destructive: `offcut clean` deletes files on approval or under `--force`.
 /// Only one subcommand runs the deletion; the default run runs it too.
-fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run_cleaning(
+    cli: &Cli,
+    project_path: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));
 
-    let projects = discovery::discover(&cfg)?;
+    let projects = match project_path {
+        Some(p) => vec![discovery::discover_single(p, &cfg)?],
+        None => discovery::discover(&cfg)?,
+    };
     if projects.is_empty() {
         println!("clean: no projects found");
         return Ok(());

@@ -262,6 +262,7 @@ mod tests {
     }
 
     /// A symlink counts its own size, not its target's total.
+    #[cfg(unix)]
     #[test]
     fn symlink_counts_own_size_not_target() {
         let root = unique_dir("symlink");
@@ -288,6 +289,7 @@ mod tests {
     }
 
     /// A permission-denied file counts as zero — the listing does not abort.
+    #[cfg(unix)]
     #[test]
     fn permission_denied_counts_as_zero() {
         use std::os::unix::fs::PermissionsExt;
