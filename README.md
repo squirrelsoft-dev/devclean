@@ -287,8 +287,11 @@ it is inside the git project at /Users/me/code/looper — pass that path instead
 ```
 
 This mirrors discovery's nesting rule (a folder inside a git worktree is a
-subfolder of that project, not a project) and keeps `git clean` from ever
-running against a subtree of a repo. A nested repository — a submodule or a
+subfolder of that project, not a project). Classification would refuse such a
+path anyway — a subdirectory has no `.git` of its own, so it is reported
+`no-git`, which is never cleanable — so the root check is a second, earlier
+guard that fails with an actionable error instead of a confusing status.
+A nested repository — a submodule or a
 vendored clone — *is* its own root, so it may be targeted directly. A
 directory that is not inside any git project is still accepted and reported
 by classification (as `no-git`) rather than silently dropped.

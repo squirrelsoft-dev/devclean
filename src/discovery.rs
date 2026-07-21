@@ -245,11 +245,12 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
 ///
 /// The walk's nesting rule applies here too: a path that sits *inside* a git
 /// worktree without being its root is a subfolder of that project, not a
-/// project, and is rejected with an error naming the root. Without this the
-/// bypass would fail open — `git -C <subdir>` answers for the enclosing repo,
-/// so a clean+pushed parent would classify the subdirectory as `Cleanable`
-/// and `git clean` would delete untracked files under it. The check runs
-/// before any classification or deletion.
+/// project, and is rejected with an error naming the root. This is
+/// defense-in-depth, not the only guard: `classify::status_no_git` already
+/// refuses such a path — a subdirectory has no `.git` of its own, so it
+/// classifies as `NoGit`, which is never cleanable. This check rejects it
+/// earlier, before any classification or deletion, and with an actionable
+/// error naming the root instead of a confusing `no-git` report.
 ///
 /// No progress indicator is rendered: there is no walk to report on.
 pub fn discover_single(
