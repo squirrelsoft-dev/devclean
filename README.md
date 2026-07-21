@@ -269,7 +269,10 @@ $ offcut --force --dry-run clean ~/code/looper   # preview the targeted clean
 Every top-level flag (`--force`, `--dry-run`, `--verbose`, `--config`)
 still applies to the targeted project. `--workspace` is accepted but
 ignored in this mode — the explicit path alone drives the run, so a project
-outside any configured workspace root can still be cleaned. The targeted
+outside any configured workspace root can still be cleaned. When `--workspace`
+is combined with a `PROJECT_PATH`, offcut emits one concise stderr notice
+that the path scopes the run and `--workspace` is ignored, so a mistyped
+invocation is not mistaken for a wider run. The targeted
 project still flows through classification: a non-cleanable project (e.g.
 one with uncommitted work) is reported as such and not cleaned. A missing or
 non-directory path is a hard error.

@@ -764,3 +764,90 @@ fn clean_project_path_ignores_configured_workspace_roots() {
         "configured-workspace project must NOT be cleaned when the target points elsewhere: {out}"
     );
 }
+
+/// `offcut --workspace <path> clean <PROJECT_PATH>` emits one concise stderr
+/// notice that PROJECT_PATH scopes the run and `--workspace` is ignored, so a
+/// mistyped invocation is not mistaken for a wider run. The targeted project
+/// is still cleaned; the workspace path is not discovered.
+#[test]
+fn clean_project_path_warns_when_workspace_flag_combined() {
+    let target = cleanable_sibling("target-ws-notice");
+    let decoy = cleanable_sibling("target-ws-decoy");
+    let home = root_for("home-target-ws-notice");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--force",
+            "--workspace",
+            decoy.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            target.to_str().unwrap(),
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(out.status.success(), "run should succeed: stderr={stderr}");
+    // The notice goes to stderr, names --workspace, and says it is ignored.
+    assert!(
+        stderr.contains("--workspace"),
+        "expected a --workspace notice on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("ignored"),
+        "notice should say --workspace is ignored: {stderr}"
+    );
+    // The targeted project is still cleaned.
+    assert!(
+        !target.join("target").exists(),
+        "targeted project must still be cleaned: {stdout}"
+    );
+    // The decoy workspace path is NOT discovered or cleaned.
+    assert!(
+        decoy.join("target/bin").is_file(),
+        "workspace decoy must NOT be cleaned: {stdout}"
+    );
+}
+
+/// The `--workspace` notice is NOT emitted when no `PROJECT_PATH` is supplied
+/// (the normal clean flow honors `--workspace`), nor when a `PROJECT_PATH` is
+/// supplied without `--workspace`. This guards against a noisy false notice.
+#[test]
+fn clean_project_path_no_notice_without_workspace_flag() {
+    let target = cleanable_sibling("target-no-notice");
+    let home = root_for("home-target-no-notice");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--force",
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            target.to_str().unwrap(),
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "run should succeed: stderr={stderr}");
+    assert!(
+        !stderr.contains("--workspace"),
+        "no --workspace notice when the flag is absent: {stderr}"
+    );
+    assert!(
+        !target.join("target").exists(),
+        "targeted project must still be cleaned"
+    );
+}

@@ -161,6 +161,22 @@ fn main() {
             }
         }
         Some(Command::Clean { project_path }) => {
+            // When the caller explicitly combines `--workspace` with a
+            // `PROJECT_PATH`, the explicit path alone drives the run and
+            // `--workspace` is silently a no-op. Emit one concise stderr
+            // notice so a mistyped invocation is not mistaken for a wider
+            // run. (Config-file `workspace_roots` are not flagged here —
+            // they are a standing setting, not a per-invocation mistake.)
+            if project_path.is_some() && !cli.workspace.is_empty() {
+                eprintln!(
+                    "offcut: clean <PROJECT_PATH> scopes the run to that project; --workspace {}",
+                    if cli.workspace.len() == 1 {
+                        format!("{} is ignored", cli.workspace[0])
+                    } else {
+                        format!("({} paths) is ignored", cli.workspace.len())
+                    }
+                );
+            }
             if let Err(e) = run_cleaning(&cli, project_path.as_deref()) {
                 eprintln!("offcut: {e}");
                 std::process::exit(1);
