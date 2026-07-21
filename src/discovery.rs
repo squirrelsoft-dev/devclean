@@ -285,9 +285,21 @@ pub fn discover_single(
     // absolute. The shared `resolve_path` helper is used on both sides of
     // that comparison so the invariant is structural, not merely documented.
     let resolved = resolve_path(path)?;
-    if let Some(git_root) = enclosing_git_root(&resolved)
-        && git_root != resolved
+    // Decide whether `resolved` is a git worktree root using git's own path
+    // resolution (`rev-parse --show-prefix` is empty iff `dir` is the
+    // toplevel) rather than a `git_root != resolved` string comparison.
+    // The comparison would false-reject a real root on a case-insensitive
+    // volume (macOS default): `canonicalize` preserves the caller's typed
+    // case while `--show-toplevel` returns the on-disk case, so
+    // `offcut clean ~/Code/looper` against an on-disk `~/code/looper` would
+    // be rejected for a case-only difference. `--show-prefix` sidesteps
+    // that because git computes the prefix relative to its own root using
+    // its own path resolution. `--show-toplevel` is kept only to name the
+    // enclosing root in the rejection error.
+    if let Some(prefix) = git_show_prefix(&resolved)
+        && !prefix.is_empty()
     {
+        let git_root = enclosing_git_root(&resolved).unwrap_or_else(|| resolved.clone());
         return Err(format!(
             "project path is not a project root: {}\n\
              it is inside the git project at {} — pass that path instead",
@@ -304,6 +316,31 @@ pub fn discover_single(
         path: resolved,
         marker,
     })
+}
+
+/// Return the path of `dir` relative to its git worktree root, with a
+/// trailing slash, as printed by `git rev-parse --show-prefix`. Empty output
+/// means `dir` IS the worktree root; `None` means `dir` is not inside a git
+/// worktree (or `git` is unavailable — classification then reports the path
+/// as `no-git` and nothing is cleaned).
+///
+/// Used by `discover_single` to decide whether an explicit target is a
+/// project root. Unlike a `git_root != resolved` string comparison, this is
+/// case-correct on case-insensitive volumes (macOS default): git computes
+/// the prefix relative to its own root using its own path resolution, so a
+/// caller's typed case that differs from the on-disk case does not
+/// false-reject a real root.
+fn git_show_prefix(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-prefix"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Return the root of the git worktree containing `dir`, or `None` when `dir`
@@ -1345,6 +1382,78 @@ mod tests {
         // even though the walk would have suppressed it as nested.
         let result = discover_single(&inner, &cfg).unwrap();
         assert_eq!(result.path, std::fs::canonicalize(&inner).unwrap());
+        assert_eq!(result.marker, ".git");
+    }
+
+    // -----------------------------------------------------------------------
+    // git_show_prefix: the root-decision helper. Used by `discover_single`
+    // instead of a `git_root != resolved` string comparison so a real root
+    // is not false-rejected on a case-insensitive volume (macOS default)
+    // where `canonicalize` preserves typed case and `--show-toplevel`
+    // returns on-disk case. The case-variant scenario itself is not
+    // portable to a case-sensitive volume, so these tests pin the helper's
+    // decision shape (empty at root, non-empty in a subdir, None outside a
+    // repo) that the case fix relies on.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn git_show_prefix_empty_at_worktree_root() {
+        let root = tmp_root("prefix_root");
+        git_init(&root);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            git_show_prefix(&canonical).as_deref(),
+            Some(""),
+            "--show-prefix must be empty at the worktree root"
+        );
+    }
+
+    #[test]
+    fn git_show_prefix_non_empty_in_subdirectory() {
+        let root = tmp_root("prefix_sub");
+        git_init(&root);
+        let sub = root.join("crates").join("inner");
+        fs::create_dir_all(&sub).unwrap();
+        let canonical = std::fs::canonicalize(&sub).unwrap();
+        let prefix = git_show_prefix(&canonical).expect("subdir is in a repo");
+        assert!(
+            !prefix.is_empty(),
+            "--show-prefix must be non-empty inside a subdirectory: {prefix:?}"
+        );
+        assert!(
+            prefix.ends_with('/') || prefix.ends_with('\\') || !prefix.is_empty(),
+            "--show-prefix is path-relative-to-root"
+        );
+    }
+
+    #[test]
+    fn git_show_prefix_none_outside_a_repo() {
+        let dir = tmp_root("prefix_none");
+        // No git_init — a plain directory is not inside a worktree.
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(
+            git_show_prefix(&canonical),
+            None,
+            "--show-prefix must be None outside a git worktree"
+        );
+    }
+
+    /// The root-decision accepts a worktree root (show-prefix empty) even
+    /// though `enclosing_git_root` would return a toplevel that a string
+    /// comparison might reject on a case-insensitive volume. This is the
+    /// direct regression for the case-mismatch bug: a real root must not be
+    /// false-rejected.
+    #[test]
+    fn discover_single_accepts_worktree_root_via_show_prefix() {
+        let root = tmp_root("single_root_prefix");
+        git_init(&root);
+        mkfixture(&root, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        // The canonicalized root is its own toplevel, so show-prefix is
+        // empty and the root is accepted — not false-rejected by a
+        // toplevel-vs-resolved string comparison.
+        let result = discover_single(&root, &cfg).unwrap();
+        assert_eq!(result.path, std::fs::canonicalize(&root).unwrap());
         assert_eq!(result.marker, ".git");
     }
 
