@@ -454,9 +454,10 @@ fn resolve_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// The result is always absolute for an absolute `cwd`. A Windows
 /// drive-relative path (`C:proj` — a `Prefix` with no following `RootDir`,
 /// which the OS resolves against that drive's own current directory) is
-/// anchored at the drive root, since a drive-relative
-/// [`DiscoveredProject::path`] would be re-interpreted by every later
-/// `git -C` call.
+/// resolved against `cwd` when `cwd` sits on that same drive, and anchored
+/// at that drive's root otherwise (the drive's own current directory is not
+/// knowable here), since a drive-relative [`DiscoveredProject::path`] would
+/// be re-interpreted by every later `git -C` call.
 fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
     use std::path::Component::*;
     let mut out = if path.is_absolute() {
@@ -504,7 +505,7 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
                 // the prefix differs from cwd's drive (we don't know that
                 // drive's per-drive cwd, so anchoring at its root is the
                 // safe, absolute fallback). `C:\proj` (with a `RootDir`)
-                // still resets via the `RootDir` arm below.
+                // still resets via the `RootDir` arm above.
                 let is_relative_drive = !path.is_absolute()
                     && matches!(cwd.components().next(), Some(Prefix(cp)) if cp.as_os_str() == p.as_os_str());
                 if !is_relative_drive {
