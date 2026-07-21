@@ -83,10 +83,10 @@ force run without deleting. Runtime precedence lives in one place each:
 prompting/auto-approval.
 
 For each cleanable project, `offcut clean` enumerates untracked items,
-prompts each `Surfaced` item (delete or keep), prompts each project (clean?
-y/n), then executes `git clean -xfd -e <globs>` if approved. `--force` skips
-each prompt and auto-approves each surfaced item. `--dry-run` previews each
-item's fate and deletes nothing.
+prompts each `Surfaced` item, asks for a final `[y/N]` confirmation for the
+project, then executes `git clean -xfd -e <globs>` if approved. `--force`
+skips each prompt and auto-approves each surfaced item. `--dry-run` previews
+each item's fate and deletes nothing.
 
 ```sh
 $ offcut                       # default run: list + interactive clean
@@ -117,6 +117,32 @@ disables color even on a TTY. Known limitation: offcut emits standard ANSI
 escapes and does not enable virtual-terminal processing on legacy Windows
 conhost (plain `cmd.exe`), where colored output may render as escape
 sequences — modern Windows Terminal, macOS, and Linux terminals are fine.
+
+### Terminal interface
+
+On a capable terminal, `offcut list`, the default `offcut` run, and
+`offcut clean` use a compact terminal UI modeled around four states:
+
+- **Working** — discovery, classification, sizing, and cleaning render as a
+  single live spinner line with the current path and, where known, an `N/M`
+  counter. Press Ctrl-C to cancel; no partially approved delete is resumed.
+- **Workspace summary** — after discovery/classification, projects are shown
+  in a table with project name, status, reclaimable size, branch, and last
+  commit age where git can report it. Narrow terminals fall back to stacked
+  rows so paths and labels do not wrap into adjacent columns.
+- **Clean review** — each cleanable project has a review panel showing its
+  branch state and every gitignored path Offcut would remove or ask about,
+  followed by the same `[y/N]` approval controls used by the plain prompt
+  flow.
+- **Blocked** — a targeted `offcut clean <PROJECT_PATH>` against a
+  non-cleanable project shows the refusal reason, relevant `git status`
+  detail for WIP trees, and the command to rerun after the project is clean
+  and pushed.
+
+When stdout is piped, redirected, or `TERM=dumb`, Offcut keeps the plain
+line-oriented output and suppresses live progress. Color is independently
+disabled by `NO_COLOR` or `CLICOLOR=0`; the safety model and exit behavior do
+not depend on terminal styling.
 
 ## `.offcutignore`
 
@@ -196,10 +222,10 @@ them. An absolute path on the cleaning path is treated as **protected**
 
 `offcut clean` runs the interactive flow (#8): it reports every project
 sorted by status (statuses 1–4 need manual attention; status-5 projects are
-the cleanable subjects), asks "Clean the N cleanable projects? (y/n)", then
-loops over the cleanable projects one at a time — showing the items that
-would be deleted *before* asking anything, prompting per surfaced item
-(delete or keep), and prompting per project — and finally deletes the
+the cleanable subjects), asks "Remove gitignored paths from the N cleanable
+projects? [y/N]", then loops over the cleanable projects one at a time —
+showing the items that would be deleted *before* asking anything, prompting
+per surfaced item, and prompting per project — and finally deletes the
 approved items. Answering "n" (or EOF) to the first prompt exits without
 touching anything.
 
@@ -372,25 +398,25 @@ empty result.
 Each subcommand that runs discovery — `offcut discovery`, `offcut list`,
 `offcut classification`, and the default run / `offcut clean` — renders a
 live single-line progress indicator while walking each workspace root:
-`walking: <path>` overwrites itself in place via a carriage return on a TTY,
-so the display never scrolls. (`offcut clean <PROJECT_PATH>` bypasses the walk
-entirely, so it renders no `walking:` line and starts at the phases below.) The
-same indicator continues through the later phases: while each project's git
-state is examined the line reads
-`classifying N/M: <path>`, while each cleanable project's reclaimable size is
-computed the line reads `sizing N/M: <path>` (single-pass — bytes are stored
-once and the aggregate is the sum of those already-computed bytes, not a
-second walk), and while an approved project's untracked junk is deleted it
-reads `cleaning N/M: <path>` (N is the 1-based project counter, M the total).
-When stdout is piped or redirected, nothing is rendered — a stream of
-CR-terminated partial paths would be garbage in a pipe or log file.
-Terminal width is resolved via the `terminal_size` crate, falling back to
-`COLUMNS` then a default of 80; paths that would wrap are truncated with a
-leading ellipsis so the leaf (current directory) stays visible. Whenever
-regular output must interleave with the indicator (per-project rows,
-warnings), the progress line is first cleared in place; when a phase
-completes, it is cleared and a newline is emitted so the following summary
-line starts on a fresh line.
+`<spinner> walking: <path>` overwrites itself in place via a carriage return
+on a capable TTY, so the display never scrolls. (`offcut clean
+<PROJECT_PATH>` bypasses the walk entirely, so it renders no `walking:` line
+and starts at the phases below.) The same indicator continues through the
+later phases: while each project's git state is examined the line reads
+`<spinner> classifying N/M: <path>`, while each cleanable project's
+reclaimable size is computed the line reads `<spinner> sizing N/M: <path>`
+(single-pass — bytes are stored once and the aggregate is the sum of those
+already-computed bytes, not a second walk), and while an approved project's
+untracked junk is deleted it reads `<spinner> cleaning N/M: <path>` (N is the
+1-based project counter, M the total). When stdout is piped, redirected, or
+`TERM=dumb`, nothing is rendered — a stream of CR-terminated partial paths
+would be garbage in a pipe or log file. Terminal width is resolved via the
+`terminal_size` crate, falling back to `COLUMNS` then a default of 80; paths
+that would wrap are truncated with a leading ellipsis so the leaf (current
+directory) stays visible. Whenever regular output must interleave with the
+indicator (per-project rows, warnings), the progress line is first cleared in
+place; when a phase completes, it is cleared and a newline is emitted so the
+following summary line starts on a fresh line.
 
 See `src/discovery.rs` for the matching and nesting rules;
 `src/progress.rs` for the live indicator; `tests/discovery_cli.rs` for

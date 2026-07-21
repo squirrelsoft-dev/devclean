@@ -56,6 +56,7 @@ use std::path::PathBuf;
 
 use crate::classify::Status;
 use crate::clean::{Classification, CleanItem};
+use crate::output;
 
 /// Pre-computed inputs for the interactive flow: the discovered projects
 /// already classified and sorted, the flags, and the per-project items
@@ -139,7 +140,7 @@ fn read_line<R: BufRead>(reader: &mut R) -> Option<String> {
     }
 }
 
-/// Prompt the user: "Clean the N cleanable projects? (y/n)". Returns
+/// Prompt the user: "Remove gitignored paths from the N cleanable projects? [y/N]". Returns
 /// whether the user answered "y" (or EOF → "no") — callers exit cleanly on
 /// "no".
 ///
@@ -152,7 +153,13 @@ pub fn collect_all_approval<R: BufRead>(reader: &mut R, num_cleanable: usize) ->
     if num_cleanable == 0 {
         return false;
     }
-    let question = format!("Clean the {num_cleanable} cleanable projects? (y/n)",);
+    let hint = if output::stderr_terminal_ui_enabled() {
+        "[y/N]"
+    } else {
+        "(y/n)"
+    };
+    let question =
+        format!("Remove gitignored paths from the {num_cleanable} cleanable projects? {hint}");
     eprintln!("? {question}");
     matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
 }
@@ -163,6 +170,7 @@ pub fn collect_all_approval<R: BufRead>(reader: &mut R, num_cleanable: usize) ->
 /// about to approve, in order, before any question is asked.
 fn print_project_report(path: &std::path::Path, items: &[CleanItem]) {
     eprintln!("{}:", path.display());
+    eprintln!("  Gitignored review");
     for item in items {
         let (label, fate) = match item.classification {
             Classification::Protected => ("protected", "kept"),
@@ -199,9 +207,14 @@ pub fn collect_each_item<R: BufRead>(
             continue;
         }
         eprintln!(
-            "? {}{} [surfaced] delete or keep? (y/n)",
+            "? {}{} [surfaced] delete? {}",
             item.rel_path.display(),
             if item.is_dir { "/" } else { "" },
+            if output::stderr_terminal_ui_enabled() {
+                "[y/N]"
+            } else {
+                "(y/n)"
+            },
         );
         let approved =
             matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"));
@@ -218,7 +231,15 @@ pub fn collect_project_approval<R: BufRead>(
     reader: &mut R,
     project_path: &std::path::Path,
 ) -> bool {
-    let question = format!("Clean {}? (y/n)", project_path.display(),);
+    let hint = if output::stderr_terminal_ui_enabled() {
+        "[y/N]"
+    } else {
+        "(y/n)"
+    };
+    let question = format!(
+        "Remove these gitignored paths from {}? {hint}",
+        project_path.display(),
+    );
     eprintln!("? {question}");
     matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
 }

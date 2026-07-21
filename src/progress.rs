@@ -67,6 +67,7 @@ pub struct ProgressWriter<W: Write> {
     /// Whether the writer is a TTY. Gated on output::is_tty() at construction
     /// time -- the struct never renders when not a TTY.
     active: bool,
+    tick: usize,
 }
 
 impl<W: Write> ProgressWriter<W> {
@@ -76,12 +77,13 @@ impl<W: Write> ProgressWriter<W> {
     /// otherwise each update is a no-op. Terminal width is resolved via
     /// terminal_size, then COLUMNS, then a default of 80.
     pub fn new(writer: W) -> Self {
-        let active = output::is_tty();
+        let active = output::stdout_terminal_ui_enabled();
         let width = terminal_width();
         Self {
             writer,
             width,
             active,
+            tick: 0,
         }
     }
 
@@ -94,7 +96,8 @@ impl<W: Write> ProgressWriter<W> {
         if !self.active {
             return;
         }
-        let label = "walking: ";
+        let label = format!("{} walking: ", self.spinner());
+        self.tick = self.tick.wrapping_add(1);
         let line = render_line(label, path, self.width);
         // CR-prefixed, no trailing newline, flushed immediately.
         let _ = self.writer.write_all(b"\r");
@@ -120,7 +123,8 @@ impl<W: Write> ProgressWriter<W> {
         if !self.active {
             return;
         }
-        let label = format!("{} {}/{}: ", phase, idx, total);
+        let label = format!("{} {} {}/{}: ", self.spinner(), phase, idx, total);
+        self.tick = self.tick.wrapping_add(1);
         let line = render_line(&label, path, self.width);
         // CR-prefixed, no trailing newline, flushed immediately.
         let _ = self.writer.write_all(b"\r");
@@ -159,6 +163,11 @@ impl<W: Write> ProgressWriter<W> {
         let _ = self.writer.write_all(b"\n");
         let _ = self.writer.flush();
     }
+
+    fn spinner(&self) -> &'static str {
+        const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        FRAMES[self.tick % FRAMES.len()]
+    }
 }
 
 /// Resolve terminal width: terminal_size first, then COLUMNS env var,
@@ -182,7 +191,8 @@ fn terminal_width() -> usize {
 /// Wide chars (CJK, emoji) are counted in display columns, never in bytes.
 /// The returned string is padded with trailing spaces to `width` so each
 /// update fully overwrites a longer previous one.
-fn render_line(label: &str, path: &Path, width: usize) -> String {
+fn render_line(label: impl AsRef<str>, path: &Path, width: usize) -> String {
+    let label = label.as_ref();
     let display = path.display().to_string();
     let max_cols = width.saturating_sub(label.width());
     let truncated = if display.width() > max_cols {
@@ -227,6 +237,7 @@ mod tests {
             writer: buf,
             width: 80,
             active: false,
+            tick: 0,
         };
         pw.update(Path::new("/some/deep/path"));
         pw.finish();
@@ -243,6 +254,7 @@ mod tests {
             writer: buf,
             width: 40,
             active: true,
+            tick: 0,
         };
         pw.update(Path::new("/some/deep/path"));
         let bytes = String::from_utf8_lossy(&pw.writer);
@@ -279,6 +291,7 @@ mod tests {
             writer: buf,
             width: 20,
             active: true,
+            tick: 0,
         };
         // Path longer than width minus label.
         pw.update(Path::new("/very/deep/nested/project/structure/here"));
@@ -312,6 +325,7 @@ mod tests {
             writer: buf,
             width: 20,
             active: true,
+            tick: 0,
         };
         // With width 20 the slice start lands mid-character in the CJK leaf,
         // so this panics unless the start is snapped to a char boundary.
@@ -339,6 +353,7 @@ mod tests {
             writer: buf,
             width: 30,
             active: true,
+            tick: 0,
         };
         pw.update(Path::new("/Users/dev/工程目录/项目文件夹的名称很长"));
         let bytes = String::from_utf8_lossy(&pw.writer);
@@ -361,6 +376,7 @@ mod tests {
             writer: buf,
             width: 10,
             active: true,
+            tick: 0,
         };
         pw.update(Path::new("/some/deep/path"));
         pw.finish();
@@ -381,6 +397,7 @@ mod tests {
             writer: buf,
             width: 20,
             active: true,
+            tick: 0,
         };
         pw.update(Path::new("/some/path"));
         pw.clear();
@@ -411,6 +428,7 @@ mod tests {
             writer: buf,
             width: 20,
             active: false,
+            tick: 0,
         };
         pw.clear();
         assert!(pw.writer.is_empty(), "non-TTY clear must emit nothing");
@@ -424,6 +442,7 @@ mod tests {
             writer: buf,
             width: 20,
             active: true,
+            tick: 0,
         };
         pw.update(Path::new("/some/path"));
         pw.finish();
@@ -449,6 +468,7 @@ mod tests {
             writer: buf,
             width: 40,
             active: true,
+            tick: 0,
         };
         // First update: long path (within width).
         pw.update(Path::new("/a/very/deep/nested/project/structure"));
@@ -482,6 +502,7 @@ mod tests {
             writer: buf,
             width: 40,
             active: true,
+            tick: 0,
         };
         pw.update_phase("classifying", 3, 47, Path::new("/my/project"));
         let bytes = String::from_utf8_lossy(&pw.writer);
@@ -507,6 +528,7 @@ mod tests {
             writer: buf,
             width: 80,
             active: false,
+            tick: 0,
         };
         pw.update_phase("cleaning", 1, 5, Path::new("/a/b/c"));
         pw.finish();
@@ -524,8 +546,9 @@ mod tests {
         let buf: Vec<u8> = Vec::new();
         let mut pw = ProgressWriter {
             writer: buf,
-            width: 25,
+            width: 35,
             active: true,
+            tick: 0,
         };
         // Path longer than width minus the phase/counter label.
         pw.update_phase(
@@ -552,6 +575,7 @@ mod tests {
             writer: buf,
             width: 25,
             active: true,
+            tick: 0,
         };
         pw.update_phase("cleaning", 1, 3, Path::new("/Users/séb/工程/项目文件夹"));
         let bytes = String::from_utf8_lossy(&pw.writer);
@@ -572,6 +596,7 @@ mod tests {
             writer: buf,
             width: 40,
             active: true,
+            tick: 0,
         };
         pw.update_phase(
             "classifying",
@@ -604,6 +629,7 @@ mod tests {
             writer: buf,
             width: 40,
             active: true,
+            tick: 0,
         };
         pw.update_phase("cleaning", 1, 3, Path::new("/project"));
         let bytes = String::from_utf8_lossy(&pw.writer);

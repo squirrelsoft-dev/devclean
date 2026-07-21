@@ -10,7 +10,8 @@ mod progress;
 mod safelist;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use clap::{Parser, Subcommand};
 
@@ -398,6 +399,66 @@ fn classify_projects(
     out
 }
 
+fn git_text(project_path: &Path, args: &[&str]) -> Option<String> {
+    let out = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn branch_label(project_path: &Path, status: classify::Status) -> String {
+    if status == classify::Status::NoGit {
+        return "-".to_string();
+    }
+    git_text(project_path, &["branch", "--show-current"])
+        .or_else(|| {
+            git_text(project_path, &["rev-parse", "--short", "HEAD"])
+                .map(|h| format!("detached@{h}"))
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn changed_label(project_path: &Path, status: classify::Status) -> String {
+    if status == classify::Status::NoGit {
+        return "-".to_string();
+    }
+    git_text(project_path, &["log", "-1", "--format=%cr"]).unwrap_or_else(|| "-".to_string())
+}
+
+fn branch_state_line(project_path: &Path, status: classify::Status) -> String {
+    let branch = branch_label(project_path, status);
+    match status {
+        classify::Status::Cleanable | classify::Status::Clean => {
+            format!("{branch} · clean tree · remote ✓ pushed")
+        }
+        classify::Status::Wip => format!("{branch} · uncommitted changes · remote ✓"),
+        classify::Status::Unpushed => format!("{branch} · has unpushed commits"),
+        classify::Status::NoRemote => format!("{branch} · no remote configured"),
+        classify::Status::NoGit => "-".to_string(),
+    }
+}
+
+fn status_detail_lines(project_path: &Path, status: classify::Status) -> Vec<String> {
+    if status != classify::Status::Wip {
+        return Vec::new();
+    }
+    git_text(project_path, &["status", "--porcelain"])
+        .map(|s| s.lines().take(6).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// `offcut list`: show each discovered project with its git status, sorted
 /// by severity (most-needs-attention first). Read-only — no cleaning.
 ///
@@ -416,9 +477,9 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
-    let mut rows: Vec<(String, classify::Status)> = classify_projects(&projects)
+    let mut rows: Vec<(PathBuf, classify::Status)> = classify_projects(&projects)
         .into_iter()
-        .map(|(path, status, _)| (path.display().to_string(), status))
+        .map(|(path, status, _)| (path, status))
         .collect();
     rows.sort_by_key(|&(_, status)| status);
 
@@ -438,7 +499,7 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let m = cleanable_indices.len();
         let mut progress = progress::ProgressWriter::new(std::io::stdout());
         for (i, &idx) in cleanable_indices.iter().enumerate() {
-            let path = std::path::Path::new(&rows[idx].0);
+            let path = rows[idx].0.as_path();
             progress.update_phase("sizing", i + 1, m, path);
             let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
                 Ok(s) => s,
@@ -446,7 +507,7 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     progress.clear();
                     eprintln!(
                         "warning: {}: could not build safe-to-delete set: {e}",
-                        rows[idx].0
+                        rows[idx].0.display()
                     );
                     continue;
                 }
@@ -465,13 +526,13 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                         progress.clear();
                         eprintln!(
                             "warning: {}: could not compute reclaimable size: {e}",
-                            rows[idx].0
+                            rows[idx].0.display()
                         );
                     }
                 },
                 Err(e) => {
                     progress.clear();
-                    eprintln!("warning: {}: dry_run failed: {e}", rows[idx].0);
+                    eprintln!("warning: {}: dry_run failed: {e}", rows[idx].0.display());
                 }
             }
         }
@@ -489,27 +550,51 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
-    // lets `output::color` fall back to its runtime gate.
-    println!(
-        "{}",
-        output::format_summary(
-            rows.len(),
-            None,
-            if cleanable_count > 0 {
-                Some(cleanable_count)
-            } else {
-                None
-            },
+    if output::stdout_terminal_ui_enabled() {
+        let emit_colors = output::stdout_color_enabled();
+        let branches: Vec<String> = rows.iter().map(|(p, s)| branch_label(p, *s)).collect();
+        let changed: Vec<String> = rows.iter().map(|(p, s)| changed_label(p, *s)).collect();
+        let table_rows: Vec<output::ProjectTableRow<'_>> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, (path, status))| output::ProjectTableRow {
+                path,
+                status: *status,
+                size: per_project_size[idx].as_deref(),
+                branch: Some(branches[idx].as_str()),
+                changed: Some(changed[idx].as_str()),
+            })
+            .collect();
+        println!("⟩ scanned configured workspaces · {} projects", rows.len());
+        for line in output::format_project_table(
+            &table_rows,
+            cleanable_count,
             total_reclaimable_str.as_deref(),
-        )
-    );
-    for (idx, (path, status)) in rows.iter().enumerate() {
-        let size = per_project_size[idx].as_deref();
+            output::terminal_width(),
+            emit_colors,
+        ) {
+            println!("{line}");
+        }
+    } else {
+        // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
+        // lets `output::color` fall back to its runtime gate.
         println!(
             "{}",
-            output::format_project_row(std::path::Path::new(path), *status, None, size,)
+            output::format_summary(
+                rows.len(),
+                None,
+                if cleanable_count > 0 {
+                    Some(cleanable_count)
+                } else {
+                    None
+                },
+                total_reclaimable_str.as_deref(),
+            )
         );
+        for (idx, (path, status)) in rows.iter().enumerate() {
+            let size = per_project_size[idx].as_deref();
+            println!("{}", output::format_project_row(path, *status, None, size,));
+        }
     }
     Ok(())
 }
@@ -585,9 +670,9 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
-    let mut rows: Vec<(String, classify::Status)> = classify_projects(&projects)
+    let mut rows: Vec<(PathBuf, classify::Status)> = classify_projects(&projects)
         .into_iter()
-        .map(|(path, status, _)| (path.display().to_string(), status))
+        .map(|(path, status, _)| (path, status))
         .collect();
     rows.sort_by_key(|&(_, status)| status);
 
@@ -596,7 +681,12 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         rows.len()
     );
     for (path, status) in &rows {
-        println!("  [{}] {path} -> {}", status.rank(), status.label());
+        println!(
+            "  [{}] {} -> {}",
+            status.rank(),
+            path.display(),
+            status.label()
+        );
     }
     Ok(())
 }
@@ -724,37 +814,74 @@ fn run_cleaning(
     } else {
         None
     };
-    // The aggregate reclaimable is printed alongside the header — the
-    // per-project rows below each carry their own size too.
-    println!(
-        "clean: {} project(s) — sorted by status",
-        all_projects.len()
-    );
-    println!(
-        "{}",
-        output::format_summary(
-            all_projects.len(),
-            None,
-            if cleanable_count > 0 {
-                Some(cleanable_count)
-            } else {
-                None
-            },
-            total_reclaimable_str.as_deref(),
-        )
-    );
     let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
     let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
+    let rich_stdout = output::stdout_terminal_ui_enabled();
+    let emit_colors = output::stdout_color_enabled();
+    if rich_stdout {
+        let branches: Vec<String> = all_projects
+            .iter()
+            .map(|(p, s, _)| branch_label(p, *s))
+            .collect();
+        let changed: Vec<String> = all_projects
+            .iter()
+            .map(|(p, s, _)| changed_label(p, *s))
+            .collect();
+        let table_rows: Vec<output::ProjectTableRow<'_>> = all_projects
+            .iter()
+            .enumerate()
+            .map(|(idx, (path, status, _))| output::ProjectTableRow {
+                path,
+                status: *status,
+                size: per_project_size[idx].as_deref(),
+                branch: Some(branches[idx].as_str()),
+                changed: Some(changed[idx].as_str()),
+            })
+            .collect();
+        println!(
+            "⟩ scanned configured workspaces · {} projects",
+            all_projects.len()
+        );
+        for line in output::format_project_table(
+            &table_rows,
+            cleanable_count,
+            total_reclaimable_str.as_deref(),
+            output::terminal_width(),
+            emit_colors,
+        ) {
+            println!("{line}");
+        }
+    } else {
+        // The aggregate reclaimable is printed alongside the header — the
+        // per-project rows below each carry their own size too.
+        println!(
+            "clean: {} project(s) — sorted by status",
+            all_projects.len()
+        );
+        println!(
+            "{}",
+            output::format_summary(
+                all_projects.len(),
+                None,
+                if cleanable_count > 0 {
+                    Some(cleanable_count)
+                } else {
+                    None
+                },
+                total_reclaimable_str.as_deref(),
+            )
+        );
+    }
     for (idx, (path, status, _ignore_set)) in all_projects.iter().enumerate() {
-        match status {
-            classify::Status::Cleanable => {
-                let (items, safe_set) = match (
-                    per_project_items[idx].take(),
-                    per_project_safe_set[idx].take(),
-                ) {
-                    (Some(items), Some(safe_set)) => (items, safe_set),
-                    _ => continue,
-                };
+        if *status == classify::Status::Cleanable {
+            let (items, safe_set) = match (
+                per_project_items[idx].take(),
+                per_project_safe_set[idx].take(),
+            ) {
+                (Some(items), Some(safe_set)) => (items, safe_set),
+                _ => continue,
+            };
+            if !rich_stdout {
                 println!(
                     "{}",
                     output::format_project_row(
@@ -764,19 +891,33 @@ fn run_cleaning(
                         per_project_size[idx].as_deref()
                     )
                 );
-                cleanable_items.push((path.clone(), items));
-                cleanable_meta.push((idx, safe_set));
             }
-            _ => {
-                println!("{}", output::format_project_row(path, *status, None, None));
-            }
+            cleanable_items.push((path.clone(), items));
+            cleanable_meta.push((idx, safe_set));
+        } else if !rich_stdout {
+            println!("{}", output::format_project_row(path, *status, None, None));
         }
     }
 
     // Zero cleanable: summary and exit 0 — no prompts, no enumeration,
     // nothing to clean. The flow only runs when there is a subject to clean.
     if cleanable_items.is_empty() {
-        println!("clean: no cleanable projects — nothing to delete");
+        if rich_stdout && project_path.is_some() {
+            if let Some((path, status, _)) = all_projects.first() {
+                for line in output::format_blocked_project(
+                    path,
+                    *status,
+                    &branch_state_line(path, *status),
+                    &status_detail_lines(path, *status),
+                    None,
+                    emit_colors,
+                ) {
+                    println!("{line}");
+                }
+            }
+        } else {
+            println!("clean: no cleanable projects — nothing to delete");
+        }
         return Ok(());
     }
 
@@ -809,45 +950,68 @@ fn run_cleaning(
         let will_execute = r.project_approved && !cli.dry_run;
         clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
         clean_progress.clear();
-        println!(
-            "clean {}: {} — {}",
-            r.path.display(),
+        if rich_stdout {
+            let size = per_project_size[*idx].as_deref();
+            for line in output::format_clean_review(
+                &r.path,
+                &branch_state_line(&r.path, r.status),
+                &r.items,
+                size,
+                output::terminal_width(),
+                emit_colors,
+            ) {
+                println!("{line}");
+            }
             if r.project_approved {
-                "approved"
-            } else {
-                "skipped"
-            },
-            r.status.label()
-        );
-        for item in &r.items {
-            let label = match item.classification {
-                clean::Classification::Protected => "protected",
-                clean::Classification::Safe => "safe-to-delete",
-                clean::Classification::Surfaced => "surfaced",
-            };
-            let verdict = if r.would_delete.contains(&item.rel_path) {
                 if will_execute {
-                    " (deleting)"
+                    println!("⟩ cleaning {}", r.path.display());
                 } else {
-                    " (would delete)"
+                    println!("⟩ dry-run only - nothing deleted");
                 }
-            } else if cli.dry_run
-                && !cli.force
-                && item.classification == clean::Classification::Surfaced
-            {
-                // A real interactive run would ask about this item, so the
-                // preview must not claim either fate.
-                " (would prompt)"
             } else {
-                " (kept)"
-            };
+                println!("⟩ skipped by user");
+            }
+        } else {
             println!(
-                "  {}{} [{}]{}",
-                item.rel_path.display(),
-                if item.is_dir { "/" } else { "" },
-                label,
-                verdict
+                "clean {}: {} — {}",
+                r.path.display(),
+                if r.project_approved {
+                    "approved"
+                } else {
+                    "skipped"
+                },
+                r.status.label()
             );
+            for item in &r.items {
+                let label = match item.classification {
+                    clean::Classification::Protected => "protected",
+                    clean::Classification::Safe => "safe-to-delete",
+                    clean::Classification::Surfaced => "surfaced",
+                };
+                let verdict = if r.would_delete.contains(&item.rel_path) {
+                    if will_execute {
+                        " (deleting)"
+                    } else {
+                        " (would delete)"
+                    }
+                } else if cli.dry_run
+                    && !cli.force
+                    && item.classification == clean::Classification::Surfaced
+                {
+                    // A real interactive run would ask about this item, so the
+                    // preview must not claim either fate.
+                    " (would prompt)"
+                } else {
+                    " (kept)"
+                };
+                println!(
+                    "  {}{} [{}]{}",
+                    item.rel_path.display(),
+                    if item.is_dir { "/" } else { "" },
+                    label,
+                    verdict
+                );
+            }
         }
 
         if will_execute {
@@ -872,11 +1036,22 @@ fn run_cleaning(
             clean_progress.clear();
             match outcome {
                 Ok(_) => {
-                    println!(
-                        "clean {}: deleted {} item(s)",
-                        r.path.display(),
-                        r.would_delete.len()
-                    );
+                    if rich_stdout {
+                        for line in output::format_clean_success(
+                            &r.path,
+                            r.would_delete.len(),
+                            per_project_size[*idx].as_deref(),
+                            emit_colors,
+                        ) {
+                            println!("{line}");
+                        }
+                    } else {
+                        println!(
+                            "clean {}: deleted {} item(s)",
+                            r.path.display(),
+                            r.would_delete.len()
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!("clean {}: failed: {e}", r.path.display());

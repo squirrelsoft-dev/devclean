@@ -20,14 +20,50 @@
 use owo_colors::{OwoColorize, Style as OwoStyle};
 use std::io::IsTerminal;
 use std::path::Path;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::classify::Status;
+use crate::clean::{Classification, CleanItem};
 use crate::interactive::status_reason;
 
 /// Whether stdout is a TTY. Used as the runtime gate for color emission:
 /// if stdout is a TTY, each formatted line is colored; otherwise plain.
 pub fn is_tty() -> bool {
     std::io::stdout().is_terminal()
+}
+
+/// Whether stderr is a TTY. Interactive prompts and warnings use stderr, so
+/// they need their own gate instead of borrowing stdout's redirection state.
+pub fn stderr_is_tty() -> bool {
+    std::io::stderr().is_terminal()
+}
+
+/// Whether the current terminal can support the richer Offcut UI treatment.
+/// `TERM=dumb` is intentionally plain even when a stream is technically a TTY.
+pub fn terminal_ui_enabled(stream_is_tty: bool) -> bool {
+    stream_is_tty && !std::env::var_os("TERM").is_some_and(|v| v == "dumb")
+}
+
+/// Whether stdout should receive the rich terminal presentation.
+pub fn stdout_terminal_ui_enabled() -> bool {
+    terminal_ui_enabled(is_tty())
+}
+
+/// Whether stderr should receive the rich interactive prompt presentation.
+pub fn stderr_terminal_ui_enabled() -> bool {
+    terminal_ui_enabled(stderr_is_tty())
+}
+
+/// Current terminal width, used by table renderers. Kept here so presentation
+/// code does not duplicate terminal-size fallback rules.
+pub fn terminal_width() -> usize {
+    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
+        return w as usize;
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(80)
 }
 
 /// Runtime color gate: colored only on a TTY, and only when neither
@@ -43,6 +79,11 @@ fn color_enabled() -> bool {
     is_tty()
 }
 
+/// Whether stdout should emit ANSI color under the current environment.
+pub fn stdout_color_enabled() -> bool {
+    color_enabled()
+}
+
 /// Color `text` with `style`, gated by `emit_colors`.
 ///
 /// When `emit_colors` is `None`, uses the runtime gate (TTY plus the
@@ -52,6 +93,16 @@ fn color_enabled() -> bool {
 pub fn color(text: &str, style: OwoStyle, emit_colors: Option<bool>) -> String {
     let emit = emit_colors.unwrap_or_else(color_enabled);
     if emit {
+        format!("{}", text.style(style))
+    } else {
+        text.to_string()
+    }
+}
+
+/// Color gate for streams other than stdout. Used by the interactive stderr
+/// presentation; tests pass an explicit `emit_colors` value instead.
+pub fn color_for_stream(text: &str, style: OwoStyle, emit_colors: bool) -> String {
+    if emit_colors {
         format!("{}", text.style(style))
     } else {
         text.to_string()
@@ -141,9 +192,279 @@ fn status_style(status: Status) -> OwoStyle {
         Status::NoRemote => OwoStyle::new().yellow(),
         Status::Unpushed => OwoStyle::new().yellow(),
         Status::Wip => OwoStyle::new().yellow(),
-        Status::Cleanable => OwoStyle::new().green().bold(),
+        Status::Cleanable => OwoStyle::new().cyan().bold(),
         Status::Clean => OwoStyle::new().green(),
     }
+}
+
+/// One row in the reference-style workspace project table.
+#[derive(Debug, Clone, Copy)]
+pub struct ProjectTableRow<'a> {
+    pub path: &'a Path,
+    pub status: Status,
+    pub size: Option<&'a str>,
+    pub branch: Option<&'a str>,
+    pub changed: Option<&'a str>,
+}
+
+/// Format the finished workspace survey state. Wide terminals get the full
+/// reference table; narrow terminals degrade to a compact stacked layout that
+/// still keeps the same hierarchy and status legend.
+pub fn format_project_table(
+    rows: &[ProjectTableRow<'_>],
+    cleanable_count: usize,
+    total_reclaimable: Option<&str>,
+    width: usize,
+    emit_colors: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let summary = match total_reclaimable {
+        Some(size) if cleanable_count > 0 => {
+            format!(
+                "✓ {} projects · ~{} reclaimable across {} cleanable",
+                rows.len(),
+                size,
+                cleanable_count
+            )
+        }
+        _ => format!("✓ {} projects · {} cleanable", rows.len(), cleanable_count),
+    };
+
+    if width >= 84 {
+        let project_w = width.saturating_sub(12 + 10 + 16 + 10 + 14).max(18);
+        out.push(format!(
+            "{}  {:<12}  {:>10}  {:<16}  {:>10}",
+            pad_or_truncate("PROJECT", project_w),
+            "STATUS",
+            "RECLAIM",
+            "BRANCH",
+            "CHANGED"
+        ));
+        for row in rows {
+            out.push(format!(
+                "{}  {:<12}  {:>10}  {:<16}  {:>10}",
+                pad_or_truncate(&project_name(row.path), project_w),
+                colored_status(row.status, emit_colors),
+                row.size.unwrap_or("-"),
+                pad_or_truncate(row.branch.unwrap_or("-"), 16),
+                row.changed.unwrap_or("-")
+            ));
+        }
+    } else {
+        for row in rows {
+            out.push(format!(
+                "{} {}",
+                color_for_stream("●", status_style(row.status), emit_colors),
+                project_name(row.path)
+            ));
+            out.push(format!(
+                "  {} · reclaim {} · branch {} · changed {}",
+                colored_status(row.status, emit_colors),
+                row.size.unwrap_or("-"),
+                row.branch.unwrap_or("-"),
+                row.changed.unwrap_or("-")
+            ));
+        }
+    }
+
+    out.push(String::new());
+    out.push(color_for_stream(
+        &summary,
+        OwoStyle::new().green().bold(),
+        emit_colors,
+    ));
+    out.push(format!(
+        "run {} to reclaim all, or {} to inspect one",
+        color_for_stream("offcut clean", OwoStyle::new().bold(), emit_colors),
+        color_for_stream(
+            "offcut clean <project>",
+            OwoStyle::new().bold(),
+            emit_colors
+        )
+    ));
+    out.push(String::new());
+    out.push(format!(
+        "{} cleanable - safe to remove  {} clean - nothing to trim  {} wip - uncommitted work  {} no-remote/unpushed - not pushed  {} no-git - not a repo",
+        color_for_stream("●", status_style(Status::Cleanable), emit_colors),
+        color_for_stream("●", status_style(Status::Clean), emit_colors),
+        color_for_stream("●", status_style(Status::Wip), emit_colors),
+        color_for_stream("●", status_style(Status::NoRemote), emit_colors),
+        color_for_stream("●", status_style(Status::NoGit), emit_colors),
+    ));
+    out
+}
+
+/// Format the project-review state shown immediately before approval.
+pub fn format_clean_review(
+    path: &Path,
+    branch_line: &str,
+    items: &[CleanItem],
+    total_size: Option<&str>,
+    width: usize,
+    emit_colors: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(format!(
+        "⟩ analyzing {} · {}",
+        color_for_stream(&project_name(path), OwoStyle::new().bold(), emit_colors),
+        dim(&path.display().to_string(), emit_colors)
+    ));
+    out.push(format!(
+        "status   {}",
+        color_for_stream(
+            Status::Cleanable.label(),
+            status_style(Status::Cleanable),
+            emit_colors
+        )
+    ));
+    out.push(format!("branch   {branch_line}"));
+    out.push(String::new());
+    out.push(dim("GITIGNORED REVIEW", emit_colors));
+    let item_width = width.saturating_sub(18).max(10);
+    for item in items {
+        let label = match item.classification {
+            Classification::Protected => "protected",
+            Classification::Safe => "safe-to-delete",
+            Classification::Surfaced => "needs approval",
+        };
+        out.push(format!(
+            "  ▸ {:<item_width$} {}",
+            pad_or_truncate(
+                &format!(
+                    "{}{}",
+                    item.rel_path.display(),
+                    if item.is_dir { "/" } else { "" }
+                ),
+                item_width
+            ),
+            dim(label, emit_colors)
+        ));
+    }
+    out.push(format!(
+        "total · {} item(s){}",
+        items.len(),
+        total_size.map(|s| format!(" · ~{s}")).unwrap_or_default()
+    ));
+    out.push(format!(
+        "? Remove these gitignored paths? {}",
+        dim("[y/N]", emit_colors)
+    ));
+    out
+}
+
+/// Format the blocked clean state for a non-cleanable project.
+pub fn format_blocked_project(
+    path: &Path,
+    status: Status,
+    branch_line: &str,
+    details: &[String],
+    possible_reclaim: Option<&str>,
+    emit_colors: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(format!(
+        "⟩ analyzing {} · {}",
+        color_for_stream(&project_name(path), OwoStyle::new().bold(), emit_colors),
+        dim(&path.display().to_string(), emit_colors)
+    ));
+    out.push(format!(
+        "status   {}",
+        color_for_stream(status.label(), status_style(status), emit_colors)
+    ));
+    out.push(format!("branch   {branch_line}"));
+    out.push(String::new());
+    out.push(color_for_stream(
+        &format!("✗ refusing to clean - {}", status_reason(status)),
+        status_style(status).bold(),
+        emit_colors,
+    ));
+    out.push("offcut only cleans projects with a clean, pushed tree, so nothing in progress is ever lost.".to_string());
+    for detail in details {
+        out.push(format!("   {}", dim(detail, emit_colors)));
+    }
+    out.push(format!(
+        "→ commit, push, or initialize as needed, then run {} again",
+        color_for_stream(
+            &format!("offcut clean {}", path.display()),
+            OwoStyle::new().bold(),
+            emit_colors
+        )
+    ));
+    if let Some(size) = possible_reclaim {
+        out.push(dim(
+            &format!("   ~{size} would become reclaimable once the project is cleanable."),
+            emit_colors,
+        ));
+    }
+    out
+}
+
+/// Format the post-clean success state.
+pub fn format_clean_success(
+    path: &Path,
+    deleted_count: usize,
+    reclaimed: Option<&str>,
+    emit_colors: bool,
+) -> Vec<String> {
+    let size = reclaimed.map(|s| format!("~{s} - ")).unwrap_or_default();
+    vec![
+        color_for_stream(
+            &format!(
+                "✓ reclaimed {size}removed {deleted_count} item(s) from {}",
+                project_name(path)
+            ),
+            OwoStyle::new().green().bold(),
+            emit_colors,
+        ),
+        "gitignored paths only - tracked files untouched.".to_string(),
+    ]
+}
+
+fn colored_status(status: Status, emit_colors: bool) -> String {
+    color_for_stream(status.label(), status_style(status), emit_colors)
+}
+
+fn dim(text: &str, emit_colors: bool) -> String {
+    color_for_stream(text, OwoStyle::new().dimmed(), emit_colors)
+}
+
+fn project_name(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn pad_or_truncate(text: &str, width: usize) -> String {
+    let truncated = truncate_cols(text, width);
+    let pad = width.saturating_sub(truncated.width());
+    format!("{truncated}{}", " ".repeat(pad))
+}
+
+fn truncate_cols(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let ellipsis = "…";
+    if width <= ellipsis.width() {
+        return ellipsis.to_string();
+    }
+    let keep = width - ellipsis.width();
+    let mut cols = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if cols + ch_width > keep {
+            break;
+        }
+        cols += ch_width;
+        out.push(ch);
+    }
+    out.push_str(ellipsis);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -399,5 +720,93 @@ mod tests {
             s.contains("sorted by status"),
             "summary must fall back to legacy: {s}"
         );
+    }
+
+    #[test]
+    fn rich_project_table_has_reference_columns() {
+        let rows = vec![
+            ProjectTableRow {
+                path: Path::new("/workspace/dashboard"),
+                status: Status::Cleanable,
+                size: Some("1.2 GB"),
+                branch: Some("main"),
+                changed: Some("2h ago"),
+            },
+            ProjectTableRow {
+                path: Path::new("/workspace/design-system"),
+                status: Status::Wip,
+                size: Some("540 MB"),
+                branch: Some("feat/tokens"),
+                changed: Some("12m ago"),
+            },
+        ];
+        let rendered = format_project_table(&rows, 1, Some("1.2 GB"), 100, false).join("\n");
+        assert!(rendered.contains("PROJECT"));
+        assert!(rendered.contains("STATUS"));
+        assert!(rendered.contains("RECLAIM"));
+        assert!(rendered.contains("BRANCH"));
+        assert!(rendered.contains("CHANGED"));
+        assert!(rendered.contains("dashboard"));
+        assert!(rendered.contains("cleanable"));
+        assert!(rendered.contains("~1.2 GB reclaimable across 1 cleanable"));
+    }
+
+    #[test]
+    fn narrow_project_table_degrades_to_stacked_rows() {
+        let rows = vec![ProjectTableRow {
+            path: Path::new("/workspace/dashboard"),
+            status: Status::Cleanable,
+            size: Some("1.2 GB"),
+            branch: Some("main"),
+            changed: Some("2h ago"),
+        }];
+        let rendered = format_project_table(&rows, 1, Some("1.2 GB"), 50, false).join("\n");
+        assert!(!rendered.contains("PROJECT"));
+        assert!(rendered.contains("dashboard"));
+        assert!(rendered.contains("reclaim 1.2 GB"));
+        assert!(!rendered.contains("\x1b["));
+    }
+
+    #[test]
+    fn clean_review_renders_confirmation_control() {
+        let items = vec![CleanItem {
+            rel_path: std::path::PathBuf::from("node_modules"),
+            is_dir: true,
+            classification: Classification::Safe,
+        }];
+        let rendered = format_clean_review(
+            Path::new("/workspace/dashboard"),
+            "main · clean tree · remote ✓ pushed",
+            &items,
+            Some("1.2 GB"),
+            90,
+            false,
+        )
+        .join("\n");
+        assert!(rendered.contains("GITIGNORED REVIEW"));
+        assert!(rendered.contains("node_modules/"));
+        assert!(rendered.contains("? Remove these gitignored paths? [y/N]"));
+    }
+
+    #[test]
+    fn blocked_project_renders_refusal_and_next_action() {
+        let rendered = format_blocked_project(
+            Path::new("/workspace/design-system"),
+            Status::Wip,
+            "feat/tokens · uncommitted changes · remote ✓",
+            &[" M src/tokens/color.ts".to_string()],
+            Some("540 MB"),
+            false,
+        )
+        .join("\n");
+        assert!(rendered.contains("refusing to clean"));
+        assert!(rendered.contains("uncommitted work in progress"));
+        assert!(rendered.contains("M src/tokens/color.ts"));
+        assert!(rendered.contains("would become reclaimable"));
+    }
+
+    #[test]
+    fn terminal_ui_disabled_for_non_tty_streams() {
+        assert!(!terminal_ui_enabled(false));
     }
 }
