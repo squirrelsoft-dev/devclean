@@ -275,7 +275,9 @@ that the path scopes the run and `--workspace` is ignored, so a mistyped
 invocation is not mistaken for a wider run. The targeted
 project still flows through classification: a non-cleanable project (e.g.
 one with uncommitted work) is reported as such and not cleaned. A missing or
-non-directory path is a hard error.
+non-directory path is a hard error; when such a path still begins with a
+literal `~` (the shell did not expand it — say it was quoted), the error
+carries a hint pointing at shell tilde expansion.
 
 `<PROJECT_PATH>` must be the **project root**. A path inside a git project —
 say `~/code/looper/crates/inner` — is rejected before anything is deleted,
