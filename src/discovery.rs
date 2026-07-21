@@ -21,9 +21,14 @@
 //! not as an ancestor — all deeper items inherit that git project.
 //!
 //! `discover_single` (the `offcut clean <PROJECT_PATH>` entry point) bypasses
-//! the walk but not this rule: a path inside a git worktree that is not that
-//! worktree's root is rejected outright, so single-project targeting cannot
-//! reach a subfolder the walk would never have reported as a project.
+//! the walk and enforces the subfolder half of this rule directly: a path
+//! inside a git worktree that is not that worktree's root is rejected
+//! outright, so single-project targeting cannot reach a subfolder the walk
+//! would never have reported as a project. The suppression half does not
+//! carry over — a nested worktree or submodule root, which the walk suppresses
+//! in favor of its ancestor, is its own root and so is a valid explicit
+//! target: the caller named that project instead of asking what lives under a
+//! workspace root.
 //!
 //! ## Walk pruning
 //!
