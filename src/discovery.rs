@@ -450,14 +450,22 @@ fn resolve_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// `std::fs::canonicalize` yield on success. Symlinks are NOT resolved
 /// (that needs the filesystem), so this is a fallback only; the primary
 /// path is always `canonicalize`.
+///
+/// The result is always absolute for an absolute `cwd`. A Windows
+/// drive-relative path (`C:proj` — a `Prefix` with no following `RootDir`,
+/// which the OS resolves against that drive's own current directory) is
+/// anchored at the drive root, since a drive-relative
+/// [`DiscoveredProject::path`] would be re-interpreted by every later
+/// `git -C` call.
 fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
+    use std::path::Component::*;
     let mut out = if path.is_absolute() {
         PathBuf::new()
     } else {
         cwd.to_path_buf()
     };
-    for comp in path.components() {
-        use std::path::Component::*;
+    let mut comps = path.components().peekable();
+    while let Some(comp) = comps.next() {
         match comp {
             RootDir => {
                 // An absolute `path` starts here; reset the accumulator to
@@ -490,6 +498,11 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
             Prefix(p) => {
                 out = PathBuf::new();
                 out.push(p.as_os_str());
+                // `C:proj` yields a `Prefix` with no `RootDir` behind it —
+                // anchor at the drive root so the result stays absolute.
+                if !matches!(comps.peek(), Some(RootDir)) {
+                    out.push(RootDir.as_os_str());
+                }
             }
             Normal(s) => out.push(s),
         }
@@ -687,6 +700,7 @@ fn find_marker_in<'a>(dir: &Path, markers: &'a MarkerSet) -> Option<&'a str> {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -935,6 +949,7 @@ mod tests {
         assert!(results[0].path.is_absolute());
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_dir_not_followed() {
         let root = tmp_root("sym");
@@ -1595,6 +1610,23 @@ mod tests {
         // inherited `C:` prefix too.
         let got = normalized_absolute(Path::new("\\proj"), &PathBuf::from("C:\\base"));
         assert_eq!(got, PathBuf::from("C:\\proj"));
+    }
+
+    /// A Windows drive-relative path (`C:proj`) must come back absolute: the
+    /// OS would resolve it against drive `C:`'s own current directory, so a
+    /// `DiscoveredProject.path` left in that form would be re-interpreted by
+    /// every later `git -C` call.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_anchors_drive_relative_path() {
+        let cwd = PathBuf::from("D:\\cwd");
+        let got = normalized_absolute(Path::new("C:proj"), &cwd);
+        assert!(got.is_absolute(), "drive-relative result: {}", got.display());
+        assert_eq!(got, PathBuf::from("C:\\proj"));
+        // A bare prefix anchors at the drive root rather than the cwd.
+        let got = normalized_absolute(Path::new("C:"), &cwd);
+        assert!(got.is_absolute(), "drive-relative result: {}", got.display());
+        assert_eq!(got, PathBuf::from("C:\\"));
     }
 
     /// A `..` component must not pop a Windows drive `Prefix` (e.g. `C:`) —

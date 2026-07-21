@@ -90,8 +90,8 @@ enum Command {
     /// the caller's shell expands `~` (offcut does not perform tilde
     /// expansion itself). It must be the project root: a path inside a git
     /// project is rejected before anything is deleted. Every top-level flag
-    /// (`--force`, `--dry-run`, `--verbose`, `--config`) still applies to the
-    /// targeted project; `--workspace` is accepted but ignored — the path
+    /// (`--force`, `--dry-run`, `--config`) still applies to the targeted
+    /// project; `--workspace` is accepted but ignored — the path
     /// alone scopes the run, and combining the two prints a notice saying so.
     Clean {
         /// Optional project root to clean. When supplied, discovery and
@@ -614,8 +614,9 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// project) is a hard error, raised before any classification or deletion.
 /// The caller's shell is expected to expand `~` — offcut does not perform
 /// tilde expansion itself.
-/// Every top-level flag (`--force`, `--dry-run`, `--verbose`, `--config`)
-/// still applies to the targeted project.
+/// Every top-level flag (`--force`, `--dry-run`, `--config`) still applies
+/// to the targeted project, unchanged by path targeting (`--verbose` is
+/// accepted here too, and produces no additional output, as elsewhere).
 ///
 /// For each cleanable project, enumerates untracked items, prompts about each
 /// `Surfaced` item, prompts about the project itself, then executes `git
