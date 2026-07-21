@@ -344,7 +344,11 @@ fn git_show_prefix(dir: &Path) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches([char::from(13), char::from(10)])
+            .to_string(),
+    )
 }
 
 /// Return the root of the git worktree containing `dir`, or `None` when `dir`
@@ -366,7 +370,9 @@ fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
     if !out.status.success() {
         return None;
     }
-    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let top = String::from_utf8_lossy(&out.stdout)
+        .trim_end_matches([char::from(13), char::from(10)])
+        .to_string();
     if top.is_empty() {
         return None;
     }
@@ -454,7 +460,7 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
                 // the root instead of producing `/..` segments), so the
                 // fallback keeps the canonicalize-shaped form the rest of the
                 // flow expects.
-                Some(c) if !matches!(c, RootDir | ParentDir | CurDir) => {
+                Some(c) if !matches!(c, RootDir | ParentDir | CurDir | Prefix(_)) => {
                     out.pop();
                 }
                 _ => {}
@@ -1566,6 +1572,18 @@ mod tests {
         // A drive-relative `\\proj` against a `C:` cwd base preserves the
         // inherited `C:` prefix too.
         let got = normalized_absolute(Path::new("\\proj"), &PathBuf::from("C:\\base"));
+        assert_eq!(got, PathBuf::from("C:\\proj"));
+    }
+
+    /// A `..` component must not pop a Windows drive `Prefix` (e.g. `C:`) —
+    /// doing so would drop the drive letter and yield an invalid path. The
+    /// `Prefix(_)` guard in the `ParentDir` arm prevents it.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_does_not_pop_windows_drive_prefix() {
+        let cwd = PathBuf::from("C:\\base");
+        // `..` at the root level must not pop the `C:` prefix.
+        let got = normalized_absolute(Path::new("..\\proj"), &cwd);
         assert_eq!(got, PathBuf::from("C:\\proj"));
     }
 }
