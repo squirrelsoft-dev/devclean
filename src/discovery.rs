@@ -265,8 +265,15 @@ pub fn discover_single(
     }
     // Canonicalize to a stable absolute path so the report and `git -C` use
     // the same form regardless of how the caller typed it. Canonicalization
-    // resolves symlinks too, which is the safe direction for deletion.
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // resolves symlinks too, which is the safe direction for deletion. When
+    // canonicalization fails (rare, but possible without breaking `is_dir`),
+    // fall back to a lexically normalized absolute path so the
+    // `enclosing_git_root` comparison below is absolute-vs-absolute rather
+    // than relative-vs-absolute — a relative fallback would false-reject a
+    // real project root because `git rev-parse --show-toplevel` is always
+    // absolute.
+    let cwd = std::env::current_dir()?;
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| normalized_absolute(path, &cwd));
     if let Some(git_root) = enclosing_git_root(&resolved)
         && git_root != resolved
     {
@@ -312,7 +319,61 @@ fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let top = PathBuf::from(top);
-    Some(fs::canonicalize(&top).unwrap_or(top))
+    // Mirror `discover_single`'s resolution strategy: canonicalize, and on
+    // failure fall back to a lexically normalized absolute path so the
+    // comparison in `discover_single` is like-for-like even when
+    // canonicalization is unavailable on either side.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    Some(std::fs::canonicalize(&top).unwrap_or_else(|_| normalized_absolute(&top, &cwd)))
+}
+
+/// Convert `path` into an absolute, lexically normalized path using `cwd`
+/// as the base when `path` is relative. Pure: no filesystem access, so it is
+/// safe to call as a fallback when `std::fs::canonicalize` has already
+/// failed and as the implementation under test in unit tests.
+///
+/// Normalization collapses `.` components, resolves `..` against the
+/// preceding components (without dropping the leading root), and drops
+/// trailing slashes — the same shape `git rev-parse --show-toplevel` and
+/// `std::fs::canonicalize` yield on success. Symlinks are NOT resolved
+/// (that needs the filesystem), so this is a fallback only; the primary
+/// path is always `canonicalize`.
+fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
+    let mut out = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        cwd.to_path_buf()
+    };
+    for comp in path.components() {
+        use std::path::Component::*;
+        match comp {
+            RootDir => {
+                // An absolute `path` starts here; reset the accumulator to
+                // the root so any leading components from `cwd` are dropped.
+                out = PathBuf::new();
+                out.push(comp.as_os_str());
+            }
+            CurDir => {} // collapse `.`
+            ParentDir => match out.components().next_back() {
+                // Pop a real component; otherwise drop the `..` rather than
+                // pushing it (mirrors `Path::canonicalize`, which clamps at
+                // the root instead of producing `/..` segments). `git
+                // rev-parse --show-toplevel` never emits `..`, so the
+                // comparison invariant only needs the canonicalize-shaped
+                // form.
+                Some(c) if !matches!(c, RootDir | ParentDir | CurDir) => {
+                    out.pop();
+                }
+                _ => {}
+            },
+            Prefix(p) => {
+                out = PathBuf::new();
+                out.push(p.as_os_str());
+            }
+            Normal(s) => out.push(s),
+        }
+    }
+    out
 }
 
 /// Derive the descent-prune basename set from the safelist catalog.
@@ -1232,5 +1293,66 @@ mod tests {
         let result = discover_single(&inner, &cfg).unwrap();
         assert_eq!(result.path, std::fs::canonicalize(&inner).unwrap());
         assert_eq!(result.marker, ".git");
+    }
+
+    // -----------------------------------------------------------------------
+    // normalized_absolute: the canonicalize-failure fallback. Pure/unit-tested
+    // directly so the comparison invariant is protected without an
+    // unportable filesystem-failure fixture. End-to-end relative-path
+    // behavior is still covered by
+    // `clean_project_path_relative_resolves_against_cwd` in
+    // `tests/clean_cli.rs` (subprocess cwd, no global-cwd mutation).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalized_absolute_joins_relative_path_against_cwd() {
+        let cwd = PathBuf::from("/home/me/work");
+        let got = normalized_absolute(Path::new("proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+    }
+
+    #[test]
+    fn normalized_absolute_collapses_curdir_components() {
+        let cwd = PathBuf::from("/home/me/work");
+        // `./proj` must collapse to the same form as `proj` so the
+        // enclosing-git-root comparison is not tripped up by a `.` segment.
+        let got = normalized_absolute(Path::new("./proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+        // A bare `.` collapses to the cwd itself.
+        assert_eq!(normalized_absolute(Path::new("."), &cwd), cwd);
+    }
+
+    #[test]
+    fn normalized_absolute_resolves_parent_dir_components() {
+        let cwd = PathBuf::from("/home/me/work/a/b");
+        let got = normalized_absolute(Path::new("../../proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+    }
+
+    #[test]
+    fn normalized_absolute_drops_trailing_slash() {
+        let cwd = PathBuf::from("/home/me/work");
+        // A trailing slash (e.g. from `./my-project/`) must not survive —
+        // `git rev-parse --show-toplevel` never emits one, so a trailing
+        // slash on the fallback side would false-reject the root.
+        let got = normalized_absolute(Path::new("proj/"), &cwd);
+        assert_eq!(got, PathBuf::from("/home/me/work/proj"));
+    }
+
+    #[test]
+    fn normalized_absolute_keeps_absolute_path_and_normalizes() {
+        let cwd = PathBuf::from("/irrelevant");
+        // An absolute input ignores `cwd` and normalizes in place.
+        let got = normalized_absolute(Path::new("/srv/apps/./looper/../looper"), &cwd);
+        assert_eq!(got, PathBuf::from("/srv/apps/looper"));
+    }
+
+    #[test]
+    fn normalized_absolute_does_not_pop_past_root() {
+        let cwd = PathBuf::from("/home/me");
+        // Over-normalized `..` past the root stays at the root rather than
+        // producing an invalid empty path.
+        let got = normalized_absolute(Path::new("../../../../proj"), &cwd);
+        assert_eq!(got, PathBuf::from("/proj"));
     }
 }
