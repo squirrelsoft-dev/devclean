@@ -1369,4 +1369,34 @@ mod tests {
         let got = normalized_absolute(Path::new("../../../../proj"), &cwd);
         assert_eq!(got, PathBuf::from("/proj"));
     }
+
+    /// The invariant the fallback exists for: whatever shape it produces for
+    /// a relative target must compare *equal* to `enclosing_git_root`'s
+    /// output for that same project root, or `discover_single` would reject
+    /// a real project root as "not a project root". Asserted against a real
+    /// repo and real `git rev-parse --show-toplevel` output — the shapes the
+    /// other `normalized_absolute` tests only describe literally. The final
+    /// assertion pins the regression itself: the un-normalized relative path
+    /// (what the fallback used to yield) does not compare equal, so it would
+    /// have false-rejected.
+    #[test]
+    fn normalized_absolute_fallback_compares_equal_to_enclosing_git_root() {
+        let root = tmp_root("single_fallback_cmp");
+        git_init(&root);
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        let parent = canonical_root.parent().unwrap().to_path_buf();
+        let leaf = PathBuf::from(canonical_root.file_name().unwrap());
+        let git_root = enclosing_git_root(&canonical_root).expect("repo has a git root");
+
+        // Bare relative name resolved against the cwd, as `discover_single`
+        // does on the canonicalize-failure branch.
+        assert_eq!(normalized_absolute(&leaf, &parent), git_root);
+        // The `./name/` form a shell tab-completion produces resolves the
+        // same way — a stray `.` or trailing slash must not break equality.
+        let dotted = PathBuf::from(format!("./{}/", leaf.display()));
+        assert_eq!(normalized_absolute(&dotted, &parent), git_root);
+        // Pre-fallback shape: the relative path left as typed. Unequal to
+        // git's always-absolute answer — the false rejection being prevented.
+        assert_ne!(leaf, git_root);
+    }
 }
