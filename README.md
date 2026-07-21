@@ -270,17 +270,17 @@ $ offcut --force --dry-run clean ~/code/looper   # preview the targeted clean
 
 Every top-level flag (`--force`, `--dry-run`, `--config`) still applies to
 the targeted project, unchanged by path targeting (`--verbose` is accepted
-here too, and stays as inert as it is everywhere else). `--workspace` is accepted but
-ignored in this mode — the explicit path alone drives the run, so a project
-outside any configured workspace root can still be cleaned. When `--workspace`
-is combined with a `PROJECT_PATH`, offcut emits one concise stderr notice
-that the path scopes the run and `--workspace` is ignored, so a mistyped
-invocation is not mistaken for a wider run. The targeted
-project still flows through classification: a non-cleanable project (e.g.
-one with uncommitted work) is reported as such and not cleaned. A missing or
-non-directory path is a hard error; when such a path still begins with a
-literal `~` (the shell did not expand it — say it was quoted), the error
-carries a hint pointing at shell tilde expansion.
+here too, and stays as inert as it is everywhere else). `--workspace` is
+accepted but ignored in this mode — the explicit path alone drives the run,
+so a project outside any configured workspace root can still be cleaned.
+When `--workspace` is combined with a `PROJECT_PATH`, offcut emits one
+concise stderr notice that the path scopes the run and `--workspace` is
+ignored, so a mistyped invocation is not mistaken for a wider run. The
+targeted project still flows through classification: a non-cleanable project
+(e.g. one with uncommitted work) is reported as such and not cleaned. A
+missing or non-directory path is a hard error; when such a path still begins
+with a literal `~` (the shell did not expand it — say it was quoted), the
+error carries a hint pointing at shell tilde expansion.
 
 `<PROJECT_PATH>` must be the **project root**. A path inside a git project —
 say `~/code/looper/crates/inner` — is rejected before anything is deleted,
@@ -295,11 +295,11 @@ This mirrors discovery's nesting rule (a folder inside a git worktree is a
 subfolder of that project, not a project). Classification would refuse such a
 path anyway — a subdirectory has no `.git` of its own, so it is reported
 `no-git`, which is never cleanable — so the root check is a second, earlier
-guard that fails with an actionable error instead of a confusing status.
-A nested repository — a submodule or a
-vendored clone — *is* its own root, so it may be targeted directly. A
-directory that is not inside any git project is still accepted and reported
-by classification (as `no-git`) rather than silently dropped.
+guard that fails with an actionable error instead of a confusing status. A
+nested repository — a submodule or a vendored clone — *is* its own root, so
+it may be targeted directly. A directory that is not inside any git project
+is still accepted and reported by classification (as `no-git`) rather than
+silently dropped.
 
 See `src/clean.rs` for the deletion engine and `src/interactive.rs` for the
 approval state machine (the `clean` / `dry_run` / `build_exclusions` API is

@@ -1621,11 +1621,19 @@ mod tests {
     fn normalized_absolute_anchors_drive_relative_path() {
         let cwd = PathBuf::from("D:\\cwd");
         let got = normalized_absolute(Path::new("C:proj"), &cwd);
-        assert!(got.is_absolute(), "drive-relative result: {}", got.display());
+        assert!(
+            got.is_absolute(),
+            "drive-relative result: {}",
+            got.display()
+        );
         assert_eq!(got, PathBuf::from("C:\\proj"));
         // A bare prefix anchors at the drive root rather than the cwd.
         let got = normalized_absolute(Path::new("C:"), &cwd);
-        assert!(got.is_absolute(), "drive-relative result: {}", got.display());
+        assert!(
+            got.is_absolute(),
+            "drive-relative result: {}",
+            got.display()
+        );
         assert_eq!(got, PathBuf::from("C:\\"));
     }
 
