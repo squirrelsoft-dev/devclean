@@ -670,6 +670,67 @@ fn clean_project_path_missing_is_an_error() {
     );
 }
 
+/// A subdirectory of a git project is not a project — it is a hard error
+/// naming the enclosing root, and nothing under it is deleted. Without the
+/// check `git -C <subdir>` would answer for the enclosing repo, so a
+/// clean+pushed parent would make the subdirectory look cleanable and
+/// `--force` would delete untracked files inside it.
+#[test]
+fn clean_project_path_subdirectory_is_an_error() {
+    let proj = cleanable_sibling("target-subdir");
+    let sub = proj.join("crates").join("inner");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("Cargo.toml"), "[package]").unwrap();
+    std::fs::create_dir_all(sub.join("target")).unwrap();
+    std::fs::write(sub.join("target/bin"), "junk under a subdir").unwrap();
+
+    let home = root_for("home-target-subdir");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 3);
+
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--force",
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            sub.to_str().unwrap(),
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "a subdirectory target must error: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not a project root"),
+        "error should say the path is not a project root: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            std::fs::canonicalize(&proj)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        ),
+        "error should name the enclosing project root: {stderr}"
+    );
+    assert!(
+        sub.join("target/bin").is_file(),
+        "nothing under the rejected subdirectory may be deleted: {stderr}"
+    );
+    assert!(
+        proj.join("target/bin").is_file(),
+        "the enclosing project must not be cleaned either: {stderr}"
+    );
+}
+
 /// Path targeting works on a project that is NOT under any configured
 /// workspace root — the explicit path alone drives the run. A cleanable
 /// project under a configured workspace root is left untouched when the

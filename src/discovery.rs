@@ -20,6 +20,11 @@
 //! folder being the git project (the one git project for its descendants),
 //! not as an ancestor — all deeper items inherit that git project.
 //!
+//! `discover_single` (the `offcut clean <PROJECT_PATH>` entry point) bypasses
+//! the walk but not this rule: a path inside a git worktree that is not that
+//! worktree's root is rejected outright, so single-project targeting cannot
+//! reach a subfolder the walk would never have reported as a project.
+//!
 //! ## Walk pruning
 //!
 //! `WalkDir` is instructed via `filter_entry` to never descend into a `.git`
@@ -238,6 +243,14 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
 /// `"(none)"`) so classification can report it — e.g. as `no-git` — rather
 /// than silently dropping the caller's explicit target.
 ///
+/// The walk's nesting rule applies here too: a path that sits *inside* a git
+/// worktree without being its root is a subfolder of that project, not a
+/// project, and is rejected with an error naming the root. Without this the
+/// bypass would fail open — `git -C <subdir>` answers for the enclosing repo,
+/// so a clean+pushed parent would classify the subdirectory as `Cleanable`
+/// and `git clean` would delete untracked files under it. The check runs
+/// before any classification or deletion.
+///
 /// No progress indicator is rendered: there is no walk to report on.
 pub fn discover_single(
     path: &Path,
@@ -254,6 +267,17 @@ pub fn discover_single(
     // the same form regardless of how the caller typed it. Canonicalization
     // resolves symlinks too, which is the safe direction for deletion.
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(git_root) = enclosing_git_root(&resolved)
+        && git_root != resolved
+    {
+        return Err(format!(
+            "project path is not a project root: {}\n\
+             it is inside the git project at {} — pass that path instead",
+            resolved.display(),
+            git_root.display()
+        )
+        .into());
+    }
     let markers = MarkerSet::from_entries(&cfg.project_markers)?;
     let marker = find_marker_in(&resolved, &markers)
         .map(|s| s.to_string())
@@ -262,6 +286,33 @@ pub fn discover_single(
         path: resolved,
         marker,
     })
+}
+
+/// Return the root of the git worktree containing `dir`, or `None` when `dir`
+/// is not inside a git worktree (or `git` is unavailable — classification then
+/// reports the path as `no-git` and nothing is cleaned).
+///
+/// Shells out to `git rev-parse --show-toplevel` like the rest of the crate's
+/// git inspection rather than scanning ancestors for a `.git` entry: git is
+/// the authority on where a worktree starts, so a linked worktree or submodule
+/// (whose `.git` is a file pointer) correctly reports itself as a root instead
+/// of being mistaken for a subfolder of the repo above it.
+fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if top.is_empty() {
+        return None;
+    }
+    let top = PathBuf::from(top);
+    Some(fs::canonicalize(&top).unwrap_or(top))
 }
 
 /// Derive the descent-prune basename set from the safelist catalog.
@@ -1139,21 +1190,47 @@ mod tests {
         assert!(discover_single(&file, &cfg).is_err());
     }
 
+    // Relative-path resolution is covered end-to-end by
+    // `clean_project_path_relative_resolves_against_cwd` in
+    // `tests/clean_cli.rs`, which sets the *child process's* cwd. A unit test
+    // would have to mutate this process's global cwd while the harness runs
+    // other tests in parallel.
+
     #[test]
-    fn discover_single_canonicalizes_relative_path() {
-        let root = tmp_root("single_relative");
+    fn discover_single_rejects_subdirectory_of_git_project() {
+        let root = tmp_root("single_subdir");
         git_init(&root);
-        let cfg = mkconfig(&root, &[".git"], 2);
-        // Pass a relative path by changing cwd to the parent and using the
-        // basename.
-        let parent = root.parent().unwrap();
-        let basename = root.file_name().unwrap().to_string_lossy().to_string();
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(parent).unwrap();
-        let result = discover_single(std::path::Path::new(&basename), &cfg);
-        std::env::set_current_dir(prev).unwrap();
-        let result = result.unwrap();
-        assert!(result.path.is_absolute());
-        assert_eq!(result.path, std::fs::canonicalize(&root).unwrap());
+        let sub = root.join("crates").join("inner");
+        mkfixture(&sub, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 3);
+        let err = discover_single(&sub, &cfg).unwrap_err().to_string();
+        assert!(
+            err.contains("not a project root"),
+            "error should say the path is not a project root: {err}"
+        );
+        assert!(
+            err.contains(
+                std::fs::canonicalize(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "error should name the enclosing project root: {err}"
+        );
+    }
+
+    #[test]
+    fn discover_single_accepts_nested_git_project_root() {
+        let outer = tmp_root("single_nested");
+        git_init(&outer);
+        let inner = outer.join("vendor").join("lib");
+        fs::create_dir_all(&inner).unwrap();
+        git_init(&inner);
+        let cfg = mkconfig(&outer, &[".git"], 3);
+        // The inner repo is its own worktree root, so it is a valid target
+        // even though the walk would have suppressed it as nested.
+        let result = discover_single(&inner, &cfg).unwrap();
+        assert_eq!(result.path, std::fs::canonicalize(&inner).unwrap());
+        assert_eq!(result.marker, ".git");
     }
 }

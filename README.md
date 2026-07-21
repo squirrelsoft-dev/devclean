@@ -274,6 +274,22 @@ project still flows through classification: a non-cleanable project (e.g.
 one with uncommitted work) is reported as such and not cleaned. A missing or
 non-directory path is a hard error.
 
+`<PROJECT_PATH>` must be the **project root**. A path inside a git project —
+say `~/code/looper/crates/inner` — is rejected before anything is deleted,
+with an error naming the enclosing root:
+
+```
+offcut: project path is not a project root: /Users/me/code/looper/crates/inner
+it is inside the git project at /Users/me/code/looper — pass that path instead
+```
+
+This mirrors discovery's nesting rule (a folder inside a git worktree is a
+subfolder of that project, not a project) and keeps `git clean` from ever
+running against a subtree of a repo. A nested repository — a submodule or a
+vendored clone — *is* its own root, so it may be targeted directly. A
+directory that is not inside any git project is still accepted and reported
+by classification (as `no-git`) rather than silently dropped.
+
 See `src/clean.rs` for the deletion engine and `src/interactive.rs` for the
 approval state machine (the `clean` / `dry_run` / `build_exclusions` API is
 the seam the interactive flow drives).

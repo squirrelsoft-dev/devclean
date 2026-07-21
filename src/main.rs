@@ -88,13 +88,16 @@ enum Command {
     /// discovered or cleaned, even if it sits inside a configured workspace
     /// root. The path may be absolute or relative to the current directory;
     /// the caller's shell expands `~` (offcut does not perform tilde
-    /// expansion itself). Every top-level flag (`--force`, `--dry-run`,
-    /// `--verbose`, `--config`) still applies to the targeted project.
+    /// expansion itself). It must be the project root: a path inside a git
+    /// project is rejected before anything is deleted. Every top-level flag
+    /// (`--force`, `--dry-run`, `--verbose`, `--config`) still applies to the
+    /// targeted project.
     Clean {
-        /// Optional project path to clean. When supplied, discovery and
+        /// Optional project root to clean. When supplied, discovery and
         /// deletion are scoped strictly to that project — no neighboring
         /// project is discovered or cleaned. Absolute or relative; the
-        /// caller's shell expands `~`.
+        /// caller's shell expands `~`. A subdirectory of a git project is
+        /// rejected — pass the project root.
         project_path: Option<PathBuf>,
     },
     /// Create a config file pre-populated with a workspace root. Writes a
@@ -590,8 +593,10 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// flow operates on exactly that one project: no other project is discovered
 /// or cleaned, even if it lives inside a configured workspace root. The path
 /// is resolved to an absolute directory (canonicalized when it exists); a
-/// non-directory or missing path is a hard error. The caller's shell is
-/// expected to expand `~` — offcut does not perform tilde expansion itself.
+/// non-directory, missing, or non-root path (a directory inside a git
+/// project) is a hard error, raised before any classification or deletion.
+/// The caller's shell is expected to expand `~` — offcut does not perform
+/// tilde expansion itself.
 /// Every top-level flag (`--force`, `--dry-run`, `--verbose`, `--config`)
 /// still applies to the targeted project.
 ///
