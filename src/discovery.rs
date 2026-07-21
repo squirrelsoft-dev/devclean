@@ -271,9 +271,23 @@ pub fn discover_single(
     // `enclosing_git_root` comparison below is absolute-vs-absolute rather
     // than relative-vs-absolute — a relative fallback would false-reject a
     // real project root because `git rev-parse --show-toplevel` is always
-    // absolute.
-    let cwd = std::env::current_dir()?;
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| normalized_absolute(path, &cwd));
+    // absolute. Only a *relative* `path` needs the process cwd as a base, so
+    // it is read on that branch alone: an absolute target must not fail
+    // merely because the cwd is gone or unreadable.
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(resolved) => resolved,
+        Err(_) if path.is_absolute() => normalized_absolute(path, Path::new("")),
+        Err(_) => {
+            let cwd = std::env::current_dir().map_err(|e| {
+                format!(
+                    "cannot resolve relative project path {}: \
+                     the current directory is unavailable ({e})",
+                    path.display()
+                )
+            })?;
+            normalized_absolute(path, &cwd)
+        }
+    };
     if let Some(git_root) = enclosing_git_root(&resolved)
         && git_root != resolved
     {
@@ -322,9 +336,9 @@ fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
     // Mirror `discover_single`'s resolution strategy: canonicalize, and on
     // failure fall back to a lexically normalized absolute path so the
     // comparison in `discover_single` is like-for-like even when
-    // canonicalization is unavailable on either side.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    Some(std::fs::canonicalize(&top).unwrap_or_else(|_| normalized_absolute(&top, &cwd)))
+    // canonicalization is unavailable on either side. `--show-toplevel`
+    // always prints an absolute path, so no base directory is needed.
+    Some(std::fs::canonicalize(&top).unwrap_or_else(|_| normalized_absolute(&top, Path::new(""))))
 }
 
 /// Convert `path` into an absolute, lexically normalized path using `cwd`

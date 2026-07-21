@@ -415,6 +415,7 @@ fn clean_project_path_does_not_clean_neighbors() {
     add_pushed_remote(&proj_b);
     std::fs::create_dir_all(proj_b.join("target")).unwrap();
     std::fs::write(proj_b.join("target/bin"), "safe junk b").unwrap();
+    std::fs::write(proj_b.join("ambiguous.tmp"), "surfaced").unwrap();
 
     let home = root_for("home-target");
     std::fs::create_dir_all(home.join(".config")).unwrap();
@@ -434,14 +435,15 @@ fn clean_project_path_does_not_clean_neighbors() {
         !proj_a.join("target").exists(),
         "targeted project's junk must be deleted: {out}"
     );
-    // proj_b is untouched — the neighbor is not cleaned.
+    // proj_b is untouched — neither its safe junk nor its surfaced item is
+    // cleaned, even though `--force` would auto-approve both were it targeted.
     assert!(
         proj_b.join("target/bin").is_file(),
-        "neighbor project must NOT be cleaned: {out}"
+        "neighbor project's safe junk must NOT be cleaned: {out}"
     );
     assert!(
-        proj_b.join("ambiguous.tmp").exists() || proj_b.join("target").is_dir(),
-        "neighbor project must be entirely untouched: {out}"
+        proj_b.join("ambiguous.tmp").is_file(),
+        "neighbor project's surfaced item must NOT be cleaned: {out}"
     );
     // The report mentions only the targeted project.
     assert!(
