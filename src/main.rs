@@ -91,7 +91,8 @@ enum Command {
     /// expansion itself). It must be the project root: a path inside a git
     /// project is rejected before anything is deleted. Every top-level flag
     /// (`--force`, `--dry-run`, `--verbose`, `--config`) still applies to the
-    /// targeted project.
+    /// targeted project; `--workspace` is accepted but ignored — the path
+    /// alone scopes the run, and combining the two prints a notice saying so.
     Clean {
         /// Optional project root to clean. When supplied, discovery and
         /// deletion are scoped strictly to that project — no neighboring
