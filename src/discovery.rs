@@ -282,23 +282,9 @@ pub fn discover_single(
     // `enclosing_git_root` comparison below is absolute-vs-absolute rather
     // than relative-vs-absolute — a relative fallback would false-reject a
     // real project root because `git rev-parse --show-toplevel` is always
-    // absolute. Only a *relative* `path` needs the process cwd as a base, so
-    // it is read on that branch alone: an absolute target must not fail
-    // merely because the cwd is gone or unreadable.
-    let resolved = match std::fs::canonicalize(path) {
-        Ok(resolved) => resolved,
-        Err(_) if path.is_absolute() => normalized_absolute(path, Path::new("")),
-        Err(_) => {
-            let cwd = std::env::current_dir().map_err(|e| {
-                format!(
-                    "cannot resolve relative project path {}: \
-                     the current directory is unavailable ({e})",
-                    path.display()
-                )
-            })?;
-            normalized_absolute(path, &cwd)
-        }
-    };
+    // absolute. The shared `resolve_path` helper is used on both sides of
+    // that comparison so the invariant is structural, not merely documented.
+    let resolved = resolve_path(path)?;
     if let Some(git_root) = enclosing_git_root(&resolved)
         && git_root != resolved
     {
@@ -344,12 +330,43 @@ fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let top = PathBuf::from(top);
-    // Mirror `discover_single`'s resolution strategy: canonicalize, and on
-    // failure fall back to a lexically normalized absolute path so the
-    // comparison in `discover_single` is like-for-like even when
-    // canonicalization is unavailable on either side. `--show-toplevel`
-    // always prints an absolute path, so no base directory is needed.
-    Some(std::fs::canonicalize(&top).unwrap_or_else(|_| normalized_absolute(&top, Path::new(""))))
+    // Mirror `discover_single`'s resolution strategy via the shared
+    // `resolve_path` helper so the `git_root != resolved` comparison in
+    // `discover_single` is like-for-like even when canonicalization is
+    // unavailable on either side. `--show-toplevel` always prints an
+    // absolute path, so the helper's relative-path branch is not reached
+    // here; `.ok()` maps a resolution failure to `None`, which the caller
+    // treats as "not inside a worktree" (classification then reports the
+    // path as `no-git` and nothing is cleaned).
+    resolve_path(&top).ok()
+}
+
+/// Resolve `path` to a stable absolute path: `std::fs::canonicalize` when it
+/// succeeds, otherwise a lexically normalized absolute path via
+/// [`normalized_absolute`]. The single shared implementation of the
+/// canonicalize-with-lexical-fallback strategy — used by both
+/// `discover_single` (the target) and `enclosing_git_root` (the git root) —
+/// makes the `git_root != resolved` comparison structurally like-for-like
+/// rather than relying on two copies staying in sync.
+///
+/// Only a *relative* `path` needs the process cwd as a base, so `current_dir`
+/// is read on that branch alone: an absolute target must not fail merely
+/// because the cwd is gone or unreadable. A failure to read the cwd for a
+/// relative path is propagated as an error naming the path.
+fn resolve_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => Ok(resolved),
+        Err(_) if path.is_absolute() => Ok(normalized_absolute(path, Path::new(""))),
+        Err(_) => {
+            let cwd = std::env::current_dir().map_err(|e| {
+                format!(
+                    "cannot resolve relative path {}: the current directory is unavailable ({e})",
+                    path.display()
+                )
+            })?;
+            Ok(normalized_absolute(path, &cwd))
+        }
+    }
 }
 
 /// Convert `path` into an absolute, lexically normalized path using `cwd`
@@ -375,7 +392,18 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
             RootDir => {
                 // An absolute `path` starts here; reset the accumulator to
                 // the root so any leading components from `cwd` are dropped.
+                // On Windows a `Prefix` (e.g. `C:`) may already be in `out`
+                // from a prior component or the cwd base — preserve it so
+                // `C:\foo` does not collapse to `\foo` (which would
+                // false-reject a real root against git's absolute toplevel).
+                let prefix = match out.components().next() {
+                    Some(Prefix(p)) => Some(p.as_os_str().to_owned()),
+                    _ => None,
+                };
                 out = PathBuf::new();
+                if let Some(p) = prefix {
+                    out.push(p);
+                }
                 out.push(comp.as_os_str());
             }
             CurDir => {} // collapse `.`
@@ -1409,5 +1437,24 @@ mod tests {
         // Pre-fallback shape: the relative path left as typed. Unequal to
         // git's always-absolute answer — the false rejection being prevented.
         assert_ne!(leaf, git_root);
+    }
+
+    // Windows drive-prefix preservation: a `RootDir` component must not
+    // discard a `Prefix` (e.g. `C:`) already accumulated in `out`. On Unix
+    // `Path::new("C:\\foo")` parses as a single `Normal` component, not a
+    // `Prefix`, so this code path is Windows-only and the test is gated
+    // accordingly — it documents and pins the behavior for Windows builds.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_preserves_windows_drive_prefix() {
+        let cwd = PathBuf::from("D:\\cwd");
+        // `C:\proj` is absolute; the `C:` prefix must survive the
+        // `RootDir` component so the result is `C:\proj`, not `\\proj`.
+        let got = normalized_absolute(Path::new("C:\\proj"), &cwd);
+        assert_eq!(got, PathBuf::from("C:\\proj"));
+        // A drive-relative `\\proj` against a `C:` cwd base preserves the
+        // inherited `C:` prefix too.
+        let got = normalized_absolute(Path::new("\\proj"), &PathBuf::from("C:\\base"));
+        assert_eq!(got, PathBuf::from("C:\\proj"));
     }
 }

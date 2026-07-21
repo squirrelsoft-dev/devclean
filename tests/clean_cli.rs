@@ -744,8 +744,10 @@ fn clean_project_path_ignores_configured_workspace_roots() {
 
     let home = root_for("home-target-ignorews");
     std::fs::create_dir_all(home.join(".config")).unwrap();
-    // Configure `other_proj`'s parent as a workspace root so a non-targeted
-    // run would discover `other_proj`. The targeted run must ignore it.
+    // Configure `other_proj` itself as a workspace root (not its parent —
+    // the parent is the shared temp dir, which a non-targeted run would scan
+    // wastefully and flakily) so a non-targeted run would still discover it.
+    // The targeted run must ignore it.
     let config = write_config(&home.join(".config"), &[other_proj.to_str().unwrap()], 2);
     let out = run([
         "--force",
