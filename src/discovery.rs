@@ -334,6 +334,10 @@ pub fn discover_single(
 /// the prefix relative to its own root using its own path resolution, so a
 /// caller's typed case that differs from the on-disk case does not
 /// false-reject a real root.
+///
+/// Only the trailing CR/LF of the command output is stripped, never
+/// surrounding whitespace: a directory name may legitimately begin or end
+/// with a space, so `.trim()` here would silently corrupt its prefix.
 fn git_show_prefix(dir: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -360,6 +364,10 @@ fn git_show_prefix(dir: &Path) -> Option<String> {
 /// the authority on where a worktree starts, so a linked worktree or submodule
 /// (whose `.git` is a file pointer) correctly reports itself as a root instead
 /// of being mistaken for a subfolder of the repo above it.
+///
+/// As in [`git_show_prefix`], only the trailing CR/LF of the command output
+/// is stripped — `.trim()` would corrupt a worktree path whose leading or
+/// trailing component legitimately contains whitespace.
 fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -423,8 +431,10 @@ fn resolve_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// failed and as the implementation under test in unit tests.
 ///
 /// Normalization collapses `.` components, resolves `..` against the
-/// preceding components (without dropping the leading root), and drops
-/// trailing slashes — the same shape `git rev-parse --show-toplevel` and
+/// preceding components (without dropping the leading root, nor a Windows
+/// drive `Prefix` such as `C:` — popping either would yield an invalid
+/// path), and drops trailing slashes — the same shape
+/// `git rev-parse --show-toplevel` and
 /// `std::fs::canonicalize` yield on success. Symlinks are NOT resolved
 /// (that needs the filesystem), so this is a fallback only; the primary
 /// path is always `canonicalize`.
