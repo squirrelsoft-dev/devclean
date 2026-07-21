@@ -445,11 +445,16 @@ fn clean_project_path_does_not_clean_neighbors() {
         proj_b.join("ambiguous.tmp").is_file(),
         "neighbor project's surfaced item must NOT be cleaned: {out}"
     );
-    // The report mentions only the targeted project.
+    // The report mentions only the targeted project. The row carries the
+    // canonicalized path, which is what discovery resolves the argument to.
+    let listed = std::fs::canonicalize(&proj_a).unwrap();
     assert!(
-        out.contains(proj_a.to_str().unwrap())
-            || out.contains(proj_a.file_name().unwrap().to_string_lossy().as_ref()),
+        out.contains(listed.to_str().unwrap()),
         "report should mention the targeted project: {out}"
+    );
+    assert!(
+        !out.contains("proj-b"),
+        "report must not mention the neighbor project: {out}"
     );
 }
 
