@@ -82,7 +82,21 @@ enum Command {
     /// Interactive cleaning flow: report each project sorted by status,
     /// then clean each cleanable project. Destructive: deletes on approval
     /// or under --force.
-    Clean,
+    ///
+    /// When an optional `<PROJECT_PATH>` is supplied, discovery and deletion
+    /// are scoped strictly to that one project — no other project is
+    /// discovered or cleaned, even if it sits inside a configured workspace
+    /// root. The path may be absolute or relative to the current directory;
+    /// the caller's shell expands `~` (offcut does not perform tilde
+    /// expansion itself). Every top-level flag (`--force`, `--dry-run`,
+    /// `--verbose`, `--config`) still applies to the targeted project.
+    Clean {
+        /// Optional project path to clean. When supplied, discovery and
+        /// deletion are scoped strictly to that project — no neighboring
+        /// project is discovered or cleaned. Absolute or relative; the
+        /// caller's shell expands `~`.
+        project_path: Option<PathBuf>,
+    },
     /// Create a config file pre-populated with a workspace root. Writes a
     /// TOML template under the platform config dir (or an explicit --config
     /// target), with every Config field documented and the given workspace
@@ -100,8 +114,9 @@ fn main() {
         None => {
             // Default run: discover, classify, report each project sorted by
             // status, and run the interactive clean flow on each cleanable
-            // project. Same code path as `offcut clean`.
-            if let Err(e) = run_cleaning(&cli) {
+            // project. Same code path as `offcut clean` (without a project
+            // path — the default run never targets a single project).
+            if let Err(e) = run_cleaning(&cli, None) {
                 eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
@@ -142,8 +157,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Command::Clean) => {
-            if let Err(e) = run_cleaning(&cli) {
+        Some(Command::Clean { project_path }) => {
+            if let Err(e) = run_cleaning(&cli, project_path.as_deref()) {
                 eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
@@ -566,9 +581,19 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `offcut clean` (and the default run with no subcommand): the interactive
-/// cleaning flow (issue #8). Sorts every discovered project by status, reports
-/// each non-cleanable one with a one-line reason, and lists each cleanable one.
+/// `offcut clean [PROJECT_PATH]` (and the default run with no subcommand): the
+/// interactive cleaning flow (issue #8). Sorts every discovered project by
+/// status, reports each non-cleanable one with a one-line reason, and lists
+/// each cleanable one.
+///
+/// When `project_path` is `Some`, discovery is bypassed entirely and the
+/// flow operates on exactly that one project: no other project is discovered
+/// or cleaned, even if it lives inside a configured workspace root. The path
+/// is resolved to an absolute directory (canonicalized when it exists); a
+/// non-directory or missing path is a hard error. The caller's shell is
+/// expected to expand `~` — offcut does not perform tilde expansion itself.
+/// Every top-level flag (`--force`, `--dry-run`, `--verbose`, `--config`)
+/// still applies to the targeted project.
 ///
 /// For each cleanable project, enumerates untracked items, prompts about each
 /// `Surfaced` item, prompts about the project itself, then executes `git
@@ -578,11 +603,17 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Destructive: `offcut clean` deletes files on approval or under `--force`.
 /// Only one subcommand runs the deletion; the default run runs it too.
-fn run_cleaning(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run_cleaning(
+    cli: &Cli,
+    project_path: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
     let cfg = cfg.apply_overrides(&cli_overrides(cli));
 
-    let projects = discovery::discover(&cfg)?;
+    let projects = match project_path {
+        Some(p) => vec![discovery::discover_single(p, &cfg)?],
+        None => discovery::discover(&cfg)?,
+    };
     if projects.is_empty() {
         println!("clean: no projects found");
         return Ok(());

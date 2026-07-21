@@ -53,7 +53,7 @@ interactive clean flow.
 | `offcut` | default run: discover → classify → report each project sorted by status → interactive clean for each cleanable project |
 | `offcut list` | read-only: show each project's git status, sorted by severity (most-needs-attention first). No cleaning. |
 | `offcut config` | print the resolved configuration (workspace roots, max_depth, default_mode, each invocation's flags) |
-| `offcut clean` | interactive: report each project sorted by status, each cleanable project enumerated, prompts, deletion. Destructive. |
+| `offcut clean` | interactive: report each project sorted by status, each cleanable project enumerated, prompts, deletion. Destructive. Accepts an optional `<PROJECT_PATH>` to scope discovery and deletion strictly to that one project. |
 | `offcut discovery` | walk each workspace root and report discovered projects (paths + markers) |
 | `offcut classification` | classify each discovered project by its git state, print each status |
 | `offcut ignore <path>` | test whether `path` is ignored by the loaded `.offcutignore` |
@@ -66,7 +66,7 @@ Each flag is top-level and must be given *before* the subcommand:
 
 ```sh
 offcut [FLAGS] list              # list projects + statuses
-offcut [FLAGS] clean             # interactive clean flow (destructive)
+offcut [FLAGS] clean [PROJECT_PATH]  # interactive clean flow (destructive); PROJECT_PATH scopes to one project
 offcut [FLAGS] config            # print the resolved config
 
   --workspace <path>               # append a workspace root (repeatable)
@@ -92,6 +92,7 @@ item's fate and deletes nothing.
 $ offcut                       # default run: list + interactive clean
 $ offcut list                  # read-only project listing
 $ offcut clean                 # destructive interactive flow
+$ offcut clean ~/code/looper   # clean ONLY the named project (shell expands ~)
 $ offcut --force clean         # DESTRUCTIVE: each prompt skipped
 $ offcut --dry-run clean       # preview only; each item printed
 $ offcut --force --dry-run clean  # preview of the force run; deletes nothing
@@ -240,6 +241,7 @@ cleanable. Only status-5 rows and the aggregate carry the savings.
 
 ```sh
 $ offcut clean                    # interactive: report, approve, then delete
+$ offcut clean ~/code/looper      # clean ONLY the named project (shell expands ~)
 $ offcut --dry-run clean          # preview only; deletes nothing
 $ offcut --force clean            # DESTRUCTIVE: each prompt skipped
 $ offcut --force --dry-run clean  # preview of the force run; deletes nothing
@@ -249,6 +251,28 @@ $ offcut --verbose clean          # verbose output
 Each subcommand — `offcut` (no subcommand, the default run) and
 `offcut clean` — runs the destructive interactive flow; only `offcut
 list` lists each project's status without cleaning.
+
+### Project-path targeting
+
+`offcut clean <PROJECT_PATH>` scopes discovery and deletion strictly to the
+named project — no other project is discovered or cleaned, even if it sits
+inside a configured `workspace_roots` entry. The path may be absolute or
+relative to the current directory; the caller's shell is expected to expand
+`~` (offcut does not perform tilde expansion itself), so the normal usage is:
+
+```sh
+$ offcut clean ~/Developer/squirrelsoft-dev/looper
+$ offcut clean ./relative/path/to/project
+$ offcut --force --dry-run clean ~/code/looper   # preview the targeted clean
+```
+
+Every top-level flag (`--force`, `--dry-run`, `--verbose`, `--config`)
+still applies to the targeted project. `--workspace` is accepted but
+ignored in this mode — the explicit path alone drives the run, so a project
+outside any configured workspace root can still be cleaned. The targeted
+project still flows through classification: a non-cleanable project (e.g.
+one with uncommitted work) is reported as such and not cleaned. A missing or
+non-directory path is a hard error.
 
 See `src/clean.rs` for the deletion engine and `src/interactive.rs` for the
 approval state machine (the `clean` / `dry_run` / `build_exclusions` API is
@@ -419,7 +443,7 @@ Each flag is top-level and must be given *before* the subcommand:
 ```sh
 offcut [FLAGS] list              # read-only: each project's git status
 offcut [FLAGS] config            # print the resolved config (preserved)
-offcut [FLAGS] clean             # destructive: interactive flow, each prompt
+offcut [FLAGS] clean [PROJECT_PATH]  # destructive: interactive flow, each prompt; PROJECT_PATH scopes to one project
 offcut [FLAGS] discovery         # each project with markers
 offcut [FLAGS] classification    # each project classified, sorted
 offcut [FLAGS] ignore <path>     # see `.offcutignore` above

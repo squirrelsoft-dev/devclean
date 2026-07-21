@@ -378,3 +378,326 @@ fn list_shows_per_project_and_aggregate_sizes() {
         "list cleanable row should carry a size: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Project-path targeting: `offcut clean <PROJECT_PATH>` (issue: clean <path>)
+// ---------------------------------------------------------------------------
+
+/// A cleanable (status-5) sibling project helper: committed + pushed, with
+/// untracked safe-list junk. Returns the project root.
+fn cleanable_sibling(label: &str) -> PathBuf {
+    let root = root_for(label);
+    init_repo_with_commit(&root);
+    add_pushed_remote(&root);
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), "safe junk").unwrap();
+    std::fs::write(root.join("ambiguous.tmp"), "surfaced").unwrap();
+    root
+}
+
+/// `offcut clean <PROJECT_PATH>` scopes discovery and deletion strictly to
+/// the named project: a neighboring cleanable project under the same
+/// workspace root is neither discovered nor cleaned. This is the core
+/// regression — path targeting must not clean neighboring projects.
+#[test]
+fn clean_project_path_does_not_clean_neighbors() {
+    let workspace = root_for("ws-target");
+    let proj_a = workspace.join("proj-a");
+    std::fs::create_dir_all(&proj_a).unwrap();
+    init_repo_with_commit(&proj_a);
+    add_pushed_remote(&proj_a);
+    std::fs::create_dir_all(proj_a.join("target")).unwrap();
+    std::fs::write(proj_a.join("target/bin"), "safe junk a").unwrap();
+
+    let proj_b = workspace.join("proj-b");
+    std::fs::create_dir_all(&proj_b).unwrap();
+    init_repo_with_commit(&proj_b);
+    add_pushed_remote(&proj_b);
+    std::fs::create_dir_all(proj_b.join("target")).unwrap();
+    std::fs::write(proj_b.join("target/bin"), "safe junk b").unwrap();
+
+    let home = root_for("home-target");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    // The workspace root is configured, so a non-targeted run would clean
+    // both. The targeted run must clean only proj_a.
+    let config = write_config(&home.join(".config"), &[workspace.to_str().unwrap()], 3);
+    let out = run([
+        "--force",
+        "--config",
+        config.to_str().unwrap(),
+        "clean",
+        proj_a.to_str().unwrap(),
+    ]);
+
+    // proj_a is cleaned.
+    assert!(
+        !proj_a.join("target").exists(),
+        "targeted project's junk must be deleted: {out}"
+    );
+    // proj_b is untouched — the neighbor is not cleaned.
+    assert!(
+        proj_b.join("target/bin").is_file(),
+        "neighbor project must NOT be cleaned: {out}"
+    );
+    assert!(
+        proj_b.join("ambiguous.tmp").exists() || proj_b.join("target").is_dir(),
+        "neighbor project must be entirely untouched: {out}"
+    );
+    // The report mentions only the targeted project.
+    assert!(
+        out.contains(proj_a.to_str().unwrap())
+            || out.contains(proj_a.file_name().unwrap().to_string_lossy().as_ref()),
+        "report should mention the targeted project: {out}"
+    );
+}
+
+/// `--dry-run` with a project path previews the targeted project's items
+/// and deletes nothing — flag forwarding is behavioral, not just parsing.
+#[test]
+fn clean_project_path_dry_run_deletes_nothing() {
+    let proj = cleanable_sibling("target-dryrun");
+    let home = root_for("home-target-dryrun");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    // A workspace root is NOT configured — the path target alone drives the
+    // run, proving path targeting works outside any configured workspace.
+    let config = write_config(&home.join(".config"), &[], 2);
+    let out = run([
+        "--dry-run",
+        "--config",
+        config.to_str().unwrap(),
+        "clean",
+        proj.to_str().unwrap(),
+    ]);
+
+    assert!(
+        out.contains("safe-to-delete"),
+        "dry-run should preview the targeted project's items: {out}"
+    );
+    assert!(
+        proj.join("target/bin").is_file(),
+        "dry-run must not delete the targeted project's junk: {out}"
+    );
+    assert!(
+        proj.join("ambiguous.tmp").is_file(),
+        "dry-run must not delete surfaced items: {out}"
+    );
+}
+
+/// `--force` with a project path deletes the targeted project's safe and
+/// surfaced junk while protected and tracked files survive — flag
+/// forwarding is behavioral.
+#[test]
+fn clean_project_path_force_deletes_targeted_project_junk() {
+    let proj = root_for("target-force");
+    init_repo_with_commit(&proj);
+    std::fs::write(proj.join(".offcutignore"), "important.dat\n").unwrap();
+    git_in(&proj, &["add", ".offcutignore"]);
+    git_in(&proj, &["commit", "-m", "ignore rules"]);
+    add_pushed_remote(&proj);
+    std::fs::create_dir_all(proj.join("target")).unwrap();
+    std::fs::write(proj.join("target/bin"), "safe junk").unwrap();
+    std::fs::write(proj.join("important.dat"), "keep me").unwrap();
+    std::fs::write(proj.join("ambiguous.tmp"), "surfaced").unwrap();
+
+    let home = root_for("home-target-force");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+    let out = run([
+        "--force",
+        "--config",
+        config.to_str().unwrap(),
+        "clean",
+        proj.to_str().unwrap(),
+    ]);
+
+    assert!(
+        !proj.join("target").exists(),
+        "force must delete the targeted project's safe junk: {out}"
+    );
+    assert!(
+        !proj.join("ambiguous.tmp").exists(),
+        "force must delete the targeted project's surfaced junk: {out}"
+    );
+    assert!(
+        proj.join("important.dat").is_file(),
+        "protected file in the targeted project must survive: {out}"
+    );
+    assert!(
+        proj.join("initial.txt").is_file(),
+        "tracked file in the targeted project must survive: {out}"
+    );
+    assert!(
+        out.contains("deleted"),
+        "expected a post-execution confirmation line: {out}"
+    );
+}
+
+/// `--force --dry-run` with a project path previews the force run on the
+/// targeted project and deletes nothing.
+#[test]
+fn clean_project_path_force_dry_run_previews_targeted_project() {
+    let proj = cleanable_sibling("target-force-dryrun");
+    let home = root_for("home-target-force-dryrun");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+    let out = run([
+        "--force",
+        "--dry-run",
+        "--config",
+        config.to_str().unwrap(),
+        "clean",
+        proj.to_str().unwrap(),
+    ]);
+
+    assert!(
+        out.contains("would delete"),
+        "force+dry-run should mark surfaced as would-delete: {out}"
+    );
+    assert!(
+        !out.contains("would prompt"),
+        "force preview auto-approves — nothing left to prompt about: {out}"
+    );
+    assert!(
+        proj.join("target/bin").is_file(),
+        "force+dry-run must not delete anything: {out}"
+    );
+    assert!(
+        proj.join("ambiguous.tmp").is_file(),
+        "force+dry-run must not delete anything: {out}"
+    );
+}
+
+/// A relative project path is resolved against the process's current
+/// directory. The run operates on exactly that project.
+#[test]
+fn clean_project_path_relative_resolves_against_cwd() {
+    let proj = cleanable_sibling("target-relative");
+    let home = root_for("home-target-relative");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+
+    // Run the binary with `cwd` set to the project's parent so the relative
+    // path is just the project's basename.
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let rel = proj.file_name().unwrap().to_string_lossy().to_string();
+    let out = std::process::Command::new(exe)
+        .args([
+            "--force",
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            &rel,
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .current_dir(proj.parent().unwrap())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "relative path run failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !proj.join("target").exists(),
+        "relative path must clean the targeted project: {stdout}"
+    );
+}
+
+/// A non-directory project path is a hard error — fail-fast, mirroring the
+/// missing-workspace-root check.
+#[test]
+fn clean_project_path_non_directory_is_an_error() {
+    let tmp = root_for("target-notdir");
+    let file = tmp.join("not-a-dir.txt");
+    std::fs::write(&file, "hi").unwrap();
+    let home = root_for("home-target-notdir");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--dry-run",
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            file.to_str().unwrap(),
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "non-directory path must error: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not a directory"),
+        "error should name the problem: {stderr}"
+    );
+}
+
+/// A missing project path is a hard error.
+#[test]
+fn clean_project_path_missing_is_an_error() {
+    let home = root_for("home-target-missing");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+    let missing = std::env::temp_dir().join("offcut-definitely-does-not-exist-xyz");
+
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--dry-run",
+            "--config",
+            config.to_str().unwrap(),
+            "clean",
+            missing.to_str().unwrap(),
+        ])
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("not a directory"),
+        "error should name the missing path: {stderr}"
+    );
+}
+
+/// Path targeting works on a project that is NOT under any configured
+/// workspace root — the explicit path alone drives the run. A cleanable
+/// project under a configured workspace root is left untouched when the
+/// target points elsewhere.
+#[test]
+fn clean_project_path_ignores_configured_workspace_roots() {
+    let other_proj = cleanable_sibling("target-other");
+    let target_proj = cleanable_sibling("target-explicit");
+
+    let home = root_for("home-target-ignorews");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    // Configure `other_proj`'s parent as a workspace root so a non-targeted
+    // run would discover `other_proj`. The targeted run must ignore it.
+    let config = write_config(&home.join(".config"), &[other_proj.to_str().unwrap()], 2);
+    let out = run([
+        "--force",
+        "--config",
+        config.to_str().unwrap(),
+        "clean",
+        target_proj.to_str().unwrap(),
+    ]);
+
+    assert!(
+        !target_proj.join("target").exists(),
+        "targeted project must be cleaned: {out}"
+    );
+    assert!(
+        other_proj.join("target/bin").is_file(),
+        "configured-workspace project must NOT be cleaned when the target points elsewhere: {out}"
+    );
+}

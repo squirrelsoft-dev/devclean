@@ -223,6 +223,47 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
     Ok(results)
 }
 
+/// Discover a single project at `path`, bypassing the workspace-root walk
+/// entirely. Used by `offcut clean <PROJECT_PATH>` to scope discovery and
+/// deletion strictly to the one project the caller named — no neighboring
+/// project is discovered or cleaned, even if `path` sits inside a configured
+/// workspace root.
+///
+/// `path` may be absolute or relative to the process's current directory.
+/// It is canonicalized when it exists so downstream classification and
+/// cleaning operate on a stable absolute path; a non-directory or missing
+/// path is a hard error (fail-fast, mirroring `walk_root`'s missing-root
+/// check). The directory is checked for a marker via the same `MarkerSet` as
+/// the walk; a directory with no marker is still returned (tagged
+/// `"(none)"`) so classification can report it — e.g. as `no-git` — rather
+/// than silently dropping the caller's explicit target.
+///
+/// No progress indicator is rendered: there is no walk to report on.
+pub fn discover_single(
+    path: &Path,
+    cfg: &Config,
+) -> Result<DiscoveredProject, Box<dyn std::error::Error>> {
+    if !path.is_dir() {
+        return Err(format!(
+            "project path not found or not a directory: {}",
+            path.display()
+        )
+        .into());
+    }
+    // Canonicalize to a stable absolute path so the report and `git -C` use
+    // the same form regardless of how the caller typed it. Canonicalization
+    // resolves symlinks too, which is the safe direction for deletion.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let markers = MarkerSet::from_entries(&cfg.project_markers)?;
+    let marker = find_marker_in(&resolved, &markers)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    Ok(DiscoveredProject {
+        path: resolved,
+        marker,
+    })
+}
+
 /// Derive the descent-prune basename set from the safelist catalog.
 ///
 /// The catalog is `BUILT_IN_DEFAULTS` plus `user_patterns` (the caller's
@@ -1053,5 +1094,66 @@ mod tests {
             !paths.contains(&pkg),
             "node_modules/react must not be reported:"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // discover_single: single-project targeting for `offcut clean <path>`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn discover_single_returns_one_project_with_marker() {
+        let root = tmp_root("single_marker");
+        git_init(&root);
+        mkfixture(&root, "Cargo.toml", "[package]");
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        let result = discover_single(&root, &cfg).unwrap();
+        assert_eq!(result.path, std::fs::canonicalize(&root).unwrap());
+        // .git wins over Cargo.toml per the marker precedence rule.
+        assert_eq!(result.marker, ".git");
+    }
+
+    #[test]
+    fn discover_single_returns_none_marker_for_unmarked_dir() {
+        let root = tmp_root("single_unmarked");
+        fs::create_dir_all(&root).unwrap();
+        let cfg = mkconfig(&root, &[".git", "Cargo.toml"], 2);
+        let result = discover_single(&root, &cfg).unwrap();
+        assert_eq!(result.marker, "(none)");
+        assert!(result.path.is_absolute());
+    }
+
+    #[test]
+    fn discover_single_errors_on_missing_path() {
+        let root = tmp_root("single_missing");
+        let cfg = mkconfig(&root, &[".git"], 2);
+        let missing = root.join("does-not-exist");
+        assert!(discover_single(&missing, &cfg).is_err());
+    }
+
+    #[test]
+    fn discover_single_errors_on_file_not_directory() {
+        let root = tmp_root("single_file");
+        let file = root.join("not-a-dir.txt");
+        fs::write(&file, "hi").unwrap();
+        let cfg = mkconfig(&root, &[".git"], 2);
+        assert!(discover_single(&file, &cfg).is_err());
+    }
+
+    #[test]
+    fn discover_single_canonicalizes_relative_path() {
+        let root = tmp_root("single_relative");
+        git_init(&root);
+        let cfg = mkconfig(&root, &[".git"], 2);
+        // Pass a relative path by changing cwd to the parent and using the
+        // basename.
+        let parent = root.parent().unwrap();
+        let basename = root.file_name().unwrap().to_string_lossy().to_string();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(parent).unwrap();
+        let result = discover_single(std::path::Path::new(&basename), &cfg);
+        std::env::set_current_dir(prev).unwrap();
+        let result = result.unwrap();
+        assert!(result.path.is_absolute());
+        assert_eq!(result.path, std::fs::canonicalize(&root).unwrap());
     }
 }
