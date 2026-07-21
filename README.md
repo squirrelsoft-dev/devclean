@@ -257,8 +257,10 @@ list` lists each project's status without cleaning.
 `offcut clean <PROJECT_PATH>` scopes discovery and deletion strictly to the
 named project — no other project is discovered or cleaned, even if it sits
 inside a configured `workspace_roots` entry. The path may be absolute or
-relative to the current directory; the caller's shell is expected to expand
-`~` (offcut does not perform tilde expansion itself), so the normal usage is:
+relative to the current directory, and is resolved to an absolute,
+symlink-resolved path — that resolved form is what the report shows. The
+caller's shell is expected to expand `~` (offcut does not perform tilde
+expansion itself), so the normal usage is:
 
 ```sh
 $ offcut clean ~/Developer/squirrelsoft-dev/looper
