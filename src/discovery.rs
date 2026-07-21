@@ -303,13 +303,25 @@ pub fn discover_single(
     if let Some(prefix) = git_show_prefix(&resolved)
         && !prefix.is_empty()
     {
-        let git_root = enclosing_git_root(&resolved).unwrap_or_else(|| resolved.clone());
-        return Err(format!(
-            "project path is not a project root: {}\n\
-             it is inside the git project at {} — pass that path instead",
-            resolved.display(),
-            git_root.display()
-        )
+        // `git_show_prefix` proved `resolved` is inside a worktree, so
+        // `enclosing_git_root` should normally resolve the root. If it
+        // cannot (git unavailable, non-UTF-8 root), omit the enclosing-root
+        // clause rather than echoing the user's own path back at them —
+        // "it is inside the git project at <P> — pass that path instead"
+        // is self-contradictory when <P> is the path they just passed.
+        return Err(match enclosing_git_root(&resolved) {
+            Some(git_root) => format!(
+                "project path is not a project root: {}\n\
+                 it is inside the git project at {} — pass that path instead",
+                resolved.display(),
+                git_root.display()
+            ),
+            None => format!(
+                "project path is not a project root: {}\n\
+                 it is inside a git worktree but the enclosing root could not be resolved",
+                resolved.display()
+            ),
+        }
         .into());
     }
     let markers = MarkerSet::from_entries(&cfg.project_markers)?;
@@ -339,10 +351,21 @@ pub fn discover_single(
 /// surrounding whitespace: a directory name may legitimately begin or end
 /// with a space, so `.trim()` here would silently corrupt its prefix.
 fn git_show_prefix(dir: &Path) -> Option<String> {
+    git_rev_parse(dir, "--show-prefix")
+}
+
+/// Run `git -C <dir> rev-parse <arg>` and return stdout with only the
+/// trailing CR/LF stripped (not surrounding whitespace — a path component
+/// may legitimately begin or end with a space, which `.trim()` would
+/// corrupt). Returns `None` on a spawn failure or non-zero exit (e.g. `dir`
+/// is not inside a git worktree, or `git` is unavailable). The single shared
+/// implementation ensures both `git_show_prefix` and `enclosing_git_root`
+/// apply the same output handling and hardening.
+fn git_rev_parse(dir: &Path, arg: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["rev-parse", "--show-prefix"])
+        .args(["rev-parse", arg])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -369,18 +392,7 @@ fn git_show_prefix(dir: &Path) -> Option<String> {
 /// is stripped — `.trim()` would corrupt a worktree path whose leading or
 /// trailing component legitimately contains whitespace.
 fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let top = String::from_utf8_lossy(&out.stdout)
-        .trim_end_matches([char::from(13), char::from(10)])
-        .to_string();
+    let top = git_rev_parse(dir, "--show-toplevel")?;
     if top.is_empty() {
         return None;
     }
@@ -1440,8 +1452,8 @@ mod tests {
             "--show-prefix must be non-empty inside a subdirectory: {prefix:?}"
         );
         assert!(
-            prefix.ends_with('/') || prefix.ends_with('\\') || !prefix.is_empty(),
-            "--show-prefix is path-relative-to-root"
+            prefix.ends_with('/') || prefix.ends_with('\\'),
+            "--show-prefix is path-relative-to-root with a trailing separator: {prefix:?}"
         );
     }
 
