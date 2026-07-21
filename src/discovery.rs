@@ -461,10 +461,11 @@ fn resolve_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// The result is always absolute for an absolute `cwd`. A Windows
 /// drive-relative path (`C:proj` — a `Prefix` with no following `RootDir`,
 /// which the OS resolves against that drive's own current directory) is
-/// resolved against `cwd` when `cwd` sits on that same drive, and anchored
-/// at that drive's root otherwise (the drive's own current directory is not
-/// knowable here), since a drive-relative [`DiscoveredProject::path`] would
-/// be re-interpreted by every later `git -C` call.
+/// resolved against `cwd` when `cwd` sits on that same drive (compared as
+/// Windows compares drives — see [`same_drive`]), and anchored at that
+/// drive's root otherwise (the drive's own current directory is not knowable
+/// here), since a drive-relative [`DiscoveredProject::path`] would be
+/// re-interpreted by every later `git -C` call.
 fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
     use std::path::Component::*;
     let mut out = if path.is_absolute() {
@@ -509,12 +510,12 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
                 // drive (`C:\base`), Windows resolves `C:proj` to
                 // `C:\base\proj` — so preserve `out` (which starts as `cwd`)
                 // rather than resetting to the drive root. Only reset when
-                // the prefix differs from cwd's drive (we don't know that
-                // drive's per-drive cwd, so anchoring at its root is the
-                // safe, absolute fallback). `C:\proj` (with a `RootDir`)
-                // still resets via the `RootDir` arm above.
+                // the prefix names a different drive than cwd's (we don't
+                // know that drive's per-drive cwd, so anchoring at its root
+                // is the safe, absolute fallback). `C:\proj` (with a
+                // `RootDir`) still resets via the `RootDir` arm above.
                 let is_relative_drive = !path.is_absolute()
-                    && matches!(cwd.components().next(), Some(Prefix(cp)) if cp.as_os_str() == p.as_os_str());
+                    && matches!(cwd.components().next(), Some(Prefix(cp)) if same_drive(p.kind(), cp.kind()));
                 if !is_relative_drive {
                     out = PathBuf::new();
                     out.push(p.as_os_str());
@@ -530,6 +531,23 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Whether two Windows path prefixes name the same drive.
+///
+/// Drive letters are case-insensitive on Windows, so `c:` and `C:` are one
+/// drive: comparing the prefixes as raw `OsStr`s would make
+/// [`normalized_absolute`] treat `c:proj` under a `C:\base` cwd as a foreign
+/// drive and anchor it at `c:\proj` — a different real directory that the
+/// clean flow would then classify and delete from. A non-disk prefix (UNC,
+/// device namespace) names no drive and never matches; the verbatim disk form
+/// (`\\?\C:`) does, since it denotes the same drive.
+fn same_drive(a: std::path::Prefix<'_>, b: std::path::Prefix<'_>) -> bool {
+    use std::path::Prefix::{Disk, VerbatimDisk};
+    match (a, b) {
+        (Disk(x) | VerbatimDisk(x), Disk(y) | VerbatimDisk(y)) => x.eq_ignore_ascii_case(&y),
+        _ => false,
+    }
 }
 
 /// Derive the descent-prune basename set from the safelist catalog.
@@ -1670,6 +1688,23 @@ mod tests {
         let cwd = PathBuf::from("C:\\base");
         let got = normalized_absolute(Path::new("C:proj"), &cwd);
         assert_eq!(got, PathBuf::from("C:\\base\\proj"));
+    }
+
+    /// Windows drive letters are case-insensitive, so a case-only difference
+    /// between the target's drive and the cwd's must still count as the same
+    /// drive. A case-sensitive comparison would anchor `c:proj` at `c:\proj`
+    /// instead of resolving it against the cwd — a different real directory
+    /// that the clean flow would then classify and delete from.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_drive_relative_matches_cwd_drive_case_insensitively() {
+        let got = normalized_absolute(Path::new("c:proj"), &PathBuf::from("C:\\base"));
+        assert_eq!(got, PathBuf::from("C:\\base\\proj"));
+        let got = normalized_absolute(Path::new("C:proj"), &PathBuf::from("c:\\base"));
+        assert_eq!(got, PathBuf::from("c:\\base\\proj"));
+        // A genuinely different drive still anchors at that drive's root.
+        let got = normalized_absolute(Path::new("c:proj"), &PathBuf::from("D:\\base"));
+        assert_eq!(got, PathBuf::from("c:\\proj"));
     }
 
     /// A `..` component must not pop a Windows drive `Prefix` (e.g. `C:`) —

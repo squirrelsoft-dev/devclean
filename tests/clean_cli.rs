@@ -678,10 +678,13 @@ fn clean_project_path_missing_is_an_error() {
 }
 
 /// A subdirectory of a git project is not a project — it is a hard error
-/// naming the enclosing root, and nothing under it is deleted. Without the
-/// check `git -C <subdir>` would answer for the enclosing repo, so a
-/// clean+pushed parent would make the subdirectory look cleanable and
-/// `--force` would delete untracked files inside it.
+/// naming the enclosing root, and nothing under it is deleted. The root check
+/// is defense-in-depth, not the sole guard: `classify::status_no_git` already
+/// refuses a subdirectory (no `.git` of its own means `no-git`, which is
+/// never cleanable). What the check adds is the earlier, actionable failure
+/// pinned here — a `not a project root` error naming the enclosing root,
+/// before any classification or deletion, instead of a confusing `no-git`
+/// report.
 #[test]
 fn clean_project_path_subdirectory_is_an_error() {
     let proj = cleanable_sibling("target-subdir");
