@@ -339,8 +339,9 @@ pub fn discover_single(
 /// Return the path of `dir` relative to its git worktree root, with a
 /// trailing slash, as printed by `git rev-parse --show-prefix`. Empty output
 /// means `dir` IS the worktree root; `None` means `dir` is not inside a git
-/// worktree (or `git` is unavailable — classification then reports the path
-/// as `no-git` and nothing is cleaned).
+/// worktree, or git's answer was unusable (see [`git_rev_parse`] for every
+/// `None` case) — classification then reports the path as `no-git` and
+/// nothing is cleaned.
 ///
 /// Used by `discover_single` to decide whether an explicit target is a
 /// project root. Unlike a `git_root != resolved` string comparison, this is
@@ -359,10 +360,11 @@ fn git_show_prefix(dir: &Path) -> Option<String> {
 /// Run `git -C <dir> rev-parse <arg>` and return stdout with only the
 /// trailing CR/LF stripped (not surrounding whitespace — a path component
 /// may legitimately begin or end with a space, which `.trim()` would
-/// corrupt). Returns `None` on a spawn failure or non-zero exit (e.g. `dir`
-/// is not inside a git worktree, or `git` is unavailable). The single shared
-/// implementation ensures both `git_show_prefix` and `enclosing_git_root`
-/// apply the same output handling and hardening.
+/// corrupt). Returns `None` on a spawn failure (e.g. `git` is unavailable),
+/// on a non-zero exit (e.g. `dir` is not inside a git worktree), and on
+/// non-UTF-8 output, which is refused rather than lossily decoded. The single
+/// shared implementation ensures both `git_show_prefix` and
+/// `enclosing_git_root` apply the same output handling and hardening.
 fn git_rev_parse(dir: &Path, arg: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -386,8 +388,9 @@ fn git_rev_parse(dir: &Path, arg: &str) -> Option<String> {
 }
 
 /// Return the root of the git worktree containing `dir`, or `None` when `dir`
-/// is not inside a git worktree (or `git` is unavailable — classification then
-/// reports the path as `no-git` and nothing is cleaned).
+/// is not inside a git worktree or git's answer was unusable (see
+/// [`git_rev_parse`] for every `None` case) — classification then reports the
+/// path as `no-git` and nothing is cleaned.
 ///
 /// Shells out to `git rev-parse --show-toplevel` like the rest of the crate's
 /// git inspection rather than scanning ancestors for a `.git` entry: git is
