@@ -928,3 +928,60 @@ fn clean_project_path_no_tilde_hint_for_plain_missing_path() {
         "no tilde hint for a plain missing path: {stderr}"
     );
 }
+
+/// A targeted project that is NOT cleanable (uncommitted WIP) is not cleaned
+/// even under `--force`: path targeting scopes *which* project is considered,
+/// but the classification safety guard still gates deletion. This is the
+/// regression for the new destructive entry point's safety property —
+/// `--force` must not bypass the WIP/non-cleanable check.
+#[test]
+fn clean_project_path_force_skips_non_cleanable_project() {
+    let proj = root_for("target-force-non-cleanable");
+    init_repo_with_commit(&proj);
+    add_pushed_remote(&proj);
+    // Introduce uncommitted WIP on a TRACKED file → status 4 (wip), not
+    // cleanable. (An untracked file alone would leave the repo cleanable.)
+    std::fs::write(proj.join("initial.txt"), "modified - uncommitted work").unwrap();
+    // Plus untracked junk that WOULD be cleaned if the project were cleanable.
+    std::fs::create_dir_all(proj.join("target")).unwrap();
+    std::fs::write(proj.join("target/bin"), "safe junk").unwrap();
+    std::fs::write(proj.join("ambiguous.tmp"), "surfaced").unwrap();
+
+    let home = root_for("home-target-force-non-cleanable");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[], 2);
+    let out = run([
+        "--force",
+        "--config",
+        config.to_str().unwrap(),
+        "clean",
+        proj.to_str().unwrap(),
+    ]);
+
+    // The project is reported (non-cleanable) but nothing is deleted: the
+    // modified tracked file, untracked junk, and surfaced item all survive
+    // --force.
+    assert!(
+        proj.join("initial.txt").is_file(),
+        "modified tracked file must survive --force on a non-cleanable target: {out}"
+    );
+    assert!(
+        std::fs::read_to_string(proj.join("initial.txt"))
+            .unwrap()
+            .contains("modified - uncommitted work"),
+        "modified tracked file content must be intact: {out}"
+    );
+    assert!(
+        proj.join("target/bin").is_file(),
+        "untracked junk must survive --force on a non-cleanable target: {out}"
+    );
+    assert!(
+        proj.join("ambiguous.tmp").is_file(),
+        "surfaced item must survive --force on a non-cleanable target: {out}"
+    );
+    // No deletion confirmation line — nothing was cleaned.
+    assert!(
+        !out.contains("deleted"),
+        "non-cleanable target must not report a deletion: {out}"
+    );
+}

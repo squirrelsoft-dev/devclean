@@ -303,12 +303,14 @@ pub fn discover_single(
     if let Some(prefix) = git_show_prefix(&resolved)
         && !prefix.is_empty()
     {
-        // `git_show_prefix` proved `resolved` is inside a worktree, so
-        // `enclosing_git_root` should normally resolve the root. If it
-        // cannot (git unavailable, non-UTF-8 root), omit the enclosing-root
-        // clause rather than echoing the user's own path back at them —
-        // "it is inside the git project at <P> — pass that path instead"
-        // is self-contradictory when <P> is the path they just passed.
+        // `git_show_prefix` proved `resolved` is inside a worktree (git is
+        // available and answered), so `enclosing_git_root` should normally
+        // resolve the root. If it cannot (e.g. the root path is non-UTF-8,
+        // which `git_rev_parse` refuses to lossily decode), omit the
+        // enclosing-root clause rather than echoing the user's own path back
+        // at them — "it is inside the git project at <P> — pass that path
+        // instead" is self-contradictory when <P> is the path they just
+        // passed.
         return Err(match enclosing_git_root(&resolved) {
             Some(git_root) => format!(
                 "project path is not a project root: {}\n\
@@ -371,9 +373,14 @@ fn git_rev_parse(dir: &Path, arg: &str) -> Option<String> {
     if !out.status.success() {
         return None;
     }
+    // Refuse non-UTF-8 output rather than lossily converting it: a mangled
+    // path would flow into `resolve_path`/`enclosing_git_root` and silently
+    // break the root comparison or name the wrong path in an error. This
+    // mirrors `clean::git_cmd`'s fail-safe (src/clean.rs), which refuses
+    // non-UTF-8 git output rather than risk deleting the wrong path.
+    let text = String::from_utf8(out.stdout).ok()?;
     Some(
-        String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches([char::from(13), char::from(10)])
+        text.trim_end_matches([char::from(13), char::from(10)])
             .to_string(),
     )
 }
