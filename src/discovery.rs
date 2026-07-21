@@ -274,16 +274,15 @@ pub fn discover_single(
         }
         return Err(msg.into());
     }
-    // Canonicalize to a stable absolute path so the report and `git -C` use
-    // the same form regardless of how the caller typed it. Canonicalization
-    // resolves symlinks too, which is the safe direction for deletion. When
+    // Canonicalize to a stable absolute path so the report row, `git -C`, and
+    // the classification and cleaning that follow all use the same form
+    // regardless of how the caller typed it. Canonicalization resolves
+    // symlinks too, which is the safe direction for deletion. When
     // canonicalization fails (rare, but possible without breaking `is_dir`),
-    // fall back to a lexically normalized absolute path so the
-    // `enclosing_git_root` comparison below is absolute-vs-absolute rather
-    // than relative-vs-absolute — a relative fallback would false-reject a
-    // real project root because `git rev-parse --show-toplevel` is always
-    // absolute. The shared `resolve_path` helper is used on both sides of
-    // that comparison so the invariant is structural, not merely documented.
+    // fall back to a lexically normalized absolute path rather than the
+    // caller's typed path: a relative path stored in `DiscoveredProject` would
+    // be reported and re-interpreted against whatever cwd each later step
+    // runs with.
     let resolved = resolve_path(path)?;
     // Decide whether `resolved` is a git worktree root using git's own path
     // resolution (`rev-parse --show-prefix` is empty iff `dir` is the
@@ -368,13 +367,13 @@ fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
     }
     let top = PathBuf::from(top);
     // Mirror `discover_single`'s resolution strategy via the shared
-    // `resolve_path` helper so the `git_root != resolved` comparison in
-    // `discover_single` is like-for-like even when canonicalization is
-    // unavailable on either side. `--show-toplevel` always prints an
-    // absolute path, so the helper's relative-path branch is not reached
-    // here; `.ok()` maps a resolution failure to `None`, which the caller
-    // treats as "not inside a worktree" (classification then reports the
-    // path as `no-git` and nothing is cleaned).
+    // `resolve_path` helper so the root named in the rejection error has the
+    // same shape as the target path printed beside it, even when
+    // canonicalization is unavailable on either side. `--show-toplevel`
+    // always prints an absolute path, so the helper's relative-path branch is
+    // not reached here; `.ok()` maps a resolution failure to `None`, which the
+    // caller treats as "not inside a worktree" (classification then reports
+    // the path as `no-git` and nothing is cleaned).
     resolve_path(&top).ok()
 }
 
@@ -383,8 +382,9 @@ fn enclosing_git_root(dir: &Path) -> Option<PathBuf> {
 /// [`normalized_absolute`]. The single shared implementation of the
 /// canonicalize-with-lexical-fallback strategy — used by both
 /// `discover_single` (the target) and `enclosing_git_root` (the git root) —
-/// makes the `git_root != resolved` comparison structurally like-for-like
-/// rather than relying on two copies staying in sync.
+/// so the two paths `discover_single` prints side by side in its rejection
+/// error keep the same shape rather than relying on two copies staying in
+/// sync.
 ///
 /// Only a *relative* `path` needs the process cwd as a base, so `current_dir`
 /// is read on that branch alone: an absolute target must not fail merely
@@ -431,8 +431,7 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
                 // the root so any leading components from `cwd` are dropped.
                 // On Windows a `Prefix` (e.g. `C:`) may already be in `out`
                 // from a prior component or the cwd base — preserve it so
-                // `C:\foo` does not collapse to `\foo` (which would
-                // false-reject a real root against git's absolute toplevel).
+                // `C:\foo` does not collapse to the driveless `\foo`.
                 let prefix = match out.components().next() {
                     Some(Prefix(p)) => Some(p.as_os_str().to_owned()),
                     _ => None,
@@ -447,10 +446,9 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
             ParentDir => match out.components().next_back() {
                 // Pop a real component; otherwise drop the `..` rather than
                 // pushing it (mirrors `Path::canonicalize`, which clamps at
-                // the root instead of producing `/..` segments). `git
-                // rev-parse --show-toplevel` never emits `..`, so the
-                // comparison invariant only needs the canonicalize-shaped
-                // form.
+                // the root instead of producing `/..` segments), so the
+                // fallback keeps the canonicalize-shaped form the rest of the
+                // flow expects.
                 Some(c) if !matches!(c, RootDir | ParentDir | CurDir) => {
                     out.pop();
                 }
@@ -1459,7 +1457,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // normalized_absolute: the canonicalize-failure fallback. Pure/unit-tested
-    // directly so the comparison invariant is protected without an
+    // directly so its absolute-and-normalized shape is protected without an
     // unportable filesystem-failure fixture. End-to-end relative-path
     // behavior is still covered by
     // `clean_project_path_relative_resolves_against_cwd` in
@@ -1476,8 +1474,8 @@ mod tests {
     #[test]
     fn normalized_absolute_collapses_curdir_components() {
         let cwd = PathBuf::from("/home/me/work");
-        // `./proj` must collapse to the same form as `proj` so the
-        // enclosing-git-root comparison is not tripped up by a `.` segment.
+        // `./proj` must collapse to the same form as `proj` so a stray `.`
+        // segment does not survive into the resolved project path.
         let got = normalized_absolute(Path::new("./proj"), &cwd);
         assert_eq!(got, PathBuf::from("/home/me/work/proj"));
         // A bare `.` collapses to the cwd itself.
@@ -1495,8 +1493,8 @@ mod tests {
     fn normalized_absolute_drops_trailing_slash() {
         let cwd = PathBuf::from("/home/me/work");
         // A trailing slash (e.g. from `./my-project/`) must not survive —
-        // `git rev-parse --show-toplevel` never emits one, so a trailing
-        // slash on the fallback side would false-reject the root.
+        // neither `std::fs::canonicalize` nor `git rev-parse --show-toplevel`
+        // ever emits one, so the fallback must not either.
         let got = normalized_absolute(Path::new("proj/"), &cwd);
         assert_eq!(got, PathBuf::from("/home/me/work/proj"));
     }
@@ -1518,17 +1516,16 @@ mod tests {
         assert_eq!(got, PathBuf::from("/proj"));
     }
 
-    /// The invariant the fallback exists for: whatever shape it produces for
-    /// a relative target must compare *equal* to `enclosing_git_root`'s
-    /// output for that same project root, or `discover_single` would reject
-    /// a real project root as "not a project root". Asserted against a real
-    /// repo and real `git rev-parse --show-toplevel` output — the shapes the
-    /// other `normalized_absolute` tests only describe literally. The final
-    /// assertion pins the regression itself: the un-normalized relative path
-    /// (what the fallback used to yield) does not compare equal, so it would
-    /// have false-rejected.
+    /// The shape the fallback exists to produce: for a relative target it
+    /// must yield the same absolute path git itself reports for that project
+    /// root, so a canonicalize failure still leaves `discover_single` with a
+    /// path it can report, hand to `git -C`, and classify. Asserted against a
+    /// real repo and real `git rev-parse --show-toplevel` output — the shapes
+    /// the other `normalized_absolute` tests only describe literally. The
+    /// final assertion pins the regression itself: the un-normalized relative
+    /// path (what the fallback used to yield) is not that absolute path.
     #[test]
-    fn normalized_absolute_fallback_compares_equal_to_enclosing_git_root() {
+    fn normalized_absolute_fallback_matches_git_root_shape() {
         let root = tmp_root("single_fallback_cmp");
         git_init(&root);
         let canonical_root = std::fs::canonicalize(&root).unwrap();
@@ -1544,7 +1541,7 @@ mod tests {
         let dotted = PathBuf::from(format!("./{}/", leaf.display()));
         assert_eq!(normalized_absolute(&dotted, &parent), git_root);
         // Pre-fallback shape: the relative path left as typed. Unequal to
-        // git's always-absolute answer — the false rejection being prevented.
+        // git's always-absolute answer — the drift being prevented.
         assert_ne!(leaf, git_root);
     }
 
