@@ -496,12 +496,26 @@ fn normalized_absolute(path: &Path, cwd: &Path) -> PathBuf {
                 _ => {}
             },
             Prefix(p) => {
-                out = PathBuf::new();
-                out.push(p.as_os_str());
-                // `C:proj` yields a `Prefix` with no `RootDir` behind it —
-                // anchor at the drive root so the result stays absolute.
-                if !matches!(comps.peek(), Some(RootDir)) {
-                    out.push(RootDir.as_os_str());
+                // A Windows drive-relative path like `C:proj` means "relative
+                // to drive C's current directory". If `cwd` is on the same
+                // drive (`C:\base`), Windows resolves `C:proj` to
+                // `C:\base\proj` — so preserve `out` (which starts as `cwd`)
+                // rather than resetting to the drive root. Only reset when
+                // the prefix differs from cwd's drive (we don't know that
+                // drive's per-drive cwd, so anchoring at its root is the
+                // safe, absolute fallback). `C:\proj` (with a `RootDir`)
+                // still resets via the `RootDir` arm below.
+                let is_relative_drive = !path.is_absolute()
+                    && matches!(cwd.components().next(), Some(Prefix(cp)) if cp.as_os_str() == p.as_os_str());
+                if !is_relative_drive {
+                    out = PathBuf::new();
+                    out.push(p.as_os_str());
+                    // `C:proj` yields a `Prefix` with no `RootDir` behind
+                    // it — anchor at the drive root so the result stays
+                    // absolute rather than a bare `C:`.
+                    if !matches!(comps.peek(), Some(RootDir)) {
+                        out.push(RootDir.as_os_str());
+                    }
                 }
             }
             Normal(s) => out.push(s),
@@ -1619,6 +1633,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn normalized_absolute_anchors_drive_relative_path() {
+        // `C:proj` with cwd on a *different* drive: we don't know drive C's
+        // per-drive cwd, so the safe fallback anchors at the drive root.
         let cwd = PathBuf::from("D:\\cwd");
         let got = normalized_absolute(Path::new("C:proj"), &cwd);
         assert!(
@@ -1635,6 +1651,17 @@ mod tests {
             got.display()
         );
         assert_eq!(got, PathBuf::from("C:\\"));
+    }
+
+    /// A Windows drive-relative path whose drive matches the cwd's drive is
+    /// resolved against that drive's current directory (Windows semantics):
+    /// `C:proj` with cwd `C:\base` yields `C:\base\proj`, not `C:\proj`.
+    #[cfg(windows)]
+    #[test]
+    fn normalized_absolute_drive_relative_preserves_cwd_on_same_drive() {
+        let cwd = PathBuf::from("C:\\base");
+        let got = normalized_absolute(Path::new("C:proj"), &cwd);
+        assert_eq!(got, PathBuf::from("C:\\base\\proj"));
     }
 
     /// A `..` component must not pop a Windows drive `Prefix` (e.g. `C:`) —
