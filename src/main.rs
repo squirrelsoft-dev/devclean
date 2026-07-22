@@ -437,8 +437,41 @@ fn changed_label(project_path: &Path, status: classify::Status) -> String {
     git_text(project_path, &["log", "-1", "--format=%cr"]).unwrap_or_else(|| "-".to_string())
 }
 
-fn branch_state_line(project_path: &Path, status: classify::Status) -> String {
-    let branch = branch_label(project_path, status);
+/// Per-project branch labels, read from `git` at most once each.
+///
+/// The workspace table already reads every project's branch for its BRANCH
+/// column; the review and blocked panels need the same string. Seeding the
+/// cache from the table's read keeps a rendered run at one `git branch`
+/// invocation per project instead of one per panel that mentions it.
+struct BranchLabels {
+    labels: Vec<Option<String>>,
+}
+
+impl BranchLabels {
+    fn new(len: usize) -> Self {
+        Self {
+            labels: vec![None; len],
+        }
+    }
+
+    fn seed(&mut self, labels: Vec<String>) {
+        self.labels = labels.into_iter().map(Some).collect();
+    }
+
+    fn get(&mut self, idx: usize, project_path: &Path, status: classify::Status) -> String {
+        match self.labels.get(idx) {
+            Some(Some(label)) => label.clone(),
+            Some(None) => {
+                let label = branch_label(project_path, status);
+                self.labels[idx] = Some(label.clone());
+                label
+            }
+            None => branch_label(project_path, status),
+        }
+    }
+}
+
+fn branch_state_line(branch: &str, status: classify::Status) -> String {
     match status {
         classify::Status::Cleanable | classify::Status::Clean => {
             format!("{branch} · clean tree · remote ✓ pushed")
@@ -457,13 +490,16 @@ fn branch_state_line(project_path: &Path, status: classify::Status) -> String {
 /// otherwise a workspace with hundreds of projects pauses silently between
 /// the sizing phase and the table. Shared by `run_listing` and `run_cleaning`
 /// so the two renderings cannot drift.
+///
+/// Returns the branch label read for each row, in row order, so a caller that
+/// renders further panels reuses them instead of re-spawning `git`.
 fn render_workspace_table(
     rows: &[(PathBuf, classify::Status)],
     sizes: &[Option<String>],
     cleanable_count: usize,
     total_reclaimable: Option<&str>,
     emit_colors: bool,
-) {
+) -> Vec<String> {
     let mut progress = progress::ProgressWriter::new(std::io::stdout());
     let mut branches: Vec<String> = Vec::with_capacity(rows.len());
     let mut changed: Vec<String> = Vec::with_capacity(rows.len());
@@ -495,6 +531,7 @@ fn render_workspace_table(
     ) {
         println!("{line}");
     }
+    branches
 }
 
 fn status_detail_lines(project_path: &Path, status: classify::Status) -> Vec<String> {
@@ -854,14 +891,19 @@ fn run_cleaning(
         .iter()
         .map(|(p, s, _)| (p.clone(), *s))
         .collect();
+    // The pre-approval review panel is rendered by the interactive flow, and
+    // only when the flow actually prompts on a stderr that can draw it. Any
+    // other run reaches the panel (if at all) through the outcome loop below.
+    let review_shown_on_stderr = !cli.force && !cli.dry_run && output::stderr_terminal_ui_enabled();
+    let mut branch_labels = BranchLabels::new(all_projects.len());
     if rich_stdout {
-        render_workspace_table(
+        branch_labels.seed(render_workspace_table(
             &project_statuses,
             &per_project_size,
             cleanable_count,
             total_reclaimable_str.as_deref(),
             emit_colors,
-        );
+        ));
     } else {
         // The aggregate reclaimable is printed alongside the header — the
         // per-project rows below each carry their own size too.
@@ -903,11 +945,10 @@ fn run_cleaning(
                     )
                 );
             }
-            // The branch line only ever reaches the screen through the rich
-            // review panel, so the extra `git` call is skipped whenever the
-            // stream that shows the review cannot render it.
-            let branch_line = if output::stderr_terminal_ui_enabled() {
-                branch_state_line(path, *status)
+            // The branch line only reaches the screen through the pre-approval
+            // review panel, so it is read only for the runs that render one.
+            let branch_line = if review_shown_on_stderr {
+                branch_state_line(&branch_labels.get(idx, path, *status), *status)
             } else {
                 String::new()
             };
@@ -928,10 +969,11 @@ fn run_cleaning(
     if cleanable_items.is_empty() {
         if rich_stdout && project_path.is_some() {
             if let Some((path, status, _)) = all_projects.first() {
+                let branch = branch_labels.get(0, path, *status);
                 for line in output::format_blocked_project(
                     path,
                     *status,
-                    &branch_state_line(path, *status),
+                    &branch_state_line(&branch, *status),
                     &status_detail_lines(path, *status),
                     None,
                     emit_colors,
@@ -972,7 +1014,6 @@ fn run_cleaning(
     // here would repeat the whole listing after the decision was made; the
     // panel is only rendered on stdout for the runs that never showed one
     // (--force, --dry-run, or a stderr that cannot render it).
-    let review_shown_on_stderr = !cli.force && !cli.dry_run && output::stderr_terminal_ui_enabled();
     let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
     for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
         let will_execute = r.project_approved && !cli.dry_run;
@@ -1002,9 +1043,10 @@ fn run_cleaning(
         if rich_stdout {
             if !review_shown_on_stderr {
                 let rows = output::clean_review_rows(&r.items, fate_of);
+                let branch = branch_labels.get(*idx, &r.path, r.status);
                 for line in output::format_clean_review(
                     &r.path,
-                    &branch_state_line(&r.path, r.status),
+                    &branch_state_line(&branch, r.status),
                     &rows,
                     per_project_size[*idx].as_deref(),
                     output::terminal_width(),

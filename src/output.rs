@@ -246,15 +246,14 @@ pub fn format_project_table(
 ) -> Vec<String> {
     let mut out = Vec::new();
     let summary = match total_reclaimable {
-        Some(size) if cleanable_count > 0 => {
-            format!(
-                "✓ {} projects · ~{} reclaimable across {} cleanable",
-                rows.len(),
-                size,
-                cleanable_count
-            )
-        }
-        _ => format!("✓ {} projects · {} cleanable", rows.len(), cleanable_count),
+        Some(size) if cleanable_count > 0 => vec![
+            format!("✓ {} projects", rows.len()),
+            format!("~{size} reclaimable across {cleanable_count} cleanable"),
+        ],
+        _ => vec![
+            format!("✓ {} projects", rows.len()),
+            format!("{cleanable_count} cleanable"),
+        ],
     };
 
     if width >= 84 {
@@ -295,41 +294,113 @@ pub fn format_project_table(
                 color_for_stream("●", status_style(row.status), emit_colors),
                 truncate_path_cols(&project_label(row.path), width.saturating_sub(2))
             ));
-            out.push(format!(
-                "  {} · reclaim {} · branch {} · changed {}",
-                colored_status(row.status, emit_colors),
-                row.size.unwrap_or("-"),
-                row.branch.unwrap_or("-"),
-                row.changed.unwrap_or("-")
-            ));
+            let detail = [
+                (
+                    row.status.label().width(),
+                    colored_status(row.status, emit_colors),
+                ),
+                cell(&format!("reclaim {}", row.size.unwrap_or("-"))),
+                cell(&format!("branch {}", row.branch.unwrap_or("-"))),
+                cell(&format!("changed {}", row.changed.unwrap_or("-"))),
+            ];
+            for line in pack_columns(&detail, width.saturating_sub(2), " · ") {
+                out.push(format!("  {line}"));
+            }
         }
     }
 
     out.push(String::new());
-    out.push(color_for_stream(
-        &summary,
-        OwoStyle::new().green().bold(),
-        emit_colors,
-    ));
-    out.push(format!(
-        "run {} to reclaim all, or {} to inspect one",
-        color_for_stream("offcut clean", OwoStyle::new().bold(), emit_colors),
-        color_for_stream(
-            "offcut clean <project>",
-            OwoStyle::new().bold(),
-            emit_colors
-        )
-    ));
+    let summary: Vec<(usize, String)> = summary
+        .iter()
+        .map(|segment| {
+            (
+                segment.width(),
+                color_for_stream(segment, OwoStyle::new().green().bold(), emit_colors),
+            )
+        })
+        .collect();
+    out.extend(pack_columns(&summary, width, " · "));
+    let hint = [
+        (
+            "run offcut clean to reclaim all,".width(),
+            format!(
+                "run {} to reclaim all,",
+                color_for_stream("offcut clean", OwoStyle::new().bold(), emit_colors)
+            ),
+        ),
+        (
+            "or offcut clean <project> to inspect one".width(),
+            format!(
+                "or {} to inspect one",
+                color_for_stream(
+                    "offcut clean <project>",
+                    OwoStyle::new().bold(),
+                    emit_colors
+                )
+            ),
+        ),
+    ];
+    out.extend(pack_columns(&hint, width, " "));
     out.push(String::new());
-    out.push(format!(
-        "{} cleanable - safe to remove  {} clean - nothing to trim  {} wip - uncommitted work  {} no-remote/unpushed - not pushed  {} no-git - not a repo",
-        color_for_stream("●", status_style(Status::Cleanable), emit_colors),
-        color_for_stream("●", status_style(Status::Clean), emit_colors),
-        color_for_stream("●", status_style(Status::Wip), emit_colors),
-        color_for_stream("●", status_style(Status::NoRemote), emit_colors),
-        color_for_stream("●", status_style(Status::NoGit), emit_colors),
-    ));
+    let legend: Vec<(usize, String)> = [
+        (Status::Cleanable, "cleanable - safe to remove"),
+        (Status::Clean, "clean - nothing to trim"),
+        (Status::Wip, "wip - uncommitted work"),
+        (Status::NoRemote, "no-remote/unpushed - not pushed"),
+        (Status::NoGit, "no-git - not a repo"),
+    ]
+    .iter()
+    .map(|(status, text)| {
+        (
+            "● ".width() + text.width(),
+            format!(
+                "{} {text}",
+                color_for_stream("●", status_style(*status), emit_colors)
+            ),
+        )
+    })
+    .collect();
+    out.extend(pack_columns(&legend, width, "  "));
     out
+}
+
+/// One packable cell whose rendering carries no styling, so its display width
+/// is its own.
+fn cell(text: &str) -> (usize, String) {
+    (text.width(), text.to_string())
+}
+
+/// Pack `entries` into as few `sep`-joined lines as fit `width`.
+///
+/// Each entry carries its own display width because a styled entry's string
+/// length includes ANSI bytes that occupy no columns — measuring the rendered
+/// string would over-count and wrap early, and measuring nothing at all is
+/// what makes a legend soft-wrap mid-entry on an ordinary 80-column terminal.
+/// An entry wider than `width` still gets its own line rather than being
+/// dropped or truncated.
+fn pack_columns(entries: &[(usize, String)], width: usize, sep: &str) -> Vec<String> {
+    let sep_width = sep.width();
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0;
+    for (entry_width, rendered) in entries {
+        if line.is_empty() {
+            line.push_str(rendered);
+            line_width = *entry_width;
+        } else if line_width + sep_width + entry_width > width {
+            lines.push(std::mem::take(&mut line));
+            line.push_str(rendered);
+            line_width = *entry_width;
+        } else {
+            line.push_str(sep);
+            line.push_str(rendered);
+            line_width += sep_width + entry_width;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Column widths for the clean-review item list: the widest classification
@@ -1072,6 +1143,88 @@ mod tests {
                 "row {i} status column misaligned: {line:?}"
             );
         }
+    }
+
+    /// No rendered line overruns the terminal, at any width the table is
+    /// asked for. The legend and the next-step hint are the long unmeasured
+    /// shapes: unpacked, the legend alone is ~139 columns and soft-wraps
+    /// mid-entry on every ordinary 80–100 column terminal.
+    #[test]
+    fn every_table_line_fits_the_terminal_width() {
+        let rows = vec![
+            ProjectTableRow {
+                path: Path::new("/workspace/dashboard"),
+                status: Status::Cleanable,
+                size: Some("1.2 GB"),
+                branch: Some("main"),
+                changed: Some("2h ago"),
+            },
+            ProjectTableRow {
+                path: Path::new("/workspace/design-system"),
+                status: Status::Wip,
+                size: Some("540 MB"),
+                branch: Some("feat/tokens"),
+                changed: Some("12m ago"),
+            },
+        ];
+        for width in [40, 50, 80, 84, 100, 142] {
+            for emit_colors in [false, true] {
+                for line in format_project_table(&rows, 1, Some("1.2 GB"), width, emit_colors) {
+                    let visible = strip_ansi(&line);
+                    assert!(
+                        visible.width() <= width,
+                        "width {width} (colors {emit_colors}): line of {} columns: {visible:?}",
+                        visible.width()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The legend keeps every entry intact while packing to the width — an
+    /// entry is never split across two lines.
+    #[test]
+    fn legend_packs_whole_entries_across_lines() {
+        let rows = vec![ProjectTableRow {
+            path: Path::new("/workspace/dashboard"),
+            status: Status::Cleanable,
+            size: Some("1.2 GB"),
+            branch: Some("main"),
+            changed: Some("2h ago"),
+        }];
+        let rendered = format_project_table(&rows, 1, Some("1.2 GB"), 80, false).join("\n");
+        for entry in [
+            "cleanable - safe to remove",
+            "clean - nothing to trim",
+            "wip - uncommitted work",
+            "no-remote/unpushed - not pushed",
+            "no-git - not a repo",
+        ] {
+            assert!(
+                rendered.contains(entry),
+                "legend lost {entry:?}: {rendered}"
+            );
+        }
+        // Wide enough for one line, narrow enough to need more than one.
+        let one_line = format_project_table(&rows, 1, Some("1.2 GB"), 200, false);
+        let packed = format_project_table(&rows, 1, Some("1.2 GB"), 80, false);
+        assert!(
+            packed.len() > one_line.len(),
+            "a narrower terminal must use more lines, not a wrapped one"
+        );
+    }
+
+    /// An entry wider than the whole terminal still gets a line of its own
+    /// rather than being dropped.
+    #[test]
+    fn pack_columns_keeps_oversized_entries() {
+        let entries = [cell("a"), cell("an-extremely-long-single-entry"), cell("b")];
+        let lines = pack_columns(&entries, 10, "  ");
+        assert_eq!(
+            lines,
+            vec!["a", "an-extremely-long-single-entry", "b"],
+            "lines: {lines:?}"
+        );
     }
 
     /// The PROJECT column keeps enough path to tell two same-named projects

@@ -130,7 +130,9 @@ On a capable terminal, `offcut list`, the default `offcut` run, and
   in a table with the project path (abbreviated with `~`, and truncated from
   the left so the leaf stays readable), status, reclaimable size, branch, and
   last commit age where git can report it. Narrow terminals fall back to
-  stacked rows so paths and labels do not wrap into adjacent columns.
+  stacked rows so paths and labels do not wrap into adjacent columns, and the
+  summary, next-step hint, and status legend below the table pack onto as many
+  lines as the terminal is wide rather than soft-wrapping mid-entry.
 - **Clean review** — each cleanable project has a review panel showing its
   branch state and every gitignored path Offcut would remove or ask about,
   each with its classification and its fate. The panel is printed
