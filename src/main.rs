@@ -594,12 +594,18 @@ fn targeted_outcome_panel(
 /// `None` when the figure cannot be measured or would be zero.
 ///
 /// Reuses the sizing pass's read-only pipeline — safe set, `clean::dry_run`,
-/// `disk::compute_reclaimable_size` — so the blocked panel quotes the same
-/// number the project would show once it becomes cleanable. Only the one
-/// targeted project is measured: a workspace run never reaches this, so the
-/// listing keeps its cost. Every failure (no repo to enumerate, an unbuildable
-/// safe set) degrades to no figure rather than to an error — the panel's
-/// subject is the blocked tree, not the measurement.
+/// `disk::compute_reclaimable_size` — but counts `Safe` items only. A blocked
+/// project's `Surfaced` items are untracked paths that are neither protected
+/// nor safe-listed, i.e. routinely the user's own new work; the very action
+/// this panel demands (commit and push) makes them tracked, so offcut would
+/// never delete them and quoting their bytes promises a reclaim that can never
+/// arrive. Safe-listed build output is what cleaning takes without asking, so
+/// it is the only part of the figure the panel can stand behind.
+///
+/// Only the one targeted project is measured: a workspace run never reaches
+/// this, so the listing keeps its cost. Every failure (no repo to enumerate,
+/// an unbuildable safe set) degrades to no figure rather than to an error —
+/// the panel's subject is the blocked tree, not the measurement.
 fn blocked_reclaim(
     project_path: &Path,
     ignore_set: &ignore::IgnoreSet,
@@ -610,7 +616,13 @@ fn blocked_reclaim(
     let measured = safelist::SafeSet::from_config(project_path, cfg)
         .ok()
         .and_then(|safe_set| clean::dry_run(project_path, ignore_set, &safe_set).ok())
-        .and_then(|items| disk::compute_reclaimable_size(project_path, &items).ok())
+        .and_then(|items| {
+            let safe_only: Vec<clean::CleanItem> = items
+                .into_iter()
+                .filter(|item| item.classification == clean::Classification::Safe)
+                .collect();
+            disk::compute_reclaimable_size(project_path, &safe_only).ok()
+        })
         .filter(|&bytes| bytes > 0)
         .map(disk::format_size);
     progress.finish();
@@ -1277,6 +1289,7 @@ fn run_cleaning(
 #[cfg(test)]
 mod targeted_panel_tests {
     use super::*;
+    use std::fs;
 
     fn panel_with(status: classify::Status, possible_reclaim: Option<&str>) -> Option<String> {
         targeted_outcome_panel(
@@ -1328,6 +1341,44 @@ mod targeted_panel_tests {
     #[test]
     fn uninspectable_cleanable_project_gets_no_panel() {
         assert!(panel(classify::Status::Cleanable).is_none());
+    }
+
+    /// The blocked figure counts safe-listed build output only. A blocked
+    /// project's surfaced items are untracked paths offcut has not been told
+    /// it may delete — routinely the user's own new work — and the commit the
+    /// panel asks for makes them tracked, so counting them promises a reclaim
+    /// that can never arrive.
+    #[test]
+    fn blocked_reclaim_counts_safe_output_not_untracked_work() {
+        let root = std::env::temp_dir().join(format!(
+            "offcut-blocked-reclaim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join("scratch")).unwrap();
+        let git = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("init")
+            .output()
+            .unwrap();
+        assert!(git.status.success());
+        fs::write(root.join("node_modules/pkg.bin"), vec![b'x'; 2048]).unwrap();
+        fs::write(root.join("scratch/dataset.csv"), vec![b'y'; 8192]).unwrap();
+
+        let ignore_set = ignore::IgnoreSet::load(&root).unwrap();
+        let measured = blocked_reclaim(&root, &ignore_set, &Config::default());
+
+        assert_eq!(
+            measured.as_deref(),
+            Some(disk::format_size(2048).as_str()),
+            "only node_modules may count; scratch/dataset.csv is the user's work"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A measured blocked project quotes what cleaning would free once the

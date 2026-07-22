@@ -148,9 +148,12 @@ On a capable terminal, `offcut list`, the default `offcut` run, and
   whose tree blocks cleaning (not a repo, no remote, unpushed, or uncommitted
   work) shows the refusal reason, relevant `git status` detail for WIP trees,
   what cleaning would free once the tree stops blocking, and the command to
-  rerun after the project is clean and pushed. That size is measured for the
-  one targeted project only, using the same read-only sizing a cleanable
-  project gets; a workspace-wide run never measures a blocked project. A
+  rerun after the project is clean and pushed. That size counts safe-to-delete
+  build output only — never untracked paths offcut would have to ask about,
+  since committing them (which is what the panel asks for) makes them tracked
+  files offcut never deletes. It is measured for the one targeted project
+  only, using the same read-only sizing a cleanable project gets; a
+  workspace-wide run never measures a blocked project. A
   targeted run against a project that is already committed, pushed, and has no
   unprotected gitignored paths left reports that there is nothing to reclaim —
   it is not a refusal and asks for nothing. Build output that is still on disk

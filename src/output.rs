@@ -289,22 +289,34 @@ pub fn format_project_table(
         }
     } else {
         for row in rows {
+            let (marker, label_width) = prefix_budget("● ", width);
             out.push(format!(
-                "{} {}",
-                color_for_stream("●", status_style(row.status), emit_colors),
-                truncate_path_cols(&project_label(row.path), width.saturating_sub(2))
+                "{}{}",
+                color_for_stream(&marker, status_style(row.status), emit_colors),
+                truncate_path_cols(&project_label(row.path), label_width)
             ));
+            let (indent, detail_width) = prefix_budget("  ", width);
+            let status_label = truncate_cols(row.status.label(), detail_width);
             let detail = [
                 (
-                    row.status.label().width(),
-                    colored_status(row.status, emit_colors),
+                    status_label.width(),
+                    colored_status(&status_label, row.status, emit_colors),
                 ),
-                cell(&format!("reclaim {}", row.size.unwrap_or("-"))),
-                cell(&format!("branch {}", row.branch.unwrap_or("-"))),
-                cell(&format!("changed {}", row.changed.unwrap_or("-"))),
+                cell(&truncate_cols(
+                    &format!("reclaim {}", row.size.unwrap_or("-")),
+                    detail_width,
+                )),
+                cell(&truncate_cols(
+                    &format!("branch {}", row.branch.unwrap_or("-")),
+                    detail_width,
+                )),
+                cell(&truncate_cols(
+                    &format!("changed {}", row.changed.unwrap_or("-")),
+                    detail_width,
+                )),
             ];
-            for line in pack_columns(&detail, width.saturating_sub(2), " · ") {
-                out.push(format!("  {line}"));
+            for line in pack_columns(&detail, detail_width, " · ") {
+                out.push(format!("{indent}{line}"));
             }
         }
     }
@@ -760,8 +772,8 @@ pub fn format_clean_success(
     ]
 }
 
-fn colored_status(status: Status, emit_colors: bool) -> String {
-    color_for_stream(status.label(), status_style(status), emit_colors)
+fn colored_status(label: &str, status: Status, emit_colors: bool) -> String {
+    color_for_stream(label, status_style(status), emit_colors)
 }
 
 fn dim(text: &str, emit_colors: bool) -> String {
@@ -1499,6 +1511,52 @@ mod tests {
                     assert!(
                         visible.width() <= width,
                         "width {width} (colors {emit_colors}): line of {} columns: {visible:?}",
+                        visible.width()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every project row fits at *any* width, down to a single column. The
+    /// stacked rows carry fixed prefixes (the status dot, the detail indent),
+    /// and a prefix emitted at full length is what overruns a terminal
+    /// narrower than the prefix itself.
+    ///
+    /// Only the rows are swept: the footer, hint, and legend below the blank
+    /// separator are packed by `pack_columns`, which deliberately gives an
+    /// over-wide entry its own line rather than dropping it.
+    #[test]
+    fn every_table_row_fits_even_the_narrowest_terminal() {
+        let rows = vec![
+            ProjectTableRow {
+                path: Path::new("/workspace/dashboard"),
+                status: Status::Cleanable,
+                size: Some("1.2 GB"),
+                branch: Some("main"),
+                changed: Some("2h ago"),
+            },
+            ProjectTableRow {
+                path: Path::new("/workspace/design-system"),
+                status: Status::Wip,
+                size: None,
+                branch: None,
+                changed: None,
+            },
+        ];
+        for width in EXTREME_WIDTHS {
+            for emit_colors in [false, true] {
+                let rendered = format_project_table(&rows, 1, Some("1.2 GB"), width, emit_colors);
+                let body = rendered
+                    .iter()
+                    .position(|line| line.is_empty())
+                    .unwrap_or(rendered.len());
+                assert!(body > 0, "width {width}: table rendered no rows");
+                for line in &rendered[..body] {
+                    let visible = strip_ansi(line);
+                    assert!(
+                        visible.width() <= width,
+                        "width {width} (colors {emit_colors}): row of {} columns: {visible:?}",
                         visible.width()
                     );
                 }
