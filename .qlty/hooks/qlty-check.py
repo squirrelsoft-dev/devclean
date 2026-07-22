@@ -55,6 +55,11 @@ def block_stop(tool: str, reason: str) -> int:
     return 1
 
 
+def skip_check(reason: str) -> int:
+    print(reason, file=sys.stderr)
+    return 1
+
+
 def find_repo_root(cwd: Path) -> Path:
     try:
         git = subprocess.run(
@@ -115,8 +120,8 @@ def main() -> int:
         return block_stop(
             args.tool,
             f"qlty stop hook is misconfigured: {config_path} does not exist.\n\n"
-            "Restore the Qlty config for this repository (for example with `qlty init`) "
-            "or remove the project stop hook, then stop again.",
+            "Restore the Qlty config for this repository (for example with `qlty init`), "
+            "then stop again.",
         )
 
     env = os.environ.copy()
@@ -131,14 +136,13 @@ def main() -> int:
             stderr=subprocess.PIPE,
         )
     except OSError as error:
-        return block_stop(
-            args.tool,
-            f"qlty could not be executed in {root} ({error}).\n\n"
+        return skip_check(
+            f"qlty check was skipped: qlty could not be executed in {root} ({error}).\n\n"
             "Install Qlty (https://qlty.sh) and make sure `qlty` is on PATH for the "
             "environment this agent runs in — the installer puts it in ~/.qlty/bin and "
             "only adds that to PATH via your shell profile, so agents launched outside a "
-            "login shell may not see it. Otherwise remove the project stop hook, then "
-            "stop again.",
+            "login shell may not see it.\n\n"
+            "This stop was not blocked, and no repository file needs to change."
         )
 
     if result.returncode == 0:

@@ -16,6 +16,16 @@ qlty check --no-progress --no-upgrade-check
 Qlty was initialized with `.qlty/qlty.toml`. The `.qlty/.gitignore` keeps Qlty
 cache/plugin churn out of git while allowing checked-in config and hooks.
 
+The wrapper distinguishes repository problems from environment problems:
+
+- **Qlty reported issues**, or `.qlty/qlty.toml` is missing: the stop is
+  blocked, because the agent can act on it from inside the repository.
+- **`qlty` is not installed or not on PATH**: the stop is *not* blocked. The
+  wrapper prints the reason on stderr and exits non-zero, which every supported
+  tool treats as a non-blocking hook error, so the message is visible without
+  holding the session open. Contributors without Qlty installed are never asked
+  to change committed hook configuration to get their agent to stop.
+
 ## Codex
 
 Project configuration lives in `.codex/hooks.json`, and that file is the whole
@@ -50,8 +60,10 @@ Installed smoke evidence, Codex CLI `0.142.5`, all runs against an isolated
   either direction.
 - End to end: an isolated home holding only auth plus `[projects."<path>"]
   trust_level = "trusted"`, against a project with `.codex/hooks.json` and no
-  `.codex/config.toml`, printed `hook: Stop` / `hook: Stop Completed` and ran
-  the hook with the project root as cwd.
+  `.codex/config.toml`, run with `codex exec --dangerously-bypass-hook-trust`,
+  printed `hook: Stop` / `hook: Stop Completed` and ran the hook with the
+  project root as cwd. Project trust alone was *not* sufficient — see the
+  limitations below.
 
 Exact limitations for this build: the identical run *without*
 `--dangerously-bypass-hook-trust` did not fire the hook and printed no warning,

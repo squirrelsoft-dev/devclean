@@ -131,19 +131,21 @@ python3_bin="$(command -v python3)"
 mkdir -p "${tmp}/nopath"
 ln -s "$(command -v git)" "${tmp}/nopath/git"
 
-printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
-  env PATH="${tmp}/nopath" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
-    --tool claude > "${tmp}/missing.json" 2> "${tmp}/missing.err"
+for tool in claude codex pi; do
+  status=0
+  printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
+    env PATH="${tmp}/nopath" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
+      --tool "${tool}" > "${tmp}/missing-${tool}.out" 2> "${tmp}/missing-${tool}.err" || status=$?
 
-test ! -s "${tmp}/missing.err"
-python3 - <<'PY' "${tmp}/missing.json"
-import json
-import sys
-payload = json.loads(open(sys.argv[1]).read())
-assert payload["decision"] == "block"
-assert "qlty could not be executed" in payload["reason"]
-assert "PATH" in payload["reason"]
-PY
+  test "${status}" -eq 1
+  test ! -s "${tmp}/missing-${tool}.out"
+  grep -F "qlty check was skipped" "${tmp}/missing-${tool}.err" >/dev/null
+  grep -F "PATH" "${tmp}/missing-${tool}.err" >/dev/null
+  ! grep -qi "remove the project stop hook" "${tmp}/missing-${tool}.err"
+  ! grep -qi "decision" "${tmp}/missing-${tool}.err"
+done
+
+! grep -rqi "remove the project stop hook" "${repo_root}/.qlty/hooks/qlty-check.py"
 
 status=0
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
@@ -152,6 +154,7 @@ printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp
 
 test "${status}" -eq 1
 test ! -s "${tmp}/nogit.out"
+grep -F "qlty check was skipped" "${tmp}/nogit.err" >/dev/null
 grep -F "qlty could not be executed" "${tmp}/nogit.err" >/dev/null
 
 echo "agent hook config tests passed"
