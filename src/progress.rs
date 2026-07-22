@@ -13,12 +13,13 @@
 //! so the screen is never blank during the long git-classification stretch.
 //! The discovery walk keeps its own `walking: <path>` line.
 //!
-//! ## TTY gating
+//! ## Terminal UI gating
 //!
-//! Renders only when stdout is a TTY (output::is_tty()). When piped or
-//! redirected, nothing is emitted -- a stream of CR-terminated partial paths
-//! would be garbage in a pipe or log file. Reuses the existing output::is_tty
-//! gate; no duplicate detection.
+//! Renders only when stdout passes output::stdout_terminal_ui_enabled(): a
+//! capable terminal UI on stdout. When piped, redirected, or running under
+//! TERM=dumb (even on a TTY), nothing is emitted -- a stream of CR-terminated
+//! partial paths would be garbage in a pipe, log file, or dumb terminal.
+//! Reuses the shared rich-output capability gate; no duplicate detection.
 //!
 //! ## Truncation
 //!
@@ -66,18 +67,20 @@ use crate::output;
 pub struct ProgressWriter<W: Write> {
     writer: W,
     width: usize,
-    /// Whether the writer is a TTY. Gated on output::is_tty() at construction
-    /// time -- the struct never renders when not a TTY.
+    /// Whether stdout supports the terminal UI. Gated on
+    /// output::stdout_terminal_ui_enabled() at construction time -- the struct
+    /// never renders when stdout is not a capable terminal, including TERM=dumb.
     active: bool,
     tick: usize,
 }
 
 impl<W: Write> ProgressWriter<W> {
-    /// Build a progress writer against writer, checking the TTY gate.
+    /// Build a progress writer against writer, checking the terminal UI gate.
     ///
-    /// If stdout is a TTY, active is true and each update renders;
-    /// otherwise each update is a no-op. Terminal width is resolved via
-    /// terminal_size, then COLUMNS, then a default of 80.
+    /// If stdout supports output::stdout_terminal_ui_enabled(), active is true
+    /// and each update renders; otherwise, including TERM=dumb on a TTY, each
+    /// update is a no-op. Terminal width is resolved via terminal_size, then
+    /// COLUMNS, then a default of 80.
     pub fn new(writer: W) -> Self {
         let active = output::stdout_terminal_ui_enabled();
         let width = terminal_width();
