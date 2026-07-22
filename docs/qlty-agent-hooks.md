@@ -71,12 +71,18 @@ Codex.
 
 Project configuration lives in `.pi/extensions/qlty-stop-hook.ts`. Pi does not
 have a Codex/Claude-style `Stop` event; its current project-scoped mechanism is
-a trusted project extension that listens for `session_shutdown`, which fires on
-quit, reload, new-session, resume, fork, SIGHUP, SIGTERM, Ctrl+C, and Ctrl+D.
+a trusted project extension that listens for `session_shutdown`, which fires
+with `reason` values `quit | reload | new | resume | fork`. The extension only
+acts on `reason === "quit"`, so `/new`, `/fork`, `/resume`, and `/reload` are
+not delayed by a full `qlty check`.
 
 The extension runs the shared wrapper with `--tool pi --cwd <ctx.cwd>`. Pi
-shutdown hooks cannot force another model turn, so failures are surfaced through
-the Pi UI when available and stderr otherwise.
+shutdown hooks cannot force another model turn, so failures are reported on
+stderr. Pi's interactive quit path stops the TUI *before* emitting
+`session_shutdown` (so extension cleanup cannot repaint the final frame), which
+means `ctx.ui.notify` is invisible on exactly the path this hook runs; stderr is
+therefore the reporting channel, and `notify` is only a best-effort extra for
+non-TUI front ends.
 
 Installed smoke evidence: Pi `0.81.1` loaded a temporary project-local extension
 after `--approve`, emitted `session_shutdown` in print mode even when the model
@@ -95,4 +101,5 @@ Run the hook/config fixture tests with:
 
 The script validates the Codex, Claude Code, and Pi project config shapes, then
 exercises `.qlty/hooks/qlty-check.py` with stubbed `qlty` binaries for success,
-failure, root resolution, and recursion-guard behavior.
+failure, root resolution, the `stop_hook_active` recursion guard, and the
+non-JSON (`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`.

@@ -1,11 +1,26 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const HOOK_ENV = "OFFCUT_QLTY_STOP_HOOK_ACTIVE";
 
+function report(ctx: ExtensionContext, message: string, level: "warning" | "error") {
+	console.error(message);
+	if (ctx.hasUI) {
+		try {
+			ctx.ui.notify(message, level);
+		} catch {
+			// The renderer is already torn down on the quit path; stderr carried it.
+		}
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (event, ctx) => {
+		if (event.reason !== "quit") {
+			return;
+		}
+
 		if (process.env[HOOK_ENV]) {
 			return;
 		}
@@ -14,9 +29,7 @@ export default function (pi: ExtensionAPI) {
 		const root = rootResult.code === 0 ? rootResult.stdout.trim() : ctx.cwd;
 		const scriptPath = join(root, ".qlty", "hooks", "qlty-check.py");
 		if (!existsSync(scriptPath)) {
-			if (ctx.hasUI) {
-				ctx.ui.notify("Qlty stop hook skipped: .qlty/hooks/qlty-check.py was not found", "warning");
-			}
+			report(ctx, "Qlty stop hook skipped: .qlty/hooks/qlty-check.py was not found", "warning");
 			return;
 		}
 
@@ -32,11 +45,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (result.code !== 0) {
 			const output = (result.stderr || result.stdout || `qlty hook exited with code ${result.code}`).trim();
-			if (ctx.hasUI) {
-				ctx.ui.notify(output, "error");
-			} else {
-				console.error(output);
-			}
+			report(ctx, output, "error");
 		}
 	});
 }

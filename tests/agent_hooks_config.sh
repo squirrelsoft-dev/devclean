@@ -44,6 +44,8 @@ assert 'pi.on("session_shutdown"' in pi_extension
 assert ".qlty" in pi_extension
 assert "qlty-check.py" in pi_extension
 assert "OFFCUT_QLTY_STOP_HOOK_ACTIVE" in pi_extension
+assert 'event.reason !== "quit"' in pi_extension
+assert "console.error(message)" in pi_extension
 PY
 
 python3 -m py_compile "${repo_root}/.qlty/hooks/qlty-check.py"
@@ -102,5 +104,18 @@ printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":true}\n' "${tmp}
 
 test ! -e "${QLTY_STUB_LOG}"
 test ! -s "${tmp}/guard.out"
+
+mkdir -p "${tmp}/noconfig"
+git -C "${tmp}/noconfig" init --quiet
+
+status=0
+printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/noconfig" |
+  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool pi \
+    > "${tmp}/misconfig.out" 2> "${tmp}/misconfig.err" || status=$?
+
+test "${status}" -eq 1
+test ! -s "${tmp}/misconfig.out"
+grep -F "qlty stop hook is misconfigured" "${tmp}/misconfig.err" >/dev/null
+grep -F "qlty init" "${tmp}/misconfig.err" >/dev/null
 
 echo "agent hook config tests passed"

@@ -112,7 +112,12 @@ def main() -> int:
 
     config_path = root / ".qlty" / "qlty.toml"
     if not config_path.is_file():
-        return block_stop(args.tool, f"qlty check skipped: {config_path} does not exist")
+        return block_stop(
+            args.tool,
+            f"qlty stop hook is misconfigured: {config_path} does not exist.\n\n"
+            "Restore the Qlty config for this repository (for example with `qlty init`) "
+            "or remove the project stop hook, then stop again.",
+        )
 
     env = os.environ.copy()
     env[HOOK_ENV] = "1"
