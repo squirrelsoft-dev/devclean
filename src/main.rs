@@ -552,17 +552,19 @@ fn render_workspace_table(
 /// found nothing to clean, or `None` when no panel states this outcome
 /// truthfully.
 ///
-/// A blocking tree state gets the refusal and the action that unblocks it. An
-/// already-clean project gets the nothing-to-reclaim state instead: it is
-/// committed, pushed, and carries no junk, so "commit, push, or initialize as
-/// needed" is advice it cannot act on. A `Cleanable` project only reaches here
-/// when its own inspection failed — the sizing pass already warned about that
-/// on stderr, and no panel would be honest about it.
+/// A blocking tree state gets the refusal, the action that unblocks it, and
+/// what cleaning would free once it is unblocked. An already-clean project gets
+/// the nothing-to-reclaim state instead: it is committed, pushed, and carries
+/// nothing offcut may delete, so "commit, push, or initialize as needed" is
+/// advice it cannot act on. A `Cleanable` project only reaches here when its
+/// own inspection failed — the sizing pass already warned about that on
+/// stderr, and no panel would be honest about it.
 fn targeted_outcome_panel(
     path: &Path,
     status: classify::Status,
     branch_line: &str,
     details: &[String],
+    possible_reclaim: Option<&str>,
     width: usize,
     emit_colors: bool,
 ) -> Option<Vec<String>> {
@@ -572,7 +574,7 @@ fn targeted_outcome_panel(
             status,
             branch_line,
             details,
-            None,
+            possible_reclaim,
             width,
             emit_colors,
         ));
@@ -586,6 +588,33 @@ fn targeted_outcome_panel(
         ));
     }
     None
+}
+
+/// What cleaning `project_path` would free if its tree stopped blocking, or
+/// `None` when the figure cannot be measured or would be zero.
+///
+/// Reuses the sizing pass's read-only pipeline — safe set, `clean::dry_run`,
+/// `disk::compute_reclaimable_size` — so the blocked panel quotes the same
+/// number the project would show once it becomes cleanable. Only the one
+/// targeted project is measured: a workspace run never reaches this, so the
+/// listing keeps its cost. Every failure (no repo to enumerate, an unbuildable
+/// safe set) degrades to no figure rather than to an error — the panel's
+/// subject is the blocked tree, not the measurement.
+fn blocked_reclaim(
+    project_path: &Path,
+    ignore_set: &ignore::IgnoreSet,
+    cfg: &Config,
+) -> Option<String> {
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    progress.update_phase("sizing", 1, 1, project_path);
+    let measured = safelist::SafeSet::from_config(project_path, cfg)
+        .ok()
+        .and_then(|safe_set| clean::dry_run(project_path, ignore_set, &safe_set).ok())
+        .and_then(|items| disk::compute_reclaimable_size(project_path, &items).ok())
+        .filter(|&bytes| bytes > 0)
+        .map(disk::format_size);
+    progress.finish();
+    measured
 }
 
 fn status_detail_lines(project_path: &Path, status: classify::Status) -> Vec<String> {
@@ -1027,13 +1056,19 @@ fn run_cleaning(
     // nothing to clean. The flow only runs when there is a subject to clean.
     if cleanable_items.is_empty() {
         let panel = if rich_stdout && project_path.is_some() {
-            all_projects.first().map(|(path, status, _)| {
+            all_projects.first().map(|(path, status, ignore_set)| {
                 let branch = branch_state_line(&branch_labels.get(0, path, *status), *status);
+                let reclaim = if output::blocks_cleaning(*status) {
+                    blocked_reclaim(path, ignore_set, &cfg)
+                } else {
+                    None
+                };
                 targeted_outcome_panel(
                     path,
                     *status,
                     &branch,
                     &status_detail_lines(path, *status),
+                    reclaim.as_deref(),
                     output::terminal_width(),
                     emit_colors,
                 )
@@ -1243,16 +1278,21 @@ fn run_cleaning(
 mod targeted_panel_tests {
     use super::*;
 
-    fn panel(status: classify::Status) -> Option<String> {
+    fn panel_with(status: classify::Status, possible_reclaim: Option<&str>) -> Option<String> {
         targeted_outcome_panel(
             Path::new("/workspace/dashboard"),
             status,
             &branch_state_line("main", status),
             &[],
+            possible_reclaim,
             80,
             false,
         )
         .map(|lines| lines.join("\n"))
+    }
+
+    fn panel(status: classify::Status) -> Option<String> {
+        panel_with(status, None)
     }
 
     /// A committed, pushed project with nothing left to delete is not blocked
@@ -1288,6 +1328,21 @@ mod targeted_panel_tests {
     #[test]
     fn uninspectable_cleanable_project_gets_no_panel() {
         assert!(panel(classify::Status::Cleanable).is_none());
+    }
+
+    /// A measured blocked project quotes what cleaning would free once the
+    /// tree stops blocking; an unmeasurable one simply omits the figure.
+    #[test]
+    fn blocked_panel_carries_the_measured_reclaim_when_known() {
+        let measured = panel_with(classify::Status::Wip, Some("540 MB")).expect("panel");
+        assert!(measured.contains("~540 MB"), "{measured}");
+        assert!(measured.contains("would become reclaimable"), "{measured}");
+
+        let unmeasured = panel(classify::Status::Wip).expect("panel");
+        assert!(
+            !unmeasured.contains("would become reclaimable"),
+            "{unmeasured}"
+        );
     }
 }
 

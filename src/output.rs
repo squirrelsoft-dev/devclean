@@ -488,11 +488,12 @@ pub fn format_clean_review(
         // Too narrow for three columns: stack the classification and the fate
         // under the path instead of letting every row soft-wrap, which is the
         // one thing the aligned panel exists to prevent.
-        let body_width = width.saturating_sub(4);
+        let (bullet, item_budget) = prefix_budget("  ▸ ", width);
         out.push(format!(
-            "  ▸ {}",
-            truncate_path_cols(&item, body_width.max(1))
+            "{bullet}{}",
+            truncate_path_cols(&item, item_budget)
         ));
+        let (indent, body_width) = prefix_budget("    ", width);
         let label = truncate_cols(row.label, body_width);
         let fate = truncate_cols(row.fate, body_width);
         let detail = [
@@ -500,7 +501,7 @@ pub fn format_clean_review(
             (fate.width(), dim(&fate, emit_colors)),
         ];
         for line in pack_columns(&detail, body_width, " · ") {
-            out.push(format!("    {line}"));
+            out.push(format!("{indent}{line}"));
         }
     }
     out.extend(wrap_plain(
@@ -525,21 +526,51 @@ fn panel_head(
     width: usize,
     emit_colors: bool,
 ) -> Vec<String> {
-    // "status   " / "branch   " are both 9 display columns.
-    let value_width = width.saturating_sub(9);
+    let (status_key, status_width) = prefix_budget("status   ", width);
+    let (branch_key, branch_width) = prefix_budget("branch   ", width);
     vec![
         format_review_header(path, width, emit_colors),
         format!(
-            "status   {}",
+            "{status_key}{}",
             color_for_stream(
-                &truncate_cols(status.label(), value_width),
+                &truncate_cols(status.label(), status_width),
                 status_style(status),
                 emit_colors
             )
         ),
-        format!("branch   {}", truncate_cols(branch_line, value_width)),
+        format!("{branch_key}{}", truncate_cols(branch_line, branch_width)),
         String::new(),
     ]
+}
+
+/// Split `width` between a fixed prefix (a key, a bullet, an indent) and the
+/// body that follows it: the prefix is clipped first, then the body gets what
+/// is left. A prefix emitted at its full length is how a rendered line
+/// overruns a terminal narrower than the prefix itself.
+fn prefix_budget(prefix: &str, width: usize) -> (String, usize) {
+    let clipped = clip_cols(prefix, width);
+    let budget = width.saturating_sub(clipped.width());
+    (clipped, budget)
+}
+
+/// Truncate to `width` display columns with no ellipsis. Used for the fixed
+/// parts of a line, where an ellipsis would read as lost content rather than
+/// as the layout giving way.
+fn clip_cols(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut cols = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if cols + ch_width > width {
+            break;
+        }
+        cols += ch_width;
+        out.push(ch);
+    }
+    out
 }
 
 /// Split `text` into word cells no wider than `width`, so packing them can
@@ -623,17 +654,22 @@ pub fn format_blocked_project(
         "offcut only cleans projects with a clean, pushed tree, so nothing in progress is ever lost.",
         width,
     ));
-    let detail_width = width.saturating_sub(3);
+    let (indent, detail_width) = prefix_budget("   ", width);
     for detail in details {
         out.push(format!(
-            "   {}",
+            "{indent}{}",
             dim(&truncate_cols(detail, detail_width), emit_colors)
         ));
     }
     // The command carries the project path, so it is the one segment that can
-    // outgrow the terminal on its own; it is truncated from the left (keeping
-    // the leaf) before the hint is packed.
-    let command = truncate_path_cols(&format!("offcut clean {}", path.display()), width);
+    // outgrow the terminal on its own. The verb is what makes the hint
+    // runnable, so it keeps its columns and the path spends what is left,
+    // truncated from the left so the leaf survives.
+    let (verb, path_budget) = prefix_budget("offcut clean ", width);
+    let command = format!(
+        "{verb}{}",
+        truncate_path_cols(&path.display().to_string(), path_budget)
+    );
     let mut hint = word_cells("→ commit, push, or initialize as needed, then run", width);
     hint.push((
         command.width(),
@@ -650,7 +686,7 @@ pub fn format_blocked_project(
                 emit_colors,
             )
             .into_iter()
-            .map(|line| format!("   {line}")),
+            .map(|line| format!("{indent}{line}")),
         );
     }
     out
@@ -658,9 +694,14 @@ pub fn format_blocked_project(
 
 /// Format the already-tidy state: a targeted run against a `Clean` project.
 ///
-/// The project is committed, pushed, and carries no gitignored junk, so there
-/// is nothing to refuse and nothing to ask for — the panel reports the absence
-/// of work rather than a blocked action.
+/// There is nothing to refuse and nothing to ask for, so the panel reports the
+/// absence of work rather than a blocked action.
+///
+/// `Clean` does not mean the project has no build output — it means it has no
+/// *unprotected* untracked junk (see `classify::classify`), so a project whose
+/// `node_modules` is protected by `.offcutignore` lands here with that output
+/// still on disk. The copy says what the state actually guarantees; claiming
+/// nothing was found would deny the very output offcut is preserving.
 pub fn format_nothing_to_reclaim(
     path: &Path,
     branch_line: &str,
@@ -678,7 +719,7 @@ pub fn format_nothing_to_reclaim(
         emit_colors,
     ));
     out.extend(wrap_plain(
-        "no gitignored build output was found, so there is nothing to delete.",
+        "committed and pushed, with no unprotected gitignored paths left - anything still here is protected by .offcutignore.",
         width,
     ));
     out
@@ -857,6 +898,12 @@ fn truncate_cols(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The widths every panel sweep runs. It reaches below the widest fixed
+    /// prefix a panel prints (`"status   "`, 9 columns) because a prefix
+    /// emitted at full length regardless of the terminal is exactly how the
+    /// width invariant used to break — `COLUMNS=6` reaches it.
+    const EXTREME_WIDTHS: [usize; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 40, 80];
 
     fn emit_true() -> Option<bool> {
         Some(true)
@@ -1268,7 +1315,7 @@ mod tests {
         let path = Path::new(
             "/var/folders/s0/zl64g7m92b7bf0d72vc0cskw0000gn/T/offcut-demo/projects/payments-api",
         );
-        for width in [10, 20, 40, 45, 46, 56, 80, 120] {
+        for width in EXTREME_WIDTHS.iter().copied().chain([45, 46, 56, 120]) {
             for emit_colors in [false, true] {
                 for line in format_clean_review(
                     path,
@@ -1589,7 +1636,7 @@ mod tests {
         let path = Path::new(
             "/var/folders/s0/zl64g7m92b7bf0d72vc0cskw0000gn/T/offcut-demo/projects/design-system",
         );
-        for width in [10, 20, 40, 60, 80, 100, 140] {
+        for width in EXTREME_WIDTHS {
             for emit_colors in [false, true] {
                 for line in format_blocked_project(
                     path,
@@ -1608,6 +1655,37 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The rerun hint is only worth printing if it can be run. Truncating the
+    /// whole command from the left ate `offcut clean ` first and left the
+    /// sentence pointing at a bare path fragment — for any project path past
+    /// 67 columns on an ordinary 80-column terminal.
+    #[test]
+    fn blocked_hint_keeps_the_command_runnable() {
+        let path = Path::new(
+            "/Users/someone/work/very/deeply/nested/monorepo/packages/design-system-tokens",
+        );
+        for width in [40, 60, 80, 100] {
+            let rendered = format_blocked_project(
+                path,
+                Status::Wip,
+                "feat/tokens · uncommitted changes · remote ✓",
+                &[],
+                None,
+                width,
+                false,
+            )
+            .join("\n");
+            assert!(
+                rendered.contains("offcut clean "),
+                "width {width} lost the command verb: {rendered}"
+            );
+            assert!(
+                rendered.contains("design-system-tokens"),
+                "width {width} lost the project leaf: {rendered}"
+            );
         }
     }
 
@@ -1632,9 +1710,10 @@ mod tests {
         assert!(rendered.contains("design-system"), "{rendered}");
     }
 
-    /// An already-clean project is committed, pushed, and carries no junk:
-    /// refusing to clean it and telling the user to commit and push is advice
-    /// they cannot act on. It gets the nothing-to-reclaim state instead.
+    /// An already-clean project is committed, pushed, and carries nothing
+    /// offcut may delete: refusing to clean it and telling the user to commit
+    /// and push is advice they cannot act on. It gets the nothing-to-reclaim
+    /// state instead.
     #[test]
     fn nothing_to_reclaim_state_makes_no_refusal() {
         let rendered = format_nothing_to_reclaim(
@@ -1650,7 +1729,7 @@ mod tests {
         assert!(!rendered.contains("refusing to clean"), "{rendered}");
         assert!(!rendered.contains("commit, push"), "{rendered}");
 
-        for width in [10, 20, 40, 60, 80, 140] {
+        for width in EXTREME_WIDTHS {
             for line in format_nothing_to_reclaim(
                 Path::new("/workspace/dashboard"),
                 "main · clean tree · remote ✓ pushed",
@@ -1665,6 +1744,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `Clean` means no *unprotected* untracked junk, not an empty tree: a
+    /// project whose `node_modules` is protected by `.offcutignore` classifies
+    /// `Clean` with that output still on disk. The panel must not deny the
+    /// existence of the output offcut is deliberately preserving.
+    #[test]
+    fn nothing_to_reclaim_state_does_not_deny_protected_output() {
+        let rendered = format_nothing_to_reclaim(
+            Path::new("/workspace/dashboard"),
+            "main · clean tree · remote ✓ pushed",
+            100,
+            false,
+        )
+        .join(" ");
+        assert!(
+            !rendered.contains("was found"),
+            "the state cannot claim nothing was found: {rendered}"
+        );
+        assert!(rendered.contains(".offcutignore"), "{rendered}");
+        assert!(rendered.contains("protected"), "{rendered}");
     }
 
     /// Only a tree state the user can act on blocks cleaning. `Clean` is the
