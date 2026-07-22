@@ -18,13 +18,16 @@ cache/plugin churn out of git while allowing checked-in config and hooks.
 
 ## Codex
 
-Project configuration lives in:
+Project configuration lives in `.codex/hooks.json`, and that file is the whole
+project-scoped mechanism. Offcut deliberately ships **no** `.codex/config.toml`:
+Codex's `hooks` feature is a *stable* feature that is already enabled by
+default, and Codex discards project-local `[features]` entirely, so a committed
+`[features] hooks = true` would be a no-op that misrepresents how the hook is
+turned on. Only the user-level `~/.codex/config.toml` can change the flag, and
+Offcut never writes there.
 
-- `.codex/config.toml`
-- `.codex/hooks.json`
-
-Codex project hooks require project trust before they run. Once trusted, the
-`Stop` hook invokes:
+Codex project hooks require both project trust and *persisted hook trust*
+before they run. Once trusted, the `Stop` hook invokes:
 
 ```sh
 python3 "$(git rev-parse --show-toplevel)/.qlty/hooks/qlty-check.py" --tool codex
@@ -36,11 +39,25 @@ captured Qlty output so Codex continues with useful feedback. When Codex reports
 `stop_hook_active: true`, the wrapper allows the stop to prevent recursive
 continuation loops.
 
-Installed smoke evidence: Codex CLI `0.142.5` ran a temporary trusted repo with
-`codex exec --ephemeral --dangerously-bypass-hook-trust`; its project `Stop`
-hook ran and the stubbed `qlty` saw `cwd=<temp repo>`, `args=check --no-progress
---no-upgrade-check`, and `OFFCUT_QLTY_STOP_HOOK_ACTIVE=1`. In this build, adding
-unsupported top-level keys to `.codex/hooks.json` can make the file silently
+Installed smoke evidence, Codex CLI `0.142.5`, all runs against an isolated
+`CODEX_HOME` (no global `hooks.json`, no global `[features]`):
+
+- `codex features list` with an empty isolated `config.toml` reports `hooks
+  stable true` — no enablement step is needed.
+- A project `.codex/config.toml` setting `[features] hooks = false` still
+  reported `true`, and setting `hooks = true` against a user-level `hooks =
+  false` still reported `false`. Project-local `[features]` has no effect in
+  either direction.
+- End to end: an isolated home holding only auth plus `[projects."<path>"]
+  trust_level = "trusted"`, against a project with `.codex/hooks.json` and no
+  `.codex/config.toml`, printed `hook: Stop` / `hook: Stop Completed` and ran
+  the hook with the project root as cwd.
+
+Exact limitations for this build: the identical run *without*
+`--dangerously-bypass-hook-trust` did not fire the hook and printed no warning,
+so an unreviewed `.codex/hooks.json` is silently skipped in non-interactive
+`codex exec` until hook trust is persisted interactively. Adding unsupported
+top-level keys to `.codex/hooks.json` can likewise make the file silently
 ignored, so keep the top level to `hooks`.
 
 ## Claude Code
@@ -76,9 +93,12 @@ with `reason` values `quit | reload | new | resume | fork`. The extension only
 acts on `reason === "quit"`, so `/new`, `/fork`, `/resume`, and `/reload` are
 not delayed by a full `qlty check`.
 
-The extension runs the shared wrapper with `--tool pi --cwd <ctx.cwd>`. Pi
-shutdown hooks cannot force another model turn, so failures are reported on
-stderr. Pi's interactive quit path stops the TUI *before* emitting
+The extension runs the shared wrapper with `--tool pi --cwd <ctx.cwd>`. Because
+that call is synchronous and the TUI is already gone, the extension first prints
+a one-line progress notice to stderr so a quit that waits on a cold plugin cache
+does not look like a frozen terminal. Pi shutdown hooks cannot force another
+model turn, so failures are reported on stderr too. Pi's interactive quit path
+stops the TUI *before* emitting
 `session_shutdown` (so extension cleanup cannot repaint the final frame), which
 means `ctx.ui.notify` is invisible on exactly the path this hook runs; stderr is
 therefore the reporting channel, and `notify` is only a best-effort extra for
@@ -101,5 +121,6 @@ Run the hook/config fixture tests with:
 
 The script validates the Codex, Claude Code, and Pi project config shapes, then
 exercises `.qlty/hooks/qlty-check.py` with stubbed `qlty` binaries for success,
-failure, root resolution, the `stop_hook_active` recursion guard, and the
-non-JSON (`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`.
+failure, root resolution, the `stop_hook_active` recursion guard, the non-JSON
+(`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`, and the
+missing-binary paths where `qlty` (and then `git`) are absent from `PATH`.

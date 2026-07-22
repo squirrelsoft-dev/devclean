@@ -33,14 +33,14 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		console.error("Qlty stop hook: running qlty check, this may take a while on a cold plugin cache...");
+
 		const result = await pi.exec("python3", [
 			scriptPath,
 			"--tool",
 			"pi",
 			"--cwd",
 			ctx.cwd,
-			"--event",
-			event.reason,
 		], { timeout: 600_000 });
 
 		if (result.code !== 0) {

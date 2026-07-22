@@ -11,8 +11,11 @@ from pathlib import Path
 
 root = Path.cwd()
 
-codex_config = tomllib.loads((root / ".codex" / "config.toml").read_text())
-assert codex_config["features"]["hooks"] is True
+codex_project_config = root / ".codex" / "config.toml"
+if codex_project_config.exists():
+    # Codex discards project-local `[features]`, and `hooks` is a stable feature
+    # that already defaults to enabled, so committing one is a misleading no-op.
+    assert "features" not in tomllib.loads(codex_project_config.read_text())
 
 codex_hooks = json.loads((root / ".codex" / "hooks.json").read_text())
 assert set(codex_hooks) == {"hooks"}
@@ -46,6 +49,7 @@ assert "qlty-check.py" in pi_extension
 assert "OFFCUT_QLTY_STOP_HOOK_ACTIVE" in pi_extension
 assert 'event.reason !== "quit"' in pi_extension
 assert "console.error(message)" in pi_extension
+assert pi_extension.index("Qlty stop hook: running qlty check") < pi_extension.index('pi.exec("python3"')
 PY
 
 python3 -m py_compile "${repo_root}/.qlty/hooks/qlty-check.py"
@@ -78,11 +82,14 @@ grep -F "args=check --no-progress --no-upgrade-check" "${QLTY_STUB_LOG}" >/dev/n
 
 cat > "${tmp}/bin/qlty" <<'SH'
 #!/usr/bin/env bash
+printf 'cwd=%s\nargs=%s\n' "$PWD" "$*" > "${QLTY_STUB_LOG:?}"
 echo "problem from stdout"
 echo "problem from stderr" >&2
 exit 7
 SH
 chmod +x "${tmp}/bin/qlty"
+
+export QLTY_STUB_LOG="${tmp}/qlty-failure.log"
 
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
   python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool claude > "${tmp}/failure.json"
@@ -96,6 +103,8 @@ assert "qlty check failed" in payload["reason"]
 assert "problem from stdout" in payload["reason"]
 assert "problem from stderr" in payload["reason"]
 PY
+
+grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
 
 export QLTY_STUB_LOG="${tmp}/qlty-guard.log"
 rm -f "${QLTY_STUB_LOG}"
@@ -117,5 +126,32 @@ test "${status}" -eq 1
 test ! -s "${tmp}/misconfig.out"
 grep -F "qlty stop hook is misconfigured" "${tmp}/misconfig.err" >/dev/null
 grep -F "qlty init" "${tmp}/misconfig.err" >/dev/null
+
+python3_bin="$(command -v python3)"
+mkdir -p "${tmp}/nopath"
+ln -s "$(command -v git)" "${tmp}/nopath/git"
+
+printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
+  env PATH="${tmp}/nopath" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
+    --tool claude > "${tmp}/missing.json" 2> "${tmp}/missing.err"
+
+test ! -s "${tmp}/missing.err"
+python3 - <<'PY' "${tmp}/missing.json"
+import json
+import sys
+payload = json.loads(open(sys.argv[1]).read())
+assert payload["decision"] == "block"
+assert "qlty could not be executed" in payload["reason"]
+assert "PATH" in payload["reason"]
+PY
+
+status=0
+printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
+  env PATH="${tmp}/empty-path" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
+    --tool pi > "${tmp}/nogit.out" 2> "${tmp}/nogit.err" || status=$?
+
+test "${status}" -eq 1
+test ! -s "${tmp}/nogit.out"
+grep -F "qlty could not be executed" "${tmp}/nogit.err" >/dev/null
 
 echo "agent hook config tests passed"

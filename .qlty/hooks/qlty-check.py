@@ -19,7 +19,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run qlty check for agent stop hooks")
     parser.add_argument("--tool", choices=["codex", "claude", "pi", "generic"], default="generic")
     parser.add_argument("--cwd", help="Fallback working directory when hook input omits cwd")
-    parser.add_argument("--event", help="Lifecycle event name for tools that do not pass JSON input")
     return parser.parse_args()
 
 
@@ -43,9 +42,7 @@ def is_json_stop_tool(tool: str) -> bool:
     return tool in {"codex", "claude"}
 
 
-def allow_stop(tool: str) -> int:
-    if is_json_stop_tool(tool):
-        return 0
+def allow_stop() -> int:
     return 0
 
 
@@ -59,23 +56,26 @@ def block_stop(tool: str, reason: str) -> int:
 
 
 def find_repo_root(cwd: Path) -> Path:
-    git = subprocess.run(
-        ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if git.returncode == 0:
-        return Path(git.stdout.strip()).resolve()
+    try:
+        git = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        detail = f"git could not be executed ({error}); is git installed and on PATH?"
+    else:
+        if git.returncode == 0:
+            return Path(git.stdout.strip()).resolve()
+        detail = git.stderr.strip() or "not a git repository"
 
     current = cwd.resolve()
     for candidate in [current, *current.parents]:
         if (candidate / ".qlty" / "qlty.toml").is_file():
             return candidate
 
-    raise RuntimeError(
-        f"could not resolve repository root from {cwd}: {git.stderr.strip() or 'not a git repository'}"
-    )
+    raise RuntimeError(f"could not resolve repository root from {cwd}: {detail}")
 
 
 def build_reason(root: Path, result: subprocess.CompletedProcess[str]) -> str:
@@ -97,10 +97,10 @@ def main() -> int:
     hook_input = read_hook_input()
 
     if os.environ.get(HOOK_ENV):
-        return allow_stop(args.tool)
+        return allow_stop()
 
     if hook_input.get("stop_hook_active") is True:
-        return allow_stop(args.tool)
+        return allow_stop()
 
     cwd_value = hook_input.get("cwd") or args.cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     cwd = Path(str(cwd_value))
@@ -121,17 +121,28 @@ def main() -> int:
 
     env = os.environ.copy()
     env[HOOK_ENV] = "1"
-    result = subprocess.run(
-        ["qlty", "check", "--no-progress", "--no-upgrade-check"],
-        cwd=root,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        result = subprocess.run(
+            ["qlty", "check", "--no-progress", "--no-upgrade-check"],
+            cwd=root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        return block_stop(
+            args.tool,
+            f"qlty could not be executed in {root} ({error}).\n\n"
+            "Install Qlty (https://qlty.sh) and make sure `qlty` is on PATH for the "
+            "environment this agent runs in — the installer puts it in ~/.qlty/bin and "
+            "only adds that to PATH via your shell profile, so agents launched outside a "
+            "login shell may not see it. Otherwise remove the project stop hook, then "
+            "stop again.",
+        )
 
     if result.returncode == 0:
-        return allow_stop(args.tool)
+        return allow_stop()
 
     return block_stop(args.tool, build_reason(root, result))
 
