@@ -1203,7 +1203,7 @@ fn run_cleaning(
     let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
     let width = output::terminal_width();
     for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
-        let will_execute = r.project_approved && !cli.dry_run;
+        let will_execute = enters_cleaning_execution_phase(r.project_approved, cli.dry_run);
         // What this run will actually do to each item, once the approvals are
         // in. Shared by the plain listing and the rich panel so neither can
         // claim a fate the other contradicts.
@@ -1216,7 +1216,6 @@ fn run_cleaning(
                 cli.dry_run,
             )
         };
-        clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
         clean_progress.clear();
         if rich_stdout {
             if !r.review_shown {
@@ -1362,7 +1361,7 @@ fn item_fate(
     force: bool,
     dry_run: bool,
 ) -> &'static str {
-    let will_execute = project_approved && !dry_run;
+    let will_execute = enters_cleaning_execution_phase(project_approved, dry_run);
     if !project_approved && !dry_run {
         return "kept";
     }
@@ -1379,6 +1378,13 @@ fn item_fate(
     } else {
         "kept"
     }
+}
+
+// The live `cleaning N/M` progress phase belongs to the destructive execution
+// step only. Dry-runs and declined projects still render outcomes, but they are
+// not actively cleaning anything.
+fn enters_cleaning_execution_phase(project_approved: bool, dry_run: bool) -> bool {
+    project_approved && !dry_run
 }
 
 #[cfg(test)]
@@ -1468,6 +1474,14 @@ mod item_fate_tests {
         let rendered = rendered_fates(&items, &would_delete, true);
 
         assert!(rendered.contains("deleting"), "{rendered}");
+    }
+
+    #[test]
+    fn live_cleaning_progress_is_only_for_real_approved_execution() {
+        assert!(enters_cleaning_execution_phase(true, false));
+        assert!(!enters_cleaning_execution_phase(true, true));
+        assert!(!enters_cleaning_execution_phase(false, false));
+        assert!(!enters_cleaning_execution_phase(false, true));
     }
 }
 
