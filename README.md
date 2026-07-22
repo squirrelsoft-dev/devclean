@@ -126,9 +126,13 @@ sequences — modern Windows Terminal, macOS, and Linux terminals are fine.
 On a capable terminal, `offcut list`, the default `offcut` run, and
 `offcut clean` use a compact terminal UI modeled around four states:
 
-- **Working** — discovery, classification, sizing, and cleaning render as a
-  single live spinner line with the current path and, where known, an `N/M`
-  counter. Press Ctrl-C to cancel; no partially approved delete is resumed.
+- **Working** — discovery renders a live scanning panel with the current path,
+  activity indicator, scanned-directory count, found-project count, indexed
+  bytes, and a bounded "Discovered so far" list of recent marker hits.
+  Extremely narrow terminals fall back to the single `walking:` line.
+  Classification, sizing, reading, and cleaning render single live spinner
+  lines with the current path and, where known, an `N/M` counter. Press Ctrl-C
+  to cancel; no partially approved delete is resumed.
 - **Workspace summary** — after discovery/classification, projects are shown
   in a table with the project path (abbreviated with `~`, and truncated from
   the left so the leaf stays readable), status, reclaimable size, branch, and
@@ -424,12 +428,16 @@ empty result.
 
 Each subcommand that runs discovery — `offcut discovery`, `offcut list`,
 `offcut classification`, and the default run / `offcut clean` — renders a
-live single-line progress indicator while walking each workspace root:
-`<spinner> walking: <path>` overwrites itself in place via a carriage return
-on a capable TTY, so the display never scrolls. (`offcut clean
-<PROJECT_PATH>` bypasses the walk entirely, so it renders no `walking:` line
-and starts at the phases below.) The same indicator continues through the
-later phases: while each project's git state is examined the line reads
+live scanning panel while walking each workspace root on a capable TTY. It
+shows the current `walking` path, an activity bar, how many directories have
+been scanned, how many projects have been found, how many bytes have been
+indexed from walked entries, and up to six recently discovered project names
+with the marker that identified each one. The panel overwrites itself in place
+using terminal cursor controls so the display does not scroll; terminals too
+narrow for the panel degrade to `<spinner> walking: <path>` on one line.
+(`offcut clean <PROJECT_PATH>` bypasses the walk entirely, so it renders no
+walking panel and starts at the phases below.) The same indicator continues
+through the later phases: while each project's git state is examined the line reads
 `<spinner> classifying N/M: <path>`, while each cleanable project's
 reclaimable size is computed the line reads `<spinner> sizing N/M: <path>`
 (single-pass — bytes are stored once and the aggregate is the sum of those
@@ -438,14 +446,15 @@ columns of the summary table are read from git it reads
 `<spinner> reading N/M: <path>`, and while an approved project's untracked
 junk is deleted it reads `<spinner> cleaning N/M: <path>` (N is the 1-based
 project counter, M the total). When stdout is piped, redirected, or
-`TERM=dumb`, nothing is rendered — a stream of CR-terminated partial paths
-would be garbage in a pipe or log file. Terminal width is resolved via the
-`terminal_size` crate, falling back to `COLUMNS` then a default of 80; paths
-that would wrap are truncated with a leading ellipsis so the leaf (current
-directory) stays visible. Whenever regular output must interleave with the
-indicator (per-project rows, warnings), the progress line is first cleared in
-place; when a phase completes, it is cleared and a newline is emitted so the
-following summary line starts on a fresh line.
+`TERM=dumb`, nothing live is rendered — a stream of CR-terminated partial paths
+or cursor controls would be garbage in a pipe or log file. Terminal width is
+resolved via the `terminal_size` crate, falling back to `COLUMNS` then a
+default of 80; paths that would wrap are truncated with a leading ellipsis so
+the leaf (current directory) stays visible, and every panel row is bounded to
+the terminal width. Whenever regular output must interleave with the indicator
+(per-project rows, warnings), the progress display is first cleared in place;
+when a phase completes, it is cleared and a newline is emitted so the following
+summary line starts on a fresh line.
 
 See `src/discovery.rs` for the matching and nesting rules;
 `src/progress.rs` for the live indicator; `tests/discovery_cli.rs` for
