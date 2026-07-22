@@ -18,13 +18,18 @@ cache/plugin churn out of git while allowing checked-in config and hooks.
 
 The wrapper distinguishes repository problems from environment problems:
 
-- **Qlty reported issues**, or `.qlty/qlty.toml` is missing: the stop is
-  blocked, because the agent can act on it from inside the repository.
-- **`qlty` is not installed or not on PATH**: the stop is *not* blocked. The
-  wrapper prints the reason on stderr and exits non-zero, which every supported
-  tool treats as a non-blocking hook error, so the message is visible without
-  holding the session open. Contributors without Qlty installed are never asked
-  to change committed hook configuration to get their agent to stop.
+- **Qlty reported issues**, `.qlty/qlty.toml` is missing, or the repository root
+  cannot be resolved because the hook ran outside a repository: the stop is
+  blocked, because the agent can act on all three from inside the repository.
+- **`qlty` or `git` is not installed or not on PATH**: the stop is *not*
+  blocked. The wrapper prints the reason on stderr and exits non-zero, which
+  every supported tool treats as a non-blocking hook error, so the message is
+  visible without holding the session open. Contributors missing either tool are
+  never asked to change committed hook configuration to get their agent to stop.
+
+The two cases are separate exception types (`RootResolutionError` versus
+`ToolUnavailableError`) rather than a parsed message, so every future failure
+path has to pick a side deliberately.
 
 ## Codex
 

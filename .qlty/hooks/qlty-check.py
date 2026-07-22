@@ -15,6 +15,14 @@ HOOK_ENV = "OFFCUT_QLTY_STOP_HOOK_ACTIVE"
 MAX_REASON_CHARS = 6000
 
 
+class RootResolutionError(RuntimeError):
+    """The repository root could not be determined from inside the repository."""
+
+
+class ToolUnavailableError(RuntimeError):
+    """A required executable is missing from the environment the agent runs in."""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run qlty check for agent stop hooks")
     parser.add_argument("--tool", choices=["codex", "claude", "pi", "generic"], default="generic")
@@ -55,12 +63,18 @@ def block_stop(tool: str, reason: str) -> int:
     return 1
 
 
-def skip_check(reason: str) -> int:
-    print(reason, file=sys.stderr)
+def skip_check(detail: str, remedy: str) -> int:
+    print(
+        f"qlty check was skipped: {detail}\n\n"
+        f"{remedy}\n\n"
+        "This stop was not blocked, and no repository file needs to change.",
+        file=sys.stderr,
+    )
     return 1
 
 
 def find_repo_root(cwd: Path) -> Path:
+    git_unavailable = False
     try:
         git = subprocess.run(
             ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
@@ -69,7 +83,8 @@ def find_repo_root(cwd: Path) -> Path:
             stderr=subprocess.PIPE,
         )
     except OSError as error:
-        detail = f"git could not be executed ({error}); is git installed and on PATH?"
+        git_unavailable = True
+        detail = f"git could not be executed ({error})"
     else:
         if git.returncode == 0:
             return Path(git.stdout.strip()).resolve()
@@ -80,7 +95,10 @@ def find_repo_root(cwd: Path) -> Path:
         if (candidate / ".qlty" / "qlty.toml").is_file():
             return candidate
 
-    raise RuntimeError(f"could not resolve repository root from {cwd}: {detail}")
+    message = f"could not resolve repository root from {cwd}: {detail}"
+    if git_unavailable:
+        raise ToolUnavailableError(message)
+    raise RootResolutionError(message)
 
 
 def build_reason(root: Path, result: subprocess.CompletedProcess[str]) -> str:
@@ -112,7 +130,12 @@ def main() -> int:
 
     try:
         root = find_repo_root(cwd)
-    except RuntimeError as error:
+    except ToolUnavailableError as error:
+        return skip_check(
+            str(error),
+            "Install git and make sure it is on PATH for the environment this agent runs in.",
+        )
+    except RootResolutionError as error:
         return block_stop(args.tool, str(error))
 
     config_path = root / ".qlty" / "qlty.toml"
@@ -137,12 +160,11 @@ def main() -> int:
         )
     except OSError as error:
         return skip_check(
-            f"qlty check was skipped: qlty could not be executed in {root} ({error}).\n\n"
+            f"qlty could not be executed in {root} ({error}).",
             "Install Qlty (https://qlty.sh) and make sure `qlty` is on PATH for the "
             "environment this agent runs in — the installer puts it in ~/.qlty/bin and "
             "only adds that to PATH via your shell profile, so agents launched outside a "
-            "login shell may not see it.\n\n"
-            "This stop was not blocked, and no repository file needs to change."
+            "login shell may not see it.",
         )
 
     if result.returncode == 0:

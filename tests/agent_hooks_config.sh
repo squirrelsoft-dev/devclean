@@ -4,6 +4,13 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
 
+refute_match() {
+  if grep -qi -- "$1" "$2"; then
+    echo "assertion failed: '$2' must not match '$1'" >&2
+    exit 1
+  fi
+}
+
 python3 - <<'PY'
 import json
 import tomllib
@@ -141,11 +148,12 @@ for tool in claude codex pi; do
   test ! -s "${tmp}/missing-${tool}.out"
   grep -F "qlty check was skipped" "${tmp}/missing-${tool}.err" >/dev/null
   grep -F "PATH" "${tmp}/missing-${tool}.err" >/dev/null
-  ! grep -qi "remove the project stop hook" "${tmp}/missing-${tool}.err"
-  ! grep -qi "decision" "${tmp}/missing-${tool}.err"
+  grep -F "no repository file needs to change" "${tmp}/missing-${tool}.err" >/dev/null
+  refute_match "remove the project stop hook" "${tmp}/missing-${tool}.err"
+  refute_match "decision" "${tmp}/missing-${tool}.err"
 done
 
-! grep -rqi "remove the project stop hook" "${repo_root}/.qlty/hooks/qlty-check.py"
+refute_match "remove the project stop hook" "${repo_root}/.qlty/hooks/qlty-check.py"
 
 status=0
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
@@ -156,5 +164,35 @@ test "${status}" -eq 1
 test ! -s "${tmp}/nogit.out"
 grep -F "qlty check was skipped" "${tmp}/nogit.err" >/dev/null
 grep -F "qlty could not be executed" "${tmp}/nogit.err" >/dev/null
+
+for tool in claude codex pi; do
+  status=0
+  printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/noconfig" |
+    env PATH="${tmp}/empty-path" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
+      --tool "${tool}" > "${tmp}/nogitroot-${tool}.out" 2> "${tmp}/nogitroot-${tool}.err" || status=$?
+
+  test "${status}" -eq 1
+  test ! -s "${tmp}/nogitroot-${tool}.out"
+  grep -F "qlty check was skipped" "${tmp}/nogitroot-${tool}.err" >/dev/null
+  grep -F "git could not be executed" "${tmp}/nogitroot-${tool}.err" >/dev/null
+  grep -F "no repository file needs to change" "${tmp}/nogitroot-${tool}.err" >/dev/null
+  refute_match "decision" "${tmp}/nogitroot-${tool}.err"
+  refute_match "remove the project stop hook" "${tmp}/nogitroot-${tool}.err"
+done
+
+mkdir -p "${tmp}/plain"
+
+printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/plain" |
+  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool claude \
+    > "${tmp}/notrepo.json" 2> "${tmp}/notrepo.err"
+
+test ! -s "${tmp}/notrepo.err"
+python3 - <<'PY' "${tmp}/notrepo.json"
+import json
+import sys
+payload = json.loads(open(sys.argv[1]).read())
+assert payload["decision"] == "block"
+assert "could not resolve repository root" in payload["reason"]
+PY
 
 echo "agent hook config tests passed"
