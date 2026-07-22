@@ -22,10 +22,13 @@ from pathlib import Path
 root = Path.cwd()
 
 qlty_config = tomllib.loads((root / ".qlty" / "qlty.toml").read_text())
-plugin_names = {plugin["name"] for plugin in qlty_config["plugin"]}
+plugin_versions = {plugin["name"]: plugin.get("version") for plugin in qlty_config["plugin"]}
 # The hook implementation this config gates is Python, TypeScript, and Bash. Without
-# these plugins the quality gate would report clean on its own sources.
-assert {"ruff", "biome", "shellcheck"} <= plugin_names, plugin_names
+# these plugins the quality gate would report clean on its own sources, and without a
+# pin an upstream release could start blocking every stop with no commit here.
+for hook_source_linter in ("ruff", "biome", "shellcheck"):
+    assert hook_source_linter in plugin_versions, plugin_versions
+    assert plugin_versions[hook_source_linter], hook_source_linter
 
 codex_project_config = root / ".codex" / "config.toml"
 if codex_project_config.exists():
@@ -82,10 +85,15 @@ python3 -m py_compile "${repo_root}/.qlty/hooks/qlty-check.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
-mkdir -p "${tmp}/repo/.qlty" "${tmp}/repo/subdir" "${tmp}/bin"
+mkdir -p "${tmp}/repo/.qlty/hooks" "${tmp}/repo/subdir" "${tmp}/bin"
 git -C "${tmp}/repo" init --quiet
 touch "${tmp}/repo/.qlty/qlty.toml"
 repo_real="$(cd "${tmp}/repo" && pwd -P)"
+
+# The wrapper bounds its root search by the project it is installed in, so the
+# fixtures exercise it the way it ships: a copy under <fixture root>/.qlty/hooks.
+hook="${tmp}/repo/.qlty/hooks/qlty-check.py"
+cp "${repo_root}/.qlty/hooks/qlty-check.py" "${hook}"
 
 cat > "${tmp}/bin/qlty" <<'SH'
 #!/usr/bin/env bash
@@ -99,7 +107,7 @@ export PATH="${tmp}/bin:${PATH}"
 export QLTY_STUB_LOG="${tmp}/qlty-success.log"
 
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo/subdir" |
-  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool codex > "${tmp}/success.out"
+  python3 "${hook}" --tool codex > "${tmp}/success.out"
 
 test ! -s "${tmp}/success.out"
 grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
@@ -110,7 +118,7 @@ git -C "${tmp}/repo/nested" init --quiet
 export QLTY_STUB_LOG="${tmp}/qlty-nested.log"
 
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo/nested" |
-  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool codex > "${tmp}/nested.out"
+  python3 "${hook}" --tool codex > "${tmp}/nested.out"
 
 test ! -s "${tmp}/nested.out"
 # A nested git repository owning no .qlty/qlty.toml must not become the root: git
@@ -118,11 +126,38 @@ test ! -s "${tmp}/nested.out"
 # instead of blocking the stop over a config the nested repo was never meant to have.
 grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
 
+# That fall-through stops at the project the hook is installed in. An ancestor
+# outside it — ~/.qlty/qlty.toml is the shape to beat, since the Qlty installer
+# owns ~/.qlty — must never be adopted as the root, or a checkout whose own config
+# went missing would silently lint the whole enclosing tree instead of blocking.
+mkdir -p "${tmp}/outer/.qlty" "${tmp}/outer/project/.qlty/hooks"
+touch "${tmp}/outer/.qlty/qlty.toml"
+git -C "${tmp}/outer/project" init --quiet
+cp "${repo_root}/.qlty/hooks/qlty-check.py" "${tmp}/outer/project/.qlty/hooks/qlty-check.py"
+project_real="$(cd "${tmp}/outer/project" && pwd -P)"
+export QLTY_STUB_LOG="${tmp}/qlty-outer.log"
+rm -f "${QLTY_STUB_LOG}"
+
+status=0
+printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/outer/project" |
+  python3 "${tmp}/outer/project/.qlty/hooks/qlty-check.py" --tool pi \
+    > "${tmp}/outer.out" 2> "${tmp}/outer.err" || status=$?
+
+test "${status}" -eq 1
+test ! -s "${tmp}/outer.out"
+test ! -e "${QLTY_STUB_LOG}"
+grep -F "qlty stop hook is misconfigured" "${tmp}/outer.err" >/dev/null
+grep -F "${project_real}/.qlty/qlty.toml" "${tmp}/outer.err" >/dev/null
+
+# --print-errors dumps an invocation for every linter that exited non-zero, including
+# ones that merely reported issues, so the stub carries a successful exitResult: only
+# an exitResult ending in _ERROR may divert a findings exit away from the block path.
 cat > "${tmp}/bin/qlty" <<'SH'
 #!/usr/bin/env bash
 printf 'cwd=%s\nargs=%s\n' "$PWD" "$*" > "${QLTY_STUB_LOG:?}"
 echo "problem from stdout"
 echo "problem from stderr" >&2
+echo "exitResult: EXIT_RESULT_SUCCESS" >&2
 exit 1
 SH
 chmod +x "${tmp}/bin/qlty"
@@ -130,7 +165,7 @@ chmod +x "${tmp}/bin/qlty"
 export QLTY_STUB_LOG="${tmp}/qlty-failure.log"
 
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
-  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool claude > "${tmp}/failure.json"
+  python3 "${hook}" --tool claude > "${tmp}/failure.json"
 
 python3 - <<'PY' "${tmp}/failure.json"
 import json
@@ -144,40 +179,74 @@ PY
 
 grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
 
-# Qlty exits 1 when it has findings to report and a different code (99 for this build)
-# when it could not produce a report at all — a failed plugin install, a cold plugin
-# cache with no network, an unsupported runtime. Those are environment failures, so
-# they must fail open visibly rather than order the agent to fix findings that do not
-# exist.
+# Qlty exits 1 only for findings an agent can act on. Exit 3 means a linter errored
+# and exit 99 means Qlty could not produce a report at all — a failed plugin install,
+# a cold plugin cache with no network, an unsupported runtime. Both are environment
+# failures, so they must fail open visibly rather than order the agent to fix findings
+# that do not exist.
 cat > "${tmp}/bin/qlty" <<'SH'
 #!/usr/bin/env bash
 printf 'cwd=%s\nargs=%s\n' "$PWD" "$*" > "${QLTY_STUB_LOG:?}"
 echo "Error installing actionlint@1.7.9: status code 404" >&2
-exit 99
+exit "${QLTY_STUB_EXIT:?}"
+SH
+chmod +x "${tmp}/bin/qlty"
+
+for code in 3 99; do
+  export QLTY_STUB_EXIT="${code}"
+  for tool in claude codex pi; do
+    export QLTY_STUB_LOG="${tmp}/qlty-setup-${code}-${tool}.log"
+    status=0
+    printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
+      python3 "${hook}" --tool "${tool}" \
+        > "${tmp}/setup-${code}-${tool}.out" 2> "${tmp}/setup-${code}-${tool}.err" || status=$?
+
+    test "${status}" -eq 1
+    test ! -s "${tmp}/setup-${code}-${tool}.out"
+    grep -F "qlty check was skipped" "${tmp}/setup-${code}-${tool}.err" >/dev/null
+    grep -F "exit code ${code}" "${tmp}/setup-${code}-${tool}.err" >/dev/null
+    grep -F "Error installing actionlint" "${tmp}/setup-${code}-${tool}.err" >/dev/null
+    grep -F "no repository file needs to change" "${tmp}/setup-${code}-${tool}.err" >/dev/null
+    refute_match "decision" "${tmp}/setup-${code}-${tool}.err"
+    refute_match "Fix the reported Qlty issues" "${tmp}/setup-${code}-${tool}.err"
+  done
+done
+unset QLTY_STUB_EXIT
+
+# Exit codes alone are not the whole taxonomy: should a Qlty release ever fold a
+# run-time linter failure into the findings exit code, the per-invocation exitResult
+# that --print-errors writes still names it, and an errored invocation must fail open
+# rather than hand the agent findings that do not exist to fix.
+cat > "${tmp}/bin/qlty" <<'SH'
+#!/usr/bin/env bash
+printf 'cwd=%s\nargs=%s\n' "$PWD" "$*" > "${QLTY_STUB_LOG:?}"
+echo " ERRORS: 1 "
+echo "clippy failed: could not reach the crate registry" >&2
+echo "exitResult: EXIT_RESULT_UNKNOWN_ERROR" >&2
+exit 1
 SH
 chmod +x "${tmp}/bin/qlty"
 
 for tool in claude codex pi; do
-  export QLTY_STUB_LOG="${tmp}/qlty-setup-${tool}.log"
+  export QLTY_STUB_LOG="${tmp}/qlty-linter-error-${tool}.log"
   status=0
   printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
-    python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool "${tool}" \
-      > "${tmp}/setup-${tool}.out" 2> "${tmp}/setup-${tool}.err" || status=$?
+    python3 "${hook}" --tool "${tool}" \
+      > "${tmp}/linter-error-${tool}.out" 2> "${tmp}/linter-error-${tool}.err" || status=$?
 
   test "${status}" -eq 1
-  test ! -s "${tmp}/setup-${tool}.out"
-  grep -F "qlty check was skipped" "${tmp}/setup-${tool}.err" >/dev/null
-  grep -F "exit code 99" "${tmp}/setup-${tool}.err" >/dev/null
-  grep -F "Error installing actionlint" "${tmp}/setup-${tool}.err" >/dev/null
-  grep -F "no repository file needs to change" "${tmp}/setup-${tool}.err" >/dev/null
-  refute_match "decision" "${tmp}/setup-${tool}.err"
-  refute_match "Fix the reported Qlty issues" "${tmp}/setup-${tool}.err"
+  test ! -s "${tmp}/linter-error-${tool}.out"
+  grep -F "qlty reported linter errors" "${tmp}/linter-error-${tool}.err" >/dev/null
+  grep -F "exit code 1" "${tmp}/linter-error-${tool}.err" >/dev/null
+  grep -F "clippy failed" "${tmp}/linter-error-${tool}.err" >/dev/null
+  refute_match "decision" "${tmp}/linter-error-${tool}.err"
+  refute_match "Fix the reported Qlty issues" "${tmp}/linter-error-${tool}.err"
 done
 
 export QLTY_STUB_LOG="${tmp}/qlty-guard.log"
 rm -f "${QLTY_STUB_LOG}"
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":true}\n' "${tmp}/repo" |
-  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool codex > "${tmp}/guard.out"
+  python3 "${hook}" --tool codex > "${tmp}/guard.out"
 
 test ! -e "${QLTY_STUB_LOG}"
 test ! -s "${tmp}/guard.out"
@@ -187,7 +256,7 @@ git -C "${tmp}/noconfig" init --quiet
 
 status=0
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/noconfig" |
-  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool pi \
+  python3 "${hook}" --tool pi \
     > "${tmp}/misconfig.out" 2> "${tmp}/misconfig.err" || status=$?
 
 test "${status}" -eq 1
@@ -202,7 +271,7 @@ ln -s "$(command -v git)" "${tmp}/nopath/git"
 for tool in claude codex pi; do
   status=0
   printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
-    env PATH="${tmp}/nopath" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
+    env PATH="${tmp}/nopath" "${python3_bin}" "${hook}" \
       --tool "${tool}" > "${tmp}/missing-${tool}.out" 2> "${tmp}/missing-${tool}.err" || status=$?
 
   test "${status}" -eq 1
@@ -218,7 +287,7 @@ refute_match "remove the project stop hook" "${repo_root}/.qlty/hooks/qlty-check
 
 status=0
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
-  env PATH="${tmp}/empty-path" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
+  env PATH="${tmp}/empty-path" "${python3_bin}" "${hook}" \
     --tool pi > "${tmp}/nogit.out" 2> "${tmp}/nogit.err" || status=$?
 
 test "${status}" -eq 1
@@ -229,7 +298,7 @@ grep -F "qlty could not be executed" "${tmp}/nogit.err" >/dev/null
 for tool in claude codex pi; do
   status=0
   printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/noconfig" |
-    env PATH="${tmp}/empty-path" "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" \
+    env PATH="${tmp}/empty-path" "${python3_bin}" "${hook}" \
       --tool "${tool}" > "${tmp}/nogitroot-${tool}.out" 2> "${tmp}/nogitroot-${tool}.err" || status=$?
 
   test "${status}" -eq 1
@@ -253,7 +322,7 @@ export QLTY_STUB_GRANDCHILD_MARKER="${tmp}/grandchild-survived"
 status=0
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
   env OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS=1 \
-    "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" --tool claude \
+    "${python3_bin}" "${hook}" --tool claude \
       > "${tmp}/timeout.out" 2> "${tmp}/timeout.err" || status=$?
 
 test "${status}" -eq 1
@@ -269,7 +338,7 @@ test ! -e "${QLTY_STUB_GRANDCHILD_MARKER}"
 mkdir -p "${tmp}/plain"
 
 printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/plain" |
-  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool claude \
+  python3 "${hook}" --tool claude \
     > "${tmp}/notrepo.json" 2> "${tmp}/notrepo.err"
 
 test ! -s "${tmp}/notrepo.err"

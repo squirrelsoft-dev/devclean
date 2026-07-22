@@ -16,7 +16,9 @@ qlty check --no-progress --no-upgrade-check --print-errors
 `--print-errors` is not cosmetic: linter *errors* (plugin install failure, a
 cold-cache network failure, an unsupported runtime) also exit non-zero, but
 their detail is not written out by default. Without it the wrapper could hand an
-agent a blocking reason that says only `qlty check exited with code N`.
+agent a blocking reason that says only `qlty check exited with code N`. It is
+also what makes the skip-versus-block split machine-readable — see the exit
+taxonomy below.
 
 Qlty was initialized with `.qlty/qlty.toml`. The `.qlty/.gitignore` keeps Qlty
 cache/plugin churn out of git while allowing checked-in config and hooks.
@@ -27,6 +29,16 @@ sources: `ruff` for `.qlty/hooks/qlty-check.py`, `biome` for
 `tests/agent_hooks_config.sh`. A gate that cannot see its own wrapper would
 report clean while the wrapper rots, so `tests/agent_hooks_config.sh` asserts
 those three plugins stay enabled.
+
+Those three carry `version =` pins (`ruff 0.14.6`, `biome 1.9.4`,
+`shellcheck 0.11.0` — the versions this config was verified against). They gate a
+*blocking* stop hook, so an upstream release that adds a rule or changes
+formatter defaults would otherwise start blocking every stop in this repository
+with no commit here; `biome` formats `.claude/settings.json` and
+`.codex/hooks.json`, so it could block on the hook configs themselves. Refresh a
+pin deliberately, in a commit, and re-run the check. The fixture suite asserts
+the pins exist. Security scanners are left floating on purpose: for those,
+stale is worse than surprising.
 
 The wrapper distinguishes repository problems from environment problems:
 
@@ -41,14 +53,28 @@ The wrapper distinguishes repository problems from environment problems:
   are never asked to change committed hook configuration to get their agent to
   stop.
 
-The last case is read off `qlty check`'s exit code, which is the stable signal
-for the split: **1** means Qlty ran and has findings to report (the `--no-fail` /
-`--no-error` failure path), while **any other non-zero code** — 99 on the
-current build — means Qlty errored out before it could report. Verified against
-`qlty 0.636.0`: findings exit `1`; an unknown plugin name, a plugin install that
-404s, and a directory with no Qlty setup all exit `99`. The wrapper keys on
-"exit code 1" rather than "exit code 99" so that a future Qlty error code still
-fails open instead of blocking on findings that do not exist.
+The last case is classified from two Qlty signals, not one. Verified against
+`qlty 0.636.0`:
+
+| Exit | Meaning | Wrapper |
+| --- | --- | --- |
+| `0` | nothing to report | allow the stop |
+| `1` | findings only | block with the findings |
+| `3` | at least one linter errored, with or without findings | fail open |
+| `99` | Qlty could not report at all: unknown plugin, install 404, no Qlty setup | fail open |
+
+The wrapper keys on "exit code 1" rather than enumerating error codes, so a
+future Qlty error code still fails open instead of blocking on findings that do
+not exist. Exit code alone is not enough, though: `qlty check --help` documents
+`--no-error` as "Exit successfully regardless of linter errors", so a linter
+failure is in principle part of the same failure path as findings. The wrapper
+therefore also reads the per-invocation `exitResult` that `--print-errors`
+writes — the `qlty.analysis.v1` enum, whose error variants all end in `_ERROR` —
+and fails open whenever an invocation errored, even at exit `1`. Matching the
+suffix rather than one variant name keeps a future error variant on the
+fail-open side; matching `exitResult` rather than the presence of a dump matters
+because `--print-errors` also dumps `EXIT_RESULT_SUCCESS` invocations for
+linters that merely exited non-zero to report issues.
 
 `qlty check` runs under a wrapper-owned budget (540s by default, overridable
 with `OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS`) that is deliberately under each host's
@@ -63,14 +89,28 @@ The two cases are separate exception types (`RootResolutionError` versus
 `ToolUnavailableError`) rather than a parsed message, so every future failure
 path has to pick a side deliberately.
 
-Root resolution asks `git rev-parse --show-toplevel` first but only accepts that
-answer when the named root owns `.qlty/qlty.toml`; otherwise it walks the hook's
-cwd upward for the nearest directory that does. A scratch repository `git init`ed
-inside the worktree — routine for a tool whose job is walking git projects —
-would otherwise be named as the root and block every stop with a "restore the
-Qlty config" instruction that would scatter a stray `.qlty/` into it. The git
-root is still what the misconfiguration message names when no ancestor owns a
-config, so a genuinely Qlty-less repository still blocks.
+Root resolution is bounded by the project the wrapper is installed in. The
+wrapper ships at `<root>/.qlty/hooks/qlty-check.py`, so its own location names
+that project exactly — the same principle the Pi extension and the fixture
+script use. Nothing above it can ever be selected as the root.
+
+Within that boundary it asks `git rev-parse --show-toplevel` first, accepting the
+answer only when the named root is inside the project *and* owns
+`.qlty/qlty.toml`; otherwise it walks the hook's cwd upward, no further than the
+project root, for the nearest directory that does. Each half fixes a real shape:
+
+- A scratch repository `git init`ed inside the worktree — routine for a tool
+  whose job is walking git projects — would otherwise be named as the root and
+  block every stop with a "restore the Qlty config" instruction that would
+  scatter a stray `.qlty/` into it.
+- An unbounded walk would climb past the checkout. `~/.qlty/` is the directory
+  the Qlty installer itself creates, so a `~/.qlty/qlty.toml` is a plausible
+  ancestor hit; adopting it would run `qlty check` over the whole home tree and
+  report unrelated projects' findings back to the agent.
+
+When no directory inside the project owns a config, the git root is still what
+the misconfiguration message names, so a genuinely Qlty-less repository blocks
+exactly as before.
 
 ## Codex
 
@@ -203,12 +243,17 @@ source tarball with no `.git` and inside a checkout vendored under another
 repository.
 
 It validates the Codex, Claude Code, and Pi project config shapes plus the
-plugin coverage above, then exercises `.qlty/hooks/qlty-check.py` with stubbed
-`qlty` binaries for success, an exit-1 findings failure that blocks, an exit-99
-setup failure that fails open for all three tools, root resolution from a nested
-git repository that owns no Qlty config, the `stop_hook_active` recursion guard,
-the non-JSON (`--tool pi`) stderr path for a repository with no
-`.qlty/qlty.toml`, the missing-binary paths where `qlty` (and then `git`) are
-absent from `PATH`, and a timeout whose stub spawns a grandchild — asserting both
-the distinct non-blocking message and that the grandchild died with the killed
-process group.
+plugin coverage and version pins above, then exercises the wrapper with stubbed
+`qlty` binaries. Because root resolution is bounded by the project the wrapper
+is installed in, the fixtures copy it to `<fixture root>/.qlty/hooks/` and run
+that copy, which is how it ships.
+
+Covered: success; an exit-1 findings failure that blocks; exit-3 and exit-99
+failures that fail open for all three tools; an errored `exitResult` at exit 1
+that fails open even though the exit code says findings; root resolution from a
+nested git repository that owns no Qlty config; refusal to adopt an ancestor
+config from outside the project; the `stop_hook_active` recursion guard; the
+non-JSON (`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`;
+the missing-binary paths where `qlty` (and then `git`) are absent from `PATH`;
+and a timeout whose stub spawns a grandchild — asserting both the distinct
+non-blocking message and that the grandchild died with the killed process group.

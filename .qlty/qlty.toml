@@ -66,6 +66,7 @@ name = "actionlint"
 
 [[plugin]]
 name = "biome"
+version = "1.9.4"
 
 [[plugin]]
 name = "clippy"
@@ -79,9 +80,11 @@ mode = "comment"
 
 [[plugin]]
 name = "ruff"
+version = "0.14.6"
 
 [[plugin]]
 name = "shellcheck"
+version = "0.11.0"
 
 [[plugin]]
 name = "trufflehog"

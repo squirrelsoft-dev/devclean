@@ -19,6 +19,8 @@ DEFAULT_TIMEOUT_SECONDS = 540.0
 GROUP_KILL_GRACE_SECONDS = 5.0
 FINDINGS_EXIT_CODE = 1
 QLTY_CONFIG_RELATIVE = Path(".qlty") / "qlty.toml"
+INVOCATION_RESULT_KEY = "exitResult"
+INVOCATION_ERROR_SUFFIX = "_ERROR"
 
 
 class RootResolutionError(RuntimeError):
@@ -91,6 +93,27 @@ def qlty_config_path(root: Path) -> Path:
     return root / QLTY_CONFIG_RELATIVE
 
 
+def hook_project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def same_directory(left: Path, right: Path) -> bool:
+    try:
+        return left.samefile(right)
+    except OSError:
+        return left == right
+
+
+def ancestors_within_project(path: Path) -> list[Path]:
+    boundary = hook_project_root()
+    chain: list[Path] = []
+    for candidate in [path, *path.parents]:
+        chain.append(candidate)
+        if same_directory(candidate, boundary):
+            return chain
+    return []
+
+
 def find_repo_root(cwd: Path) -> Path:
     git_root: Path | None = None
     git_unavailable = False
@@ -107,18 +130,23 @@ def find_repo_root(cwd: Path) -> Path:
     else:
         if git.returncode == 0:
             git_root = Path(git.stdout.strip()).resolve()
-            if qlty_config_path(git_root).is_file():
+            if not ancestors_within_project(git_root):
+                detail = (
+                    f"{git_root} is outside {hook_project_root()}, "
+                    "the project this hook is installed in"
+                )
+            elif qlty_config_path(git_root).is_file():
                 return git_root
-            detail = f"{git_root} is a git root without {QLTY_CONFIG_RELATIVE}"
+            else:
+                detail = f"{git_root} is a git root without {QLTY_CONFIG_RELATIVE}"
         else:
             detail = git.stderr.strip() or "not a git repository"
 
-    current = cwd.resolve()
-    for candidate in [current, *current.parents]:
+    for candidate in ancestors_within_project(cwd.resolve()):
         if qlty_config_path(candidate).is_file():
             return candidate
 
-    if git_root is not None:
+    if git_root is not None and not qlty_config_path(git_root).is_file():
         return git_root
 
     message = f"could not resolve repository root from {cwd}: {detail}"
@@ -171,6 +199,18 @@ def run_check(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[st
             f"qlty check timed out after {budget:g}s in {root}"
         ) from None
     return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
+def linter_error_results(result: subprocess.CompletedProcess[str]) -> list[str]:
+    errors = []
+    for stream in [result.stdout, result.stderr]:
+        for line in (stream or "").splitlines():
+            key, separator, value = line.partition(":")
+            if separator and key.strip() == INVOCATION_RESULT_KEY:
+                outcome = value.strip()
+                if outcome.endswith(INVOCATION_ERROR_SUFFIX):
+                    errors.append(outcome)
+    return errors
 
 
 def captured_output(result: subprocess.CompletedProcess[str]) -> str:
@@ -255,15 +295,22 @@ def main() -> int:
     if result.returncode == 0:
         return allow_stop()
 
-    if result.returncode == FINDINGS_EXIT_CODE:
+    linter_errors = linter_error_results(result)
+    if result.returncode == FINDINGS_EXIT_CODE and not linter_errors:
         return block_stop(args.tool, build_reason(root, result))
 
+    summary = (
+        f"qlty reported linter errors ({len(linter_errors)} failed invocation(s))"
+        if linter_errors
+        else "qlty check could not complete"
+    )
     detail = captured_output(result)
     return skip_check(
-        f"qlty check could not complete in {root} (exit code {result.returncode})."
+        f"{summary} in {root} (exit code {result.returncode})."
         + (f"\n\n{detail}" if detail else ""),
-        f"qlty exits {FINDINGS_EXIT_CODE} when it has findings to report and a different "
-        "code when it cannot produce a report at all — an unknown plugin, a failed plugin "
+        f"qlty exits {FINDINGS_EXIT_CODE} for findings an agent can act on. Any other exit "
+        f"code, and any invocation whose {INVOCATION_RESULT_KEY} ends in "
+        f"{INVOCATION_ERROR_SUFFIX}, means a linter could not run at all — a failed plugin "
         "install, a cold-cache network failure, or an unsupported runtime. Repair the Qlty "
         "setup with `qlty check --no-progress --no-upgrade-check --print-errors` by hand.",
     )
