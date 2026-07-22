@@ -482,14 +482,24 @@ fn has_commits(project_path: &Path) -> bool {
     git_text(project_path, &["rev-parse", "--verify", "HEAD"]).is_some()
 }
 
+/// The commit fact every panel's copy is read against, for one project.
+///
+/// Only `Unpushed` copy turns on it, so it is the only status that pays for the
+/// extra plumbing call; every other status is committed as far as any panel is
+/// concerned. One owner for the shortcut means the branch state and the refusal
+/// beneath it are read from the same answer rather than two independent ones.
+fn committed_state(project_path: &Path, status: classify::Status) -> bool {
+    status != classify::Status::Unpushed || has_commits(project_path)
+}
+
 /// The one-line tree/remote state under `project_path`'s panel header.
 ///
 /// Reads the one fact the status cannot supply, then hands off to
-/// `format_branch_state`. Only `Unpushed` pays for the extra plumbing call: it
-/// is the only status whose copy turns on whether anything is committed.
+/// `format_branch_state`. A caller that also renders the blocked panel should
+/// read `committed_state` once and call `format_branch_state` directly instead,
+/// so both lines answer from one `git` call.
 fn branch_state_line(project_path: &Path, branch: &str, status: classify::Status) -> String {
-    let committed = status != classify::Status::Unpushed || has_commits(project_path);
-    format_branch_state(branch, status, committed)
+    format_branch_state(branch, status, committed_state(project_path, status))
 }
 
 /// Render the tree/remote state from facts already gathered.
@@ -599,9 +609,14 @@ fn render_workspace_table(
 /// advice it cannot act on. A `Cleanable` project only reaches here when its
 /// own inspection failed — the sizing pass already warned about that on
 /// stderr, and no panel would be honest about it.
+///
+/// `committed` is the same `committed_state` answer `branch_line` was rendered
+/// from, so the refusal and the branch state cannot disagree about whether the
+/// project has commits.
 fn targeted_outcome_panel(
     path: &Path,
     status: classify::Status,
+    committed: bool,
     branch_line: &str,
     details: &[String],
     possible_reclaim: Option<&str>,
@@ -612,6 +627,7 @@ fn targeted_outcome_panel(
         return Some(output::format_blocked_project(
             path,
             status,
+            committed,
             branch_line,
             details,
             possible_reclaim,
@@ -1109,7 +1125,9 @@ fn run_cleaning(
     if cleanable_items.is_empty() {
         let panel = if rich_stdout && project_path.is_some() {
             all_projects.first().map(|(path, status, ignore_set)| {
-                let branch = branch_state_line(path, &branch_labels.get(0, path, *status), *status);
+                let committed = committed_state(path, *status);
+                let branch =
+                    format_branch_state(&branch_labels.get(0, path, *status), *status, committed);
                 let reclaim = if output::blocks_cleaning(*status) {
                     blocked_reclaim(path, ignore_set, &cfg)
                 } else {
@@ -1118,6 +1136,7 @@ fn run_cleaning(
                 targeted_outcome_panel(
                     path,
                     *status,
+                    committed,
                     &branch,
                     &status_detail_lines(path, *status),
                     reclaim.as_deref(),
@@ -1363,6 +1382,7 @@ mod targeted_panel_tests {
         targeted_outcome_panel(
             Path::new("/workspace/dashboard"),
             status,
+            committed,
             &format_branch_state("main", status, committed),
             &[],
             possible_reclaim,
@@ -1452,16 +1472,30 @@ mod targeted_panel_tests {
     /// `Unpushed` covers a branch whose commits were never pushed *and* a repo
     /// that has never committed anything, so the panel states the one it is
     /// actually looking at rather than inventing commits for an empty repo.
+    ///
+    /// The refusal is checked alongside the branch state: the two lines are two
+    /// apart, so a refusal reading "has unpushed commits" under a branch line
+    /// reading "no commits yet" makes the panel argue with itself.
     #[test]
     fn unpushed_panel_does_not_claim_commits_an_empty_repo_lacks() {
         let empty = panel_for(classify::Status::Unpushed, None, false).expect("panel");
         assert!(empty.contains("no commits yet"), "{empty}");
         assert!(!empty.contains("commits ahead"), "{empty}");
-        assert!(empty.contains("refusing to clean"), "{empty}");
+        assert!(
+            empty.contains("refusing to clean - nothing committed yet"),
+            "{empty}"
+        );
+        assert!(!empty.contains("has unpushed commits"), "{empty}");
+        assert!(empty.contains("commit, push"), "{empty}");
 
         let ahead = panel_for(classify::Status::Unpushed, None, true).expect("panel");
         assert!(ahead.contains("local commits ahead"), "{ahead}");
         assert!(!ahead.contains("no commits yet"), "{ahead}");
+        assert!(
+            ahead.contains("refusing to clean - has unpushed commits"),
+            "{ahead}"
+        );
+        assert!(!ahead.contains("nothing committed"), "{ahead}");
     }
 
     /// The commit fact the unpushed copy turns on is read from git, not

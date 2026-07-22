@@ -26,7 +26,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::classify::Status;
 use crate::clean::{Classification, CleanItem};
-use crate::interactive::status_reason;
+use crate::interactive::{blocked_reason, status_reason};
 
 /// Whether stdout is a TTY. Used as the runtime gate for color emission:
 /// if stdout is a TTY, each formatted line is colored; otherwise plain.
@@ -670,12 +670,17 @@ fn format_review_header(path: &Path, width: usize, emit_colors: bool) -> String 
 /// pushed is a refusal it cannot act on. An already-clean project gets
 /// `format_nothing_to_reclaim` instead.
 ///
+/// `committed` says whether the project has any commit, the one fact the status
+/// does not carry (see `interactive::blocked_reason`). The refusal is built from
+/// it so it cannot contradict the branch state printed two lines above it.
+///
 /// Every line is wrapped or truncated to `width`, prose included: this panel
 /// carries the longest sentences Offcut prints, and an unwrapped one soft-wraps
 /// on an ordinary 80-column terminal.
 pub fn format_blocked_project(
     path: &Path,
     status: Status,
+    committed: bool,
     branch_line: &str,
     details: &[String],
     possible_reclaim: Option<&str>,
@@ -684,7 +689,10 @@ pub fn format_blocked_project(
 ) -> Vec<String> {
     let mut out = panel_head(path, status, branch_line, width, emit_colors);
     out.extend(wrap_styled(
-        &format!("✗ refusing to clean - {}", status_reason(status)),
+        &format!(
+            "✗ refusing to clean - {}",
+            blocked_reason(status, committed)
+        ),
         width,
         status_style(status).bold(),
         emit_colors,
@@ -1740,6 +1748,7 @@ mod tests {
         let rendered = format_blocked_project(
             Path::new("/workspace/design-system"),
             Status::Wip,
+            true,
             "feat/tokens · uncommitted changes · remote ✓",
             &[" M src/tokens/color.ts".to_string()],
             Some("540 MB"),
@@ -1751,6 +1760,42 @@ mod tests {
         assert!(rendered.contains("uncommitted work in progress"));
         assert!(rendered.contains("M src/tokens/color.ts"));
         assert!(rendered.contains("would become reclaimable"));
+    }
+
+    /// The refusal and the branch state sit two lines apart, so they must agree
+    /// about whether the project has commits. `Unpushed` covers a repo that has
+    /// never committed anything, and the panel's own header says so — a refusal
+    /// built from the status alone would contradict the line above it.
+    #[test]
+    fn blocked_refusal_agrees_with_the_branch_state_about_commits() {
+        let render = |committed: bool, branch: &str| {
+            format_blocked_project(
+                Path::new("/workspace/api"),
+                Status::Unpushed,
+                committed,
+                branch,
+                &[],
+                None,
+                100,
+                false,
+            )
+            .join("\n")
+        };
+
+        let empty = render(false, "main · no commits yet · remote ✗ nothing pushed");
+        assert!(empty.contains("no commits yet"), "{empty}");
+        assert!(
+            empty.contains("refusing to clean - nothing committed yet"),
+            "{empty}"
+        );
+        assert!(!empty.contains("has unpushed commits"), "{empty}");
+
+        let ahead = render(true, "main · local commits ahead · remote ✗ not pushed");
+        assert!(
+            ahead.contains("refusing to clean - has unpushed commits"),
+            "{ahead}"
+        );
+        assert!(!ahead.contains("nothing committed"), "{ahead}");
     }
 
     /// The blocked panel carries the longest prose Offcut prints plus the full
@@ -1766,6 +1811,7 @@ mod tests {
                 for line in format_blocked_project(
                     path,
                     Status::Wip,
+                    true,
                     "feat/tokens · uncommitted changes · remote ✓",
                     &[" M src/tokens/color-primitives-and-aliases.ts".to_string()],
                     Some("540 MB"),
@@ -1796,6 +1842,7 @@ mod tests {
             let rendered = format_blocked_project(
                 path,
                 Status::Wip,
+                true,
                 "feat/tokens · uncommitted changes · remote ✓",
                 &[],
                 None,
@@ -1821,6 +1868,7 @@ mod tests {
         let rendered = format_blocked_project(
             Path::new("/workspace/design-system"),
             Status::Wip,
+            true,
             "feat/tokens · uncommitted changes · remote ✓",
             &[" M src/tokens/color.ts".to_string()],
             Some("540 MB"),
@@ -2076,6 +2124,7 @@ mod tests {
             format_blocked_project(
                 Path::new("/w/dash"),
                 Status::Wip,
+                true,
                 "main · uncommitted changes",
                 &[" M src/a.ts".to_string()],
                 Some("540 MB"),

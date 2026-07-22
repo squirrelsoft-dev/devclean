@@ -141,6 +141,22 @@ pub fn status_reason(status: Status) -> &'static str {
     }
 }
 
+/// The refusal reason for a blocked project, refined by a fact the status
+/// alone does not carry: whether anything has been committed.
+///
+/// `Status::Unpushed` covers both a branch whose commits were never pushed and
+/// a repo that has never committed anything (`classify::status_unpushed`
+/// short-circuits on a missing `HEAD`). Only that pair needs telling apart, so
+/// every other status — and every committed unpushed branch — keeps
+/// `status_reason` verbatim. A blocked panel states the branch's commit state
+/// two lines above its refusal, so the two must not assert opposite facts.
+pub fn blocked_reason(status: Status, committed: bool) -> &'static str {
+    match status {
+        Status::Unpushed if !committed => "nothing committed yet",
+        _ => status_reason(status),
+    }
+}
+
 /// Whether each item would be deleted in the given mode. Used for display
 /// and for the exclusion list at execution time.
 fn would_delete(item: &CleanItem, force: bool, approved: &[PathBuf]) -> bool {
@@ -462,6 +478,36 @@ mod tests {
         let reader = BufReader::new(answers.as_bytes());
         let mut r = reader;
         run(inputs, &mut r)
+    }
+
+    /// The commit fact refines exactly one refusal and leaves every other one
+    /// alone. `status_reason` is also the plain listing's `(reason)` suffix, so
+    /// a wider divergence would change scriptable output nobody asked to change.
+    #[test]
+    fn blocked_reason_refines_only_the_uncommitted_unpushed_case() {
+        assert_eq!(
+            blocked_reason(Status::Unpushed, false),
+            "nothing committed yet"
+        );
+        assert_eq!(
+            blocked_reason(Status::Unpushed, true),
+            status_reason(Status::Unpushed)
+        );
+        for status in [
+            Status::NoGit,
+            Status::NoRemote,
+            Status::Wip,
+            Status::Cleanable,
+            Status::Clean,
+        ] {
+            for committed in [false, true] {
+                assert_eq!(
+                    blocked_reason(status, committed),
+                    status_reason(status),
+                    "{status:?} (committed {committed}) must keep its reason"
+                );
+            }
+        }
     }
 
     /// Interactive mode with every answer "y": the project is approved and
