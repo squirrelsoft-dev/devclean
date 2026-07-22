@@ -121,6 +121,17 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
+    streams_with_stdin(args, input).0
+}
+
+/// Run the real binary with `input` piped to stdin, returning
+/// `(stdout, stderr)`. The interactive flow asks every question and prints
+/// every per-project report on stderr, so its shape is only observable there.
+fn streams_with_stdin<I, S>(args: I, input: &str) -> (String, String)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let exe = env!("CARGO_BIN_EXE_offcut");
     let mut child = std::process::Command::new(exe)
         .args(args)
@@ -138,7 +149,10 @@ where
         .write_all(input.as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 /// A cleanable (status-5) project: committed + pushed, with untracked junk
@@ -1069,4 +1083,64 @@ fn piped_output_stays_plain_including_term_dumb() {
         root.join("target/bin").is_file(),
         "preview must not delete anything"
     );
+}
+
+/// Non-interactive compatibility, stderr side: with stderr redirected (as it
+/// is here), the per-project report keeps exactly the plain line-oriented
+/// shape it always had — a path line, then one line per item, and nothing
+/// else. Panel furniture belongs to the rich rendering; a header added here is
+/// a line every existing consumer of this stream has never seen.
+///
+/// The destructive confirmation is checked here too: a targeted or
+/// single-project run has exactly one cleanable project, so the noun must
+/// agree with the count rather than reading "1 projects".
+#[test]
+fn plain_report_keeps_its_line_shape_and_agrees_with_the_count() {
+    let root = root_for("plain-report");
+    init_repo_with_commit(&root);
+    add_pushed_remote(&root);
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), "safe junk").unwrap();
+    std::fs::write(root.join("ambiguous.tmp"), "surfaced").unwrap();
+
+    let home = root_for("home-plain-report");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+
+    // Approve the run, keep the surfaced item, then decline the project: the
+    // report is printed before any prompt, and nothing is deleted.
+    let (_, errors) =
+        streams_with_stdin(["--config", config.to_str().unwrap(), "clean"], "y\nn\nn\n");
+
+    assert!(
+        errors.contains("Remove gitignored paths from 1 cleanable project?"),
+        "the confirmation must agree with the count: {errors}"
+    );
+    assert!(
+        !errors.contains("1 cleanable projects"),
+        "the confirmation must not read \"1 projects\": {errors}"
+    );
+
+    let report: Vec<&str> = errors
+        .lines()
+        .skip_while(|line| !line.starts_with(&format!("{}:", root.display())))
+        .skip(1)
+        .take_while(|line| !line.starts_with("? "))
+        .collect();
+    assert!(
+        !report.is_empty(),
+        "the plain report lists the project's items: {errors}"
+    );
+    for line in &report {
+        assert!(
+            line.starts_with("  ") && line.contains('[') && line.ends_with(')'),
+            "the plain report carries item lines only, no added header: {line:?} in {errors}"
+        );
+    }
+
+    assert!(
+        root.join("target/bin").is_file(),
+        "a declined project must not be cleaned"
+    );
+    assert!(root.join("ambiguous.tmp").is_file());
 }

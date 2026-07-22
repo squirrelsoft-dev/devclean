@@ -2,15 +2,16 @@
 //!
 //! Owns everything about how each line of output reads — labels, ranks,
 //! color coding per status, the cleanable indicator, and the TTY-vs-piped
-//! color gate. Colors appear only when stdout is a TTY; piped or redirected
-//! stdout gets plain text, and setting `NO_COLOR` (any value) or
-//! `CLICOLOR=0` disables color even on a TTY.
+//! color gate. Colors appear only on a terminal that can render them —
+//! a TTY that is not `TERM=dumb`; piped or redirected stdout gets plain
+//! text, and setting `NO_COLOR` (any value) or `CLICOLOR=0` disables color
+//! even on a capable TTY.
 //!
 //! Each formatted row follows the shape `[rank] path — label (reason)`,
 //! with the reason omitted when it would merely repeat the label
 //! (cleanable/clean rows). The label is color-coded per status so the
 //! most-needs-attention rows stand out (dirty statuses in warm tones,
-//! cleanable/clean in cool tones); the bold-green label is the cleanable
+//! cleanable/clean in cool tones); the bold-cyan label is the cleanable
 //! indicator, marking which projects are subjects of the cleaning flow.
 //!
 //! The `emit_colors` flag lets the formatting functions be unit-tested
@@ -75,9 +76,9 @@ pub fn projects_word(count: usize) -> &'static str {
     if count == 1 { "project" } else { "projects" }
 }
 
-/// Runtime color gate: colored only on a TTY, and only when neither
-/// `NO_COLOR` (any value, per the no-color.org convention) nor `CLICOLOR=0`
-/// asks for plain output.
+/// Runtime color gate: colored only on a terminal that can render escapes,
+/// and only when neither `NO_COLOR` (any value, per the no-color.org
+/// convention) nor `CLICOLOR=0` asks for plain output.
 fn color_enabled() -> bool {
     color_enabled_for(is_tty())
 }
@@ -85,13 +86,33 @@ fn color_enabled() -> bool {
 /// The color gate for one stream: the `NO_COLOR`/`CLICOLOR` conventions
 /// apply to every stream; only the TTY test differs per stream.
 fn color_enabled_for(stream_is_tty: bool) -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    if std::env::var_os("CLICOLOR").is_some_and(|v| v == "0") {
-        return false;
-    }
-    stream_is_tty
+    color_enabled_with(
+        stream_is_tty,
+        std::env::var_os("TERM").as_deref(),
+        plain_requested(),
+    )
+}
+
+/// Whether the environment asks for plain output outright: `NO_COLOR` with any
+/// value (per the no-color.org convention) or `CLICOLOR=0`.
+fn plain_requested() -> bool {
+    std::env::var_os("NO_COLOR").is_some() || std::env::var_os("CLICOLOR").is_some_and(|v| v == "0")
+}
+
+/// The gate itself, with every input passed in so it is testable without a real
+/// pty and without mutating the process environment (which would race every
+/// other test in the binary — and leave the gate's verdict at the mercy of
+/// whatever `NO_COLOR` the test runner happens to export).
+///
+/// Whether escapes can be rendered at all is `terminal_ui_enabled_with`'s
+/// question, asked once: a `TERM=dumb` stream renders neither the rich panels
+/// nor SGR sequences, so a gate that only tested `is_tty` would print escape
+/// codes as literal garbage into exactly the terminals the rich UI already
+/// steps aside for (Emacs `M-x shell` is a pty with `TERM=dumb`). The
+/// `NO_COLOR`/`CLICOLOR` conventions then subtract color from terminals that
+/// could otherwise render it.
+fn color_enabled_with(stream_is_tty: bool, term: Option<&OsStr>, plain_requested: bool) -> bool {
+    !plain_requested && terminal_ui_enabled_with(stream_is_tty, term)
 }
 
 /// Whether stdout should emit ANSI color under the current environment.
@@ -143,7 +164,7 @@ pub fn color_for_stream(text: &str, style: OwoStyle, emit_colors: bool) -> Strin
 /// as zero rather than aborting the walk).
 ///
 /// The label is color-coded per status (warm for dirty, cool for clean) so
-/// the most-needs-attention rows stand out at a glance; the bold-green
+/// the most-needs-attention rows stand out at a glance; the bold-cyan
 /// label is the cleanable indicator, marking which projects are subjects
 /// of the interactive clean flow.
 ///
@@ -206,8 +227,9 @@ pub fn format_summary(
 /// Style for each status label, color-coded per status.
 ///
 /// Dirty statuses (1–4) use warm tones: red for the most severe, yellow for
-/// the rest. Cleanable and clean use cool tones (green) with bold for the
-/// ready-to-clean case so the indicator stands out.
+/// the rest. Cleanable and clean use cool tones — bold cyan for the
+/// ready-to-clean case so the indicator stands out from the green that marks
+/// an already-settled project.
 fn status_style(status: Status) -> OwoStyle {
     match status {
         Status::NoGit => OwoStyle::new().red(),
@@ -750,26 +772,56 @@ pub fn blocks_cleaning(status: Status) -> bool {
 }
 
 /// Format the post-clean success state.
+///
+/// Both lines are prose, so both wrap to `width` rather than truncating: this
+/// panel closes a destructive run, and a soft-wrapped reassurance about what
+/// was *not* touched is the last line that should be allowed to overrun.
 pub fn format_clean_success(
     path: &Path,
     deleted_count: usize,
     reclaimed: Option<&str>,
+    width: usize,
     emit_colors: bool,
 ) -> Vec<String> {
     let size = reclaimed
         .map(|s| format!("reclaimed ~{s} - "))
         .unwrap_or_default();
-    vec![
-        color_for_stream(
-            &format!(
-                "✓ {size}removed {deleted_count} item(s) from {}",
-                project_name(path)
-            ),
-            OwoStyle::new().green().bold(),
-            emit_colors,
+    let mut out = wrap_styled(
+        &format!(
+            "✓ {size}removed {deleted_count} item(s) from {}",
+            project_name(path)
         ),
-        "gitignored paths only - tracked files untouched.".to_string(),
-    ]
+        width,
+        OwoStyle::new().green().bold(),
+        emit_colors,
+    );
+    out.extend(wrap_plain(
+        "gitignored paths only - tracked files untouched.",
+        width,
+    ));
+    out
+}
+
+/// Format one `<lead><path>` status line inside `width` display columns.
+///
+/// The lead names what is happening and keeps its columns; the path spends
+/// what is left, truncated from the left so the leaf survives. Every rendered
+/// line carrying a project path goes through here — a path emitted at full
+/// length behind a fixed prefix is the one shape that soft-wraps on an
+/// ordinary terminal no matter how carefully the panels around it are budgeted.
+pub fn format_path_line(lead: &str, path: &Path, width: usize) -> String {
+    let (lead, budget) = prefix_budget(lead, width);
+    format!(
+        "{lead}{}",
+        truncate_path_cols(&path.display().to_string(), budget)
+    )
+}
+
+/// Word-wrap a standalone status line to `width` display columns. The
+/// presentation-side name for the panels' own wrapping, so a line printed
+/// outside a panel is bounded by the same rule as one printed inside it.
+pub fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    wrap_plain(text, width)
 }
 
 fn colored_status(label: &str, status: Status, emit_colors: bool) -> String {
@@ -940,7 +992,7 @@ mod tests {
 
     /// The status word appears exactly once per row: the cleanable and clean
     /// reasons merely repeat the label, so they are suppressed — the color
-    /// (bold green) is the cleanable indicator, not a repeated word.
+    /// (bold cyan) is the cleanable indicator, not a repeated word.
     #[test]
     fn label_repeating_reason_is_suppressed() {
         let cleanable = format_project_row(
@@ -1025,7 +1077,13 @@ mod tests {
         );
     }
 
-    /// Each clean status gets a cool color (green).
+    /// Each clean status gets a cool color: bold cyan marks the ready-to-clean
+    /// row, plain green the already-settled one.
+    ///
+    /// The expected sequences are spelled out here rather than derived from
+    /// `status_style`, and are matched exactly rather than as "some escape" —
+    /// an any-escape assertion passes for every color, which is how the
+    /// documented palette drifted away from the emitted one unnoticed.
     #[test]
     fn clean_statuses_get_cool_colors() {
         let cleanable = format_project_row(
@@ -1034,13 +1092,15 @@ mod tests {
             emit_true(),
             None,
         );
+        let expect_cleanable = format!("{}", "cleanable".style(OwoStyle::new().cyan().bold()));
         assert!(
-            cleanable.contains("\x1b["),
-            "cleanable is green+bold: {cleanable:?}"
+            cleanable.contains(&expect_cleanable),
+            "cleanable is cyan+bold: {cleanable:?}"
         );
 
         let clean = format_project_row(Path::new("/tmp/project"), Status::Clean, emit_true(), None);
-        assert!(clean.contains("\x1b["), "clean is green: {clean:?}");
+        let expect_clean = format!("{}", "clean".style(OwoStyle::new().green()));
+        assert!(clean.contains(&expect_clean), "clean is green: {clean:?}");
     }
 
     /// Summary header is bold (colored) when TTY, plain otherwise.
@@ -1657,13 +1717,15 @@ mod tests {
     #[test]
     fn clean_success_reports_reclaimed_size_when_known() {
         let with_size =
-            format_clean_success(Path::new("/w/dashboard"), 2, Some("1.2 GB"), false).join("\n");
+            format_clean_success(Path::new("/w/dashboard"), 2, Some("1.2 GB"), 80, false)
+                .join("\n");
         assert!(with_size.contains("~1.2 GB"), "{with_size}");
         assert!(with_size.contains("removed 2 item(s)"), "{with_size}");
         assert!(with_size.contains("dashboard"), "{with_size}");
         assert!(!with_size.contains("\x1b["), "{with_size}");
 
-        let without = format_clean_success(Path::new("/w/dashboard"), 2, None, false).join("\n");
+        let without =
+            format_clean_success(Path::new("/w/dashboard"), 2, None, 80, false).join("\n");
         assert!(without.contains("✓ removed 2 item(s)"), "{without}");
         assert!(!without.contains("reclaimed"), "{without}");
     }
@@ -1804,6 +1866,63 @@ mod tests {
         }
     }
 
+    /// The panel that closes a destructive run says what was removed and what
+    /// was left alone — and stays inside the terminal at every width, including
+    /// the ones narrower than its own reassurance sentence.
+    #[test]
+    fn clean_success_panel_fits_every_width() {
+        let path = Path::new("/var/folders/s0/zl64g7m92b7bf0d72vc0cskw0000gn/T/demo/payments-api");
+        let rendered = format_clean_success(path, 3, Some("1.2 GB"), 80, false).join("\n");
+        assert!(rendered.contains("payments-api"), "{rendered}");
+        assert!(rendered.contains("reclaimed ~1.2 GB"), "{rendered}");
+        assert!(rendered.contains("tracked files untouched"), "{rendered}");
+
+        for width in EXTREME_WIDTHS {
+            for emit_colors in [false, true] {
+                for reclaimed in [None, Some("1.2 GB")] {
+                    for line in format_clean_success(path, 3, reclaimed, width, emit_colors) {
+                        let visible = strip_ansi(&line);
+                        assert!(
+                            visible.width() <= width,
+                            "width {width} (colors {emit_colors}): line of {} columns: {visible:?}",
+                            visible.width()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every rendered line that carries a project path is bounded the same way,
+    /// panel or not: the lead keeps its columns, the path spends what is left
+    /// and keeps its leaf. A full path behind a fixed prefix is what soft-wraps
+    /// an otherwise carefully budgeted screen.
+    #[test]
+    fn path_lines_fit_every_width() {
+        let path = Path::new("/var/folders/s0/zl64g7m92b7bf0d72vc0cskw0000gn/T/demo/payments-api");
+        assert!(
+            format_path_line("⟩ cleaning ", path, 80).contains("payments-api"),
+            "the leaf survives at a normal width"
+        );
+        for width in EXTREME_WIDTHS {
+            for lead in ["⟩ cleaning ", "⟩ skipped by user · "] {
+                let visible = format_path_line(lead, path, width);
+                assert!(
+                    visible.width() <= width,
+                    "width {width}, lead {lead:?}: line of {} columns: {visible:?}",
+                    visible.width()
+                );
+                for line in wrap_line("⟩ dry-run only - nothing deleted", width) {
+                    assert!(
+                        line.width() <= width,
+                        "width {width}: wrapped line of {} columns: {line:?}",
+                        line.width()
+                    );
+                }
+            }
+        }
+    }
+
     /// `Clean` means no *unprotected* untracked junk, not an empty tree: a
     /// project whose `node_modules` is protected by `.offcutignore` classifies
     /// `Clean` with that output still on disk. The panel must not deny the
@@ -1878,11 +1997,53 @@ mod tests {
         assert!(!terminal_ui_enabled_with(false, None));
     }
 
-    /// The color gate is per-stream but shares the `NO_COLOR`/`CLICOLOR`
-    /// conventions: a non-TTY stream never emits color.
+    /// The color gate is per-stream: a non-TTY stream never emits color.
     #[test]
     fn color_gate_is_off_for_non_tty_streams() {
         assert!(!color_enabled_for(false));
+    }
+
+    /// A direct terminal — a real pty, `stream_is_tty = true`, the case a test
+    /// against piped stdout can never reach — emits color only when the
+    /// terminal can render it. `TERM=dumb` is the canonical "cannot render
+    /// escapes" signal (Emacs `M-x shell` is exactly this: a pty with
+    /// `TERM=dumb`), so it degrades to plain text rather than printing SGR
+    /// sequences the terminal shows literally.
+    #[test]
+    fn color_gate_is_off_on_a_dumb_terminal() {
+        let dumb = std::ffi::OsString::from("dumb");
+        let capable = std::ffi::OsString::from("xterm-256color");
+        assert!(!color_enabled_with(true, Some(&dumb), false));
+        assert!(color_enabled_with(true, Some(&capable), false));
+        assert!(color_enabled_with(true, None, false));
+        assert!(!color_enabled_with(false, Some(&capable), false));
+        // The explicit conventions still win over a capable terminal.
+        assert!(!color_enabled_with(true, Some(&capable), true));
+    }
+
+    /// The color gate and the rich-UI gate agree about which terminals can
+    /// render escapes at all: whenever the rich presentation steps aside for an
+    /// incapable terminal, the plain fallback it hands over to is plain in
+    /// color too. Any divergence is escape-code garbage on screen.
+    #[test]
+    fn color_gate_never_outlives_the_rich_ui_gate() {
+        let terms = [
+            None,
+            Some(std::ffi::OsString::from("dumb")),
+            Some(std::ffi::OsString::from("xterm-256color")),
+        ];
+        for term in &terms {
+            for stream_is_tty in [false, true] {
+                for plain in [false, true] {
+                    let term = term.as_deref();
+                    assert!(
+                        !color_enabled_with(stream_is_tty, term, plain)
+                            || terminal_ui_enabled_with(stream_is_tty, term),
+                        "tty {stream_is_tty}, TERM {term:?}: colored a terminal the rich UI skipped"
+                    );
+                }
+            }
+        }
     }
 
     /// Every rich renderer degrades to plain text with `emit_colors = false`
@@ -1917,7 +2078,7 @@ mod tests {
                 false,
             ),
             format_nothing_to_reclaim(Path::new("/w/dash"), "main · clean tree", 90, false),
-            format_clean_success(Path::new("/w/dash"), 1, Some("1.2 GB"), false),
+            format_clean_success(Path::new("/w/dash"), 1, Some("1.2 GB"), 90, false),
         ]
         .concat()
         .join("\n");

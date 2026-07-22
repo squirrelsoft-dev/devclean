@@ -111,9 +111,12 @@ formatting; `src/clean.rs` for the deletion engine and
 
 ### Colors
 
-Output is colored when stdout is a TTY and plain when piped or redirected.
-Setting the `NO_COLOR` environment variable (to any value) or `CLICOLOR=0`
-disables color even on a TTY. Known limitation: offcut emits standard ANSI
+Output is colored when stdout is a TTY that can render escapes, and plain when
+piped, redirected, or running under `TERM=dumb` — the same capability test the
+rich terminal interface uses, so a terminal that gets the plain layout never
+gets escape sequences with it. Setting the `NO_COLOR` environment variable (to
+any value) or `CLICOLOR=0` disables color even on a capable TTY. Known
+limitation: offcut emits standard ANSI
 escapes and does not enable virtual-terminal processing on legacy Windows
 conhost (plain `cmd.exe`), where colored output may render as escape
 sequences — modern Windows Terminal, macOS, and Linux terminals are fine.
@@ -161,9 +164,11 @@ On a capable terminal, `offcut list`, the default `offcut` run, and
   state, and the panel says so rather than claiming nothing was found.
 
 When stdout is piped, redirected, or `TERM=dumb`, Offcut keeps the plain
-line-oriented output and suppresses live progress. Color is independently
-disabled by `NO_COLOR` or `CLICOLOR=0`; the safety model and exit behavior do
-not depend on terminal styling.
+line-oriented output, suppresses live progress, and emits no color — a terminal
+that cannot render the panels cannot render their escape sequences either.
+`NO_COLOR` or `CLICOLOR=0` additionally drops color on a capable terminal while
+keeping the rich layout. The safety model and exit behavior do not depend on
+terminal styling.
 
 ## `.offcutignore`
 
@@ -243,8 +248,9 @@ them. An absolute path on the cleaning path is treated as **protected**
 
 `offcut clean` runs the interactive flow (#8): it reports every project
 sorted by status (statuses 1–4 need manual attention; status-5 projects are
-the cleanable subjects), asks "Remove gitignored paths from the N cleanable
-projects? [y/N]", then loops over the cleanable projects one at a time —
+the cleanable subjects), asks "Remove gitignored paths from N cleanable
+project(s)? [y/N]" (the noun agrees with the count), then loops over the
+cleanable projects one at a time —
 showing the items that would be deleted *before* asking anything, prompting
 per surfaced item, and prompting per project — and finally deletes the
 approved items. Answering "n" (or EOF) to the first prompt exits without

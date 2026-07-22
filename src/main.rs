@@ -471,16 +471,27 @@ impl BranchLabels {
     }
 }
 
+/// The one-line tree/remote state under a project panel's header.
+///
+/// It reports the two facts the header needs — the working tree and the remote
+/// — in their own vocabulary, and only the ones the status actually guarantees:
+/// `Unpushed` is decided before `Wip` (see `classify::Status`), so an unpushed
+/// project may still have uncommitted work and claiming a clean tree for it
+/// would be a lie.
+///
+/// Deliberately none of these arms repeat `interactive::status_reason`. The
+/// blocked panel prints this line and that reason two lines apart, so a verbatim
+/// copy would both make the panel say the same thing twice and leave one
+/// sentence owned by two modules, free to drift.
 fn branch_state_line(branch: &str, status: classify::Status) -> String {
-    match status {
-        classify::Status::Cleanable | classify::Status::Clean => {
-            format!("{branch} · clean tree · remote ✓ pushed")
-        }
-        classify::Status::Wip => format!("{branch} · uncommitted changes · remote ✓"),
-        classify::Status::Unpushed => format!("{branch} · has unpushed commits"),
-        classify::Status::NoRemote => format!("{branch} · no remote configured"),
-        classify::Status::NoGit => "-".to_string(),
-    }
+    let (tree, remote) = match status {
+        classify::Status::Cleanable | classify::Status::Clean => ("clean tree", "remote ✓ pushed"),
+        classify::Status::Wip => ("uncommitted changes", "remote ✓"),
+        classify::Status::Unpushed => ("local commits ahead", "remote ✗ not pushed"),
+        classify::Status::NoRemote => ("local only", "remote ✗ none"),
+        classify::Status::NoGit => return "-".to_string(),
+    };
+    format!("{branch} · {tree} · {remote}")
 }
 
 /// Render the rich workspace-summary table for `rows` on stdout.
@@ -526,21 +537,27 @@ fn render_workspace_table(
             changed: Some(changed[idx].as_str()),
         })
         .collect();
-    println!(
-        "⟩ {} · {} {}",
-        if targeted {
-            "inspected the requested project"
-        } else {
-            "scanned configured workspaces"
-        },
-        rows.len(),
-        output::projects_word(rows.len())
-    );
+    let width = output::terminal_width();
+    for line in output::wrap_line(
+        &format!(
+            "⟩ {} · {} {}",
+            if targeted {
+                "inspected the requested project"
+            } else {
+                "scanned configured workspaces"
+            },
+            rows.len(),
+            output::projects_word(rows.len())
+        ),
+        width,
+    ) {
+        println!("{line}");
+    }
     for line in output::format_project_table(
         &table_rows,
         cleanable_count,
         total_reclaimable,
-        output::terminal_width(),
+        width,
         emit_colors,
     ) {
         println!("{line}");
@@ -642,7 +659,7 @@ fn status_detail_lines(project_path: &Path, status: classify::Status) -> Vec<Str
 /// by severity (most-needs-attention first). Read-only — no cleaning.
 ///
 /// Each row uses the formatted shape `[rank] path — label (reason)` with
-/// color coding per status. Cleanable rows carry a bold-green label so the
+/// color coding per status. Cleanable rows carry a bold-cyan label so the
 /// reader can tell which projects are subjects of the interactive clean flow.
 fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
@@ -1097,8 +1114,18 @@ fn run_cleaning(
             // No panel fits this outcome — an empty project list (every
             // project skipped by `classify_projects`, warned about on stderr)
             // or a cleanable project whose inspection failed. Either way the
-            // run still says what it did.
-            None => println!("clean: no cleanable projects — nothing to delete"),
+            // run still says what it did: bounded on a rendering terminal,
+            // and on one line for the scripts reading the plain stream.
+            None => {
+                let summary = "clean: no cleanable projects — nothing to delete";
+                if rich_stdout {
+                    for line in output::wrap_line(summary, output::terminal_width()) {
+                        println!("{line}");
+                    }
+                } else {
+                    println!("{summary}");
+                }
+            }
         }
         return Ok(());
     }
@@ -1132,6 +1159,7 @@ fn run_cleaning(
     // per-project report entirely) gets the panel on stdout, so no outcome is
     // reported without the project and items it is about.
     let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
+    let width = output::terminal_width();
     for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
         let will_execute = r.project_approved && !cli.dry_run;
         // What this run will actually do to each item, once the approvals are
@@ -1166,7 +1194,7 @@ fn run_cleaning(
                     &branch_state_line(&branch, r.status),
                     &rows,
                     per_project_size[*idx].as_deref(),
-                    output::terminal_width(),
+                    width,
                     emit_colors,
                 ) {
                     println!("{line}");
@@ -1174,12 +1202,20 @@ fn run_cleaning(
             }
             if r.project_approved {
                 if will_execute {
-                    println!("⟩ cleaning {}", r.path.display());
+                    println!(
+                        "{}",
+                        output::format_path_line("⟩ cleaning ", &r.path, width)
+                    );
                 } else {
-                    println!("⟩ dry-run only - nothing deleted");
+                    for line in output::wrap_line("⟩ dry-run only - nothing deleted", width) {
+                        println!("{line}");
+                    }
                 }
             } else {
-                println!("⟩ skipped by user · {}", r.path.display());
+                println!(
+                    "{}",
+                    output::format_path_line("⟩ skipped by user · ", &r.path, width)
+                );
             }
         } else {
             println!(
@@ -1261,6 +1297,7 @@ fn run_cleaning(
                             &r.path,
                             r.would_delete.len(),
                             reclaimed.as_deref(),
+                            width,
                             emit_colors,
                         ) {
                             println!("{line}");

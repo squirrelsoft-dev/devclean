@@ -20,8 +20,8 @@
 //!
 //! 1. **Report phase** — show every project sorted by status, report each
 //!    non-cleanable one with a one-line reason, list each cleanable one.
-//! 2. **All-cleanup prompt** — "Remove gitignored paths from the N cleanable
-//!    projects? [y/N]" (`(y/n)` on a plain stderr). If no (or EOF / --force /
+//! 2. **All-cleanup prompt** — "Remove gitignored paths from N cleanable
+//!    project(s)? [y/N]" (`(y/n)` on a plain stderr). If no (or EOF / --force /
 //!    --dry-run), exit without touching any project: no further prompts are
 //!    shown and every result comes back unapproved.
 //! 3. **Per-project loop** (in sorted order, each cleanable):
@@ -171,9 +171,13 @@ fn read_line<R: BufRead>(reader: &mut R) -> Option<String> {
     }
 }
 
-/// Prompt the user: "Remove gitignored paths from the N cleanable projects? [y/N]". Returns
-/// whether the user answered "y" (or EOF → "no") — callers exit cleanly on
-/// "no".
+/// Prompt the user: "Remove gitignored paths from N cleanable project(s)? [y/N]".
+/// Returns whether the user answered "y" (or EOF → "no") — callers exit cleanly
+/// on "no".
+///
+/// The noun agrees with the count (`output::projects_word`): a targeted
+/// `offcut clean <PROJECT_PATH>` run always has exactly one cleanable project,
+/// so the destructive confirmation would otherwise read "1 projects".
 ///
 /// In `--force` / `--dry-run` this is skipped — the flow state machine calls
 /// it only for interactive mode.
@@ -189,8 +193,10 @@ pub fn collect_all_approval<R: BufRead>(reader: &mut R, num_cleanable: usize) ->
     } else {
         "(y/n)"
     };
-    let question =
-        format!("Remove gitignored paths from the {num_cleanable} cleanable projects? {hint}");
+    let question = format!(
+        "Remove gitignored paths from {num_cleanable} cleanable {}? {hint}",
+        output::projects_word(num_cleanable)
+    );
     eprintln!("? {question}");
     matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
 }
@@ -212,7 +218,10 @@ fn pending_fate(item: &CleanItem) -> &'static str {
 ///
 /// A capable stderr gets the rich review panel; anything else (piped,
 /// redirected, `TERM=dumb`) keeps the plain line-oriented listing so scripts
-/// and logs read the same as they always have.
+/// and logs read the same as they always have — the same lines, in the same
+/// order, with nothing added. Panel furniture (headers, rules, framing) belongs
+/// to the rich rendering alone: a header printed here would be a line every
+/// existing consumer of this stream has never seen.
 ///
 /// Returns whether the rich panel was the rendering used, so the caller knows
 /// whether the outcome phase still owes the user one.
@@ -232,7 +241,6 @@ fn print_project_report(project: &CleanableProject) -> bool {
         return true;
     }
     eprintln!("{}:", project.path.display());
-    eprintln!("  Gitignored review");
     for item in &project.items {
         let label = match item.classification {
             Classification::Protected => "protected",
