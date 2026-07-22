@@ -237,6 +237,13 @@ Run it directly while iterating:
 ./tests/agent_hooks_config.sh
 ```
 
+The harness is `#![cfg(unix)]`, so it compiles out on Windows. The script needs
+`bash`, `git`, and a `python3` of 3.11 or newer — it reads `.qlty/qlty.toml`
+(and any `.codex/config.toml`) with `tomllib`. Apple's system `python3` is still
+3.9, so on macOS a stock `cargo test` fails on that import rather than on real
+drift; put a newer `python3` first on `PATH`. The wrapper itself has no such
+floor.
+
 The script derives the repository root from its own location rather than from
 `git rev-parse`, for the same reason the Pi extension does: it has to work in a
 source tarball with no `.git` and inside a checkout vendored under another
@@ -252,8 +259,10 @@ Covered: success; an exit-1 findings failure that blocks; exit-3 and exit-99
 failures that fail open for all three tools; an errored `exitResult` at exit 1
 that fails open even though the exit code says findings; root resolution from a
 nested git repository that owns no Qlty config; refusal to adopt an ancestor
-config from outside the project; the `stop_hook_active` recursion guard; the
-non-JSON (`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`;
-the missing-binary paths where `qlty` (and then `git`) are absent from `PATH`;
-and a timeout whose stub spawns a grandchild — asserting both the distinct
-non-blocking message and that the grandchild died with the killed process group.
+config from outside the project; a directory that sits in no repository at all,
+which blocks with `could not resolve repository root`; the `stop_hook_active`
+recursion guard; the non-JSON (`--tool pi`) stderr path for a repository with no
+`.qlty/qlty.toml`; the missing-binary paths where `qlty` (and then `git`) are
+absent from `PATH`; and a timeout whose stub spawns a grandchild — asserting
+both the distinct non-blocking message and that the grandchild died with the
+killed process group.
