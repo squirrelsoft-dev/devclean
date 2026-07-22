@@ -471,23 +471,46 @@ impl BranchLabels {
     }
 }
 
-/// The one-line tree/remote state under a project panel's header.
+/// Whether `project_path` has any commit at all.
+///
+/// `Status::Unpushed` is the one status that does not answer this on its own:
+/// `classify::status_unpushed` short-circuits to true on a missing `HEAD`, so
+/// the status covers both a branch whose commits were never pushed and a repo
+/// that has never committed anything. The two need different copy, so the fact
+/// is read from the same `git` plumbing every other label here uses.
+fn has_commits(project_path: &Path) -> bool {
+    git_text(project_path, &["rev-parse", "--verify", "HEAD"]).is_some()
+}
+
+/// The one-line tree/remote state under `project_path`'s panel header.
+///
+/// Reads the one fact the status cannot supply, then hands off to
+/// `format_branch_state`. Only `Unpushed` pays for the extra plumbing call: it
+/// is the only status whose copy turns on whether anything is committed.
+fn branch_state_line(project_path: &Path, branch: &str, status: classify::Status) -> String {
+    let committed = status != classify::Status::Unpushed || has_commits(project_path);
+    format_branch_state(branch, status, committed)
+}
+
+/// Render the tree/remote state from facts already gathered.
 ///
 /// It reports the two facts the header needs — the working tree and the remote
-/// — in their own vocabulary, and only the ones the status actually guarantees:
+/// — in their own vocabulary, and only the ones actually established:
 /// `Unpushed` is decided before `Wip` (see `classify::Status`), so an unpushed
 /// project may still have uncommitted work and claiming a clean tree for it
-/// would be a lie.
+/// would be a lie; `committed` is false for a repo with no commits, which must
+/// not be described as having local commits ahead of anything.
 ///
 /// Deliberately none of these arms repeat `interactive::status_reason`. The
 /// blocked panel prints this line and that reason two lines apart, so a verbatim
 /// copy would both make the panel say the same thing twice and leave one
 /// sentence owned by two modules, free to drift.
-fn branch_state_line(branch: &str, status: classify::Status) -> String {
+fn format_branch_state(branch: &str, status: classify::Status, committed: bool) -> String {
     let (tree, remote) = match status {
         classify::Status::Cleanable | classify::Status::Clean => ("clean tree", "remote ✓ pushed"),
         classify::Status::Wip => ("uncommitted changes", "remote ✓"),
-        classify::Status::Unpushed => ("local commits ahead", "remote ✗ not pushed"),
+        classify::Status::Unpushed if committed => ("local commits ahead", "remote ✗ not pushed"),
+        classify::Status::Unpushed => ("no commits yet", "remote ✗ nothing pushed"),
         classify::Status::NoRemote => ("local only", "remote ✗ none"),
         classify::Status::NoGit => return "-".to_string(),
     };
@@ -1065,7 +1088,7 @@ fn run_cleaning(
             // The branch line only reaches the screen through the pre-approval
             // review panel, so it is read only for the runs that render one.
             let branch_line = if stderr_may_render_review {
-                branch_state_line(&branch_labels.get(idx, path, *status), *status)
+                branch_state_line(path, &branch_labels.get(idx, path, *status), *status)
             } else {
                 String::new()
             };
@@ -1086,7 +1109,7 @@ fn run_cleaning(
     if cleanable_items.is_empty() {
         let panel = if rich_stdout && project_path.is_some() {
             all_projects.first().map(|(path, status, ignore_set)| {
-                let branch = branch_state_line(&branch_labels.get(0, path, *status), *status);
+                let branch = branch_state_line(path, &branch_labels.get(0, path, *status), *status);
                 let reclaim = if output::blocks_cleaning(*status) {
                     blocked_reclaim(path, ignore_set, &cfg)
                 } else {
@@ -1191,7 +1214,7 @@ fn run_cleaning(
                 let branch = branch_labels.get(*idx, &r.path, r.status);
                 for line in output::format_clean_review(
                     &r.path,
-                    &branch_state_line(&branch, r.status),
+                    &branch_state_line(&r.path, &branch, r.status),
                     &rows,
                     per_project_size[*idx].as_deref(),
                     width,
@@ -1329,10 +1352,18 @@ mod targeted_panel_tests {
     use std::fs;
 
     fn panel_with(status: classify::Status, possible_reclaim: Option<&str>) -> Option<String> {
+        panel_for(status, possible_reclaim, true)
+    }
+
+    fn panel_for(
+        status: classify::Status,
+        possible_reclaim: Option<&str>,
+        committed: bool,
+    ) -> Option<String> {
         targeted_outcome_panel(
             Path::new("/workspace/dashboard"),
             status,
-            &branch_state_line("main", status),
+            &format_branch_state("main", status, committed),
             &[],
             possible_reclaim,
             80,
@@ -1415,6 +1446,59 @@ mod targeted_panel_tests {
             Some(disk::format_size(2048).as_str()),
             "only node_modules may count; scratch/dataset.csv is the user's work"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `Unpushed` covers a branch whose commits were never pushed *and* a repo
+    /// that has never committed anything, so the panel states the one it is
+    /// actually looking at rather than inventing commits for an empty repo.
+    #[test]
+    fn unpushed_panel_does_not_claim_commits_an_empty_repo_lacks() {
+        let empty = panel_for(classify::Status::Unpushed, None, false).expect("panel");
+        assert!(empty.contains("no commits yet"), "{empty}");
+        assert!(!empty.contains("commits ahead"), "{empty}");
+        assert!(empty.contains("refusing to clean"), "{empty}");
+
+        let ahead = panel_for(classify::Status::Unpushed, None, true).expect("panel");
+        assert!(ahead.contains("local commits ahead"), "{ahead}");
+        assert!(!ahead.contains("no commits yet"), "{ahead}");
+    }
+
+    /// The commit fact the unpushed copy turns on is read from git, not
+    /// guessed: a freshly initialized repo has none, and one commit is enough.
+    #[test]
+    fn has_commits_reads_the_repository_not_the_status() {
+        let root = std::env::temp_dir().join(format!(
+            "offcut-has-commits-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init"]);
+        assert!(
+            !has_commits(&root),
+            "a repo with no commits has nothing ahead of a remote"
+        );
+
+        git(&["config", "user.email", "test@test.dev"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(root.join("initial.txt"), "initial").unwrap();
+        git(&["add", "initial.txt"]);
+        git(&["commit", "-m", "initial"]);
+        assert!(has_commits(&root));
+
         let _ = fs::remove_dir_all(&root);
     }
 

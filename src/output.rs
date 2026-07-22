@@ -129,10 +129,15 @@ pub fn stderr_color_enabled() -> bool {
 
 /// Color `text` with `style`, gated by `emit_colors`.
 ///
-/// When `emit_colors` is `None`, uses the runtime gate (TTY plus the
-/// `NO_COLOR`/`CLICOLOR` conventions). When `Some(false)` or `Some(true)`
-/// uses that directly — the way unit tests verify color behavior without
-/// needing a real TTY.
+/// When `emit_colors` is `None`, uses the runtime gate (`color_enabled`: a
+/// terminal that can render escapes — a TTY that is not `TERM=dumb` — with
+/// neither `NO_COLOR` nor `CLICOLOR=0` asking for plain output). When
+/// `Some(false)` or `Some(true)` uses that directly — the way unit tests verify
+/// color behavior without needing a real TTY.
+///
+/// The plain fallback path reaches here with `None`
+/// (`format_project_row`/`format_summary`), so this gate is what keeps a
+/// terminal that gets the plain layout from getting escape sequences with it.
 pub fn color(text: &str, style: OwoStyle, emit_colors: Option<bool>) -> String {
     let emit = emit_colors.unwrap_or_else(color_enabled);
     if emit {
