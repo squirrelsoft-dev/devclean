@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.qlty/hooks/qlty-check.py\" --tool codex",
+            "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.qlty/hooks/qlty-check.py\" --tool codex",
             "timeout": 600,
             "statusMessage": "Running qlty check"
           }

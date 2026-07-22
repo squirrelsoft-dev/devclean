@@ -6,13 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
 
 HOOK_ENV = "OFFCUT_QLTY_STOP_HOOK_ACTIVE"
+TIMEOUT_ENV = "OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS"
 MAX_REASON_CHARS = 6000
+DEFAULT_TIMEOUT_SECONDS = 540.0
+GROUP_KILL_GRACE_SECONDS = 5.0
 
 
 class RootResolutionError(RuntimeError):
@@ -21,6 +25,10 @@ class RootResolutionError(RuntimeError):
 
 class ToolUnavailableError(RuntimeError):
     """A required executable is missing from the environment the agent runs in."""
+
+
+class CheckTimeoutError(RuntimeError):
+    """`qlty check` outlived the wrapper budget and its process group was killed."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +109,52 @@ def find_repo_root(cwd: Path) -> Path:
     raise RootResolutionError(message)
 
 
+def timeout_seconds() -> float:
+    raw = os.environ.get(TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_TIMEOUT_SECONDS
+
+
+def terminate_process_group(process: subprocess.Popen[str]) -> None:
+    escalation = [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)]
+    for sig in escalation:
+        try:
+            os.killpg(os.getpgid(process.pid), sig)
+        except (AttributeError, OSError):
+            process.kill()
+        try:
+            process.communicate(timeout=GROUP_KILL_GRACE_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run_check(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    budget = timeout_seconds()
+    process = subprocess.Popen(
+        ["qlty", "check", "--no-progress", "--no-upgrade-check", "--print-errors"],
+        cwd=root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=budget)
+    except subprocess.TimeoutExpired:
+        terminate_process_group(process)
+        raise CheckTimeoutError(
+            f"qlty check timed out after {budget:g}s in {root}"
+        ) from None
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
 def build_reason(root: Path, result: subprocess.CompletedProcess[str]) -> str:
     combined = "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip())
     if len(combined) > MAX_REASON_CHARS:
@@ -150,14 +204,7 @@ def main() -> int:
     env = os.environ.copy()
     env[HOOK_ENV] = "1"
     try:
-        result = subprocess.run(
-            ["qlty", "check", "--no-progress", "--no-upgrade-check"],
-            cwd=root,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        result = run_check(root, env)
     except OSError as error:
         return skip_check(
             f"qlty could not be executed in {root} ({error}).",
@@ -165,6 +212,14 @@ def main() -> int:
             "environment this agent runs in — the installer puts it in ~/.qlty/bin and "
             "only adds that to PATH via your shell profile, so agents launched outside a "
             "login shell may not see it.",
+        )
+    except CheckTimeoutError as error:
+        return skip_check(
+            f"{error}.",
+            "The whole qlty process group was killed, so no linter is still running in the "
+            "background. Run `qlty check --no-progress --no-upgrade-check --print-errors` "
+            "by hand to see how long a full run takes here (a cold plugin cache is the "
+            f"usual cause), or raise the budget with {TIMEOUT_ENV}.",
         )
 
     if result.returncode == 0:

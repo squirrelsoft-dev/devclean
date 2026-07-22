@@ -33,6 +33,10 @@ assert codex_handler["type"] == "command"
 assert ".qlty/hooks/qlty-check.py" in codex_handler["command"]
 assert "--tool codex" in codex_handler["command"]
 assert codex_handler["timeout"] == 600
+# An unguarded $(git rev-parse --show-toplevel) collapses to "" when git is missing
+# or the cwd is not a worktree, so python3 would fail on "/.qlty/..." before the
+# wrapper could apply its skip-vs-block taxonomy.
+assert "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" in codex_handler["command"]
 
 claude_settings = json.loads((root / ".claude" / "settings.json").read_text())
 assert "disableAllHooks" not in claude_settings
@@ -57,6 +61,10 @@ assert "OFFCUT_QLTY_STOP_HOOK_ACTIVE" in pi_extension
 assert 'event.reason !== "quit"' in pi_extension
 assert "console.error(message)" in pi_extension
 assert pi_extension.index("Qlty stop hook: running qlty check") < pi_extension.index('pi.exec("python3"')
+# The extension file lives at <root>/.pi/extensions, so its own location names the
+# root exactly; shelling out to git would reintroduce a nested-repo failure mode.
+assert 'resolve(import.meta.dirname, "..", "..")' in pi_extension
+assert 'pi.exec("git"' not in pi_extension
 PY
 
 python3 -m py_compile "${repo_root}/.qlty/hooks/qlty-check.py"
@@ -85,7 +93,7 @@ printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp
 
 test ! -s "${tmp}/success.out"
 grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
-grep -F "args=check --no-progress --no-upgrade-check" "${QLTY_STUB_LOG}" >/dev/null
+grep -F "args=check --no-progress --no-upgrade-check --print-errors" "${QLTY_STUB_LOG}" >/dev/null
 
 cat > "${tmp}/bin/qlty" <<'SH'
 #!/usr/bin/env bash
@@ -135,7 +143,7 @@ grep -F "qlty stop hook is misconfigured" "${tmp}/misconfig.err" >/dev/null
 grep -F "qlty init" "${tmp}/misconfig.err" >/dev/null
 
 python3_bin="$(command -v python3)"
-mkdir -p "${tmp}/nopath"
+mkdir -p "${tmp}/nopath" "${tmp}/empty-path"
 ln -s "$(command -v git)" "${tmp}/nopath/git"
 
 for tool in claude codex pi; do
@@ -179,6 +187,31 @@ for tool in claude codex pi; do
   refute_match "decision" "${tmp}/nogitroot-${tool}.err"
   refute_match "remove the project stop hook" "${tmp}/nogitroot-${tool}.err"
 done
+
+cat > "${tmp}/bin/qlty" <<'SH'
+#!/usr/bin/env bash
+( sleep 3; touch "${QLTY_STUB_GRANDCHILD_MARKER:?}" ) &
+sleep 30
+SH
+chmod +x "${tmp}/bin/qlty"
+
+export QLTY_STUB_GRANDCHILD_MARKER="${tmp}/grandchild-survived"
+
+status=0
+printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
+  env OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS=1 \
+    "${python3_bin}" "${repo_root}/.qlty/hooks/qlty-check.py" --tool claude \
+      > "${tmp}/timeout.out" 2> "${tmp}/timeout.err" || status=$?
+
+test "${status}" -eq 1
+test ! -s "${tmp}/timeout.out"
+grep -F "qlty check was skipped" "${tmp}/timeout.err" >/dev/null
+grep -F "qlty check timed out" "${tmp}/timeout.err" >/dev/null
+grep -F "OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS" "${tmp}/timeout.err" >/dev/null
+refute_match "decision" "${tmp}/timeout.err"
+
+sleep 4
+test ! -e "${QLTY_STUB_GRANDCHILD_MARKER}"
 
 mkdir -p "${tmp}/plain"
 

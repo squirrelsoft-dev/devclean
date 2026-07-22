@@ -10,8 +10,13 @@ the repository root and leaves user/global configuration untouched.
 Run the same command the hooks run:
 
 ```sh
-qlty check --no-progress --no-upgrade-check
+qlty check --no-progress --no-upgrade-check --print-errors
 ```
+
+`--print-errors` is not cosmetic: linter *errors* (plugin install failure, a
+cold-cache network failure, an unsupported runtime) also exit non-zero, but
+their detail is not written out by default. Without it the wrapper could hand an
+agent a blocking reason that says only `qlty check exited with code N`.
 
 Qlty was initialized with `.qlty/qlty.toml`. The `.qlty/.gitignore` keeps Qlty
 cache/plugin churn out of git while allowing checked-in config and hooks.
@@ -21,11 +26,21 @@ The wrapper distinguishes repository problems from environment problems:
 - **Qlty reported issues**, `.qlty/qlty.toml` is missing, or the repository root
   cannot be resolved because the hook ran outside a repository: the stop is
   blocked, because the agent can act on all three from inside the repository.
-- **`qlty` or `git` is not installed or not on PATH**: the stop is *not*
-  blocked. The wrapper prints the reason on stderr and exits non-zero, which
-  every supported tool treats as a non-blocking hook error, so the message is
-  visible without holding the session open. Contributors missing either tool are
-  never asked to change committed hook configuration to get their agent to stop.
+- **`qlty` or `git` is not installed or not on PATH**, or `qlty check` outran
+  its time budget: the stop is *not* blocked. The wrapper prints the reason on
+  stderr and exits non-zero, which every supported tool treats as a non-blocking
+  hook error, so the message is visible without holding the session open.
+  Contributors missing either tool are never asked to change committed hook
+  configuration to get their agent to stop.
+
+`qlty check` runs under a wrapper-owned budget (540s by default, overridable
+with `OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS`) that is deliberately under each host's
+600s hook timeout. The host kills only the direct `python3` child, which would
+strand the `qlty` grandchild — for this config a full `clippy`/`cargo` build —
+burning CPU and holding the Qlty cache after the agent moved on. The wrapper
+therefore starts `qlty` in its own session and, on timeout, signals the whole
+process group (SIGTERM, then SIGKILL) before reporting a distinct
+`qlty check timed out` message.
 
 The two cases are separate exception types (`RootResolutionError` versus
 `ToolUnavailableError`) rather than a parsed message, so every future failure
@@ -45,8 +60,13 @@ Codex project hooks require both project trust and *persisted hook trust*
 before they run. Once trusted, the `Stop` hook invokes:
 
 ```sh
-python3 "$(git rev-parse --show-toplevel)/.qlty/hooks/qlty-check.py" --tool codex
+python3 "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.qlty/hooks/qlty-check.py" --tool codex
 ```
+
+The `|| pwd` fallback keeps the wrapper reachable. An unguarded substitution
+collapses to the empty string when `git` is missing or the cwd is not a
+worktree, so Codex would run `python3 "/.qlty/hooks/qlty-check.py"` and die with
+a raw interpreter error — bypassing the whole skip-versus-block taxonomy above.
 
 The wrapper reads Codex hook JSON on stdin. If `qlty check` passes, it exits
 quietly. If Qlty fails, it returns a `decision: "block"` JSON response with the
@@ -110,7 +130,14 @@ with `reason` values `quit | reload | new | resume | fork`. The extension only
 acts on `reason === "quit"`, so `/new`, `/fork`, `/resume`, and `/reload` are
 not delayed by a full `qlty check`.
 
-The extension runs the shared wrapper with `--tool pi --cwd <ctx.cwd>`. Because
+The extension is loaded from `<root>/.pi/extensions/qlty-stop-hook.ts`, so its
+own location names the repository root exactly; it resolves the root two
+directories up from `import.meta.dirname` rather than shelling out to `git`.
+That removes a subprocess from the quit path and a failure mode: when `ctx.cwd`
+sits inside a nested or unrelated repository, `rev-parse` names the wrong root
+and the hook silently degrades to the "was not found" warning.
+
+The extension runs the shared wrapper with `--tool pi --cwd <repo root>`. Because
 that call is synchronous and the TUI is already gone, the extension first prints
 a one-line progress notice to stderr so a quit that waits on a cold plugin cache
 does not look like a frozen terminal. Pi shutdown hooks cannot force another
@@ -130,7 +157,15 @@ style block-and-continue stop decision.
 
 ## Smoke Checks
 
-Run the hook/config fixture tests with:
+The fixture suite runs as part of the ordinary test run — `tests/agent_hooks_config.rs`
+is a thin harness that shells out to the script — so config drift fails
+`cargo test` rather than waiting for someone to remember a manual command:
+
+```sh
+cargo test --test agent_hooks_config
+```
+
+Run it directly while iterating:
 
 ```sh
 ./tests/agent_hooks_config.sh
@@ -139,5 +174,7 @@ Run the hook/config fixture tests with:
 The script validates the Codex, Claude Code, and Pi project config shapes, then
 exercises `.qlty/hooks/qlty-check.py` with stubbed `qlty` binaries for success,
 failure, root resolution, the `stop_hook_active` recursion guard, the non-JSON
-(`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`, and the
-missing-binary paths where `qlty` (and then `git`) are absent from `PATH`.
+(`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`, the
+missing-binary paths where `qlty` (and then `git`) are absent from `PATH`, and a
+timeout whose stub spawns a grandchild — asserting both the distinct non-blocking
+message and that the grandchild died with the killed process group.

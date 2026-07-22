@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const HOOK_ENV = "OFFCUT_QLTY_STOP_HOOK_ACTIVE";
+const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 
 function report(ctx: ExtensionContext, message: string, level: "warning" | "error") {
 	console.error(message);
@@ -25,9 +26,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const rootResult = await pi.exec("git", ["-C", ctx.cwd, "rev-parse", "--show-toplevel"]);
-		const root = rootResult.code === 0 ? rootResult.stdout.trim() : ctx.cwd;
-		const scriptPath = join(root, ".qlty", "hooks", "qlty-check.py");
+		const scriptPath = join(REPO_ROOT, ".qlty", "hooks", "qlty-check.py");
 		if (!existsSync(scriptPath)) {
 			report(ctx, "Qlty stop hook skipped: .qlty/hooks/qlty-check.py was not found", "warning");
 			return;
@@ -40,7 +39,7 @@ export default function (pi: ExtensionAPI) {
 			"--tool",
 			"pi",
 			"--cwd",
-			ctx.cwd,
+			REPO_ROOT,
 		], { timeout: 600_000 });
 
 		if (result.code !== 0) {
