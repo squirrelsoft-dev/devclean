@@ -1,0 +1,98 @@
+# Qlty Agent Stop Hooks
+
+Offcut uses Qlty for repository quality checks and wires project-scoped agent
+stop hooks for Codex, Pi, and Claude Code. The shared implementation is
+`.qlty/hooks/qlty-check.py`; each agent-specific config calls that wrapper from
+the repository root and leaves user/global configuration untouched.
+
+## Qlty
+
+Run the same command the hooks run:
+
+```sh
+qlty check --no-progress --no-upgrade-check
+```
+
+Qlty was initialized with `.qlty/qlty.toml`. The `.qlty/.gitignore` keeps Qlty
+cache/plugin churn out of git while allowing checked-in config and hooks.
+
+## Codex
+
+Project configuration lives in:
+
+- `.codex/config.toml`
+- `.codex/hooks.json`
+
+Codex project hooks require project trust before they run. Once trusted, the
+`Stop` hook invokes:
+
+```sh
+python3 "$(git rev-parse --show-toplevel)/.qlty/hooks/qlty-check.py" --tool codex
+```
+
+The wrapper reads Codex hook JSON on stdin. If `qlty check` passes, it exits
+quietly. If Qlty fails, it returns a `decision: "block"` JSON response with the
+captured Qlty output so Codex continues with useful feedback. When Codex reports
+`stop_hook_active: true`, the wrapper allows the stop to prevent recursive
+continuation loops.
+
+Installed smoke evidence: Codex CLI `0.142.5` ran a temporary trusted repo with
+`codex exec --ephemeral --dangerously-bypass-hook-trust`; its project `Stop`
+hook ran and the stubbed `qlty` saw `cwd=<temp repo>`, `args=check --no-progress
+--no-upgrade-check`, and `OFFCUT_QLTY_STOP_HOOK_ACTIVE=1`. In this build, adding
+unsupported top-level keys to `.codex/hooks.json` can make the file silently
+ignored, so keep the top level to `hooks`.
+
+## Claude Code
+
+Project configuration lives in `.claude/settings.json`. The hook uses Claude
+Code exec form:
+
+```json
+{
+  "type": "command",
+  "command": "python3",
+  "args": ["${CLAUDE_PROJECT_DIR}/.qlty/hooks/qlty-check.py", "--tool", "claude"]
+}
+```
+
+Claude Code substitutes `${CLAUDE_PROJECT_DIR}` and also passes hook JSON on
+stdin. Failure handling mirrors Codex: a Qlty failure blocks the stop once with
+the Qlty output as the continuation reason, then `stop_hook_active: true`
+prevents a loop.
+
+Installed smoke evidence: Claude Code `2.1.217` ran a temporary repo with
+project-only settings and `--include-hook-events --output-format stream-json
+--verbose`; the `Stop` hook emitted `hook_started` and `hook_response` events,
+and the stubbed `qlty` saw the same repo-root command and recursion env as
+Codex.
+
+## Pi
+
+Project configuration lives in `.pi/extensions/qlty-stop-hook.ts`. Pi does not
+have a Codex/Claude-style `Stop` event; its current project-scoped mechanism is
+a trusted project extension that listens for `session_shutdown`, which fires on
+quit, reload, new-session, resume, fork, SIGHUP, SIGTERM, Ctrl+C, and Ctrl+D.
+
+The extension runs the shared wrapper with `--tool pi --cwd <ctx.cwd>`. Pi
+shutdown hooks cannot force another model turn, so failures are surfaced through
+the Pi UI when available and stderr otherwise.
+
+Installed smoke evidence: Pi `0.81.1` loaded a temporary project-local extension
+after `--approve`, emitted `session_shutdown` in print mode even when the model
+call stopped early for missing credentials, and the Offcut extension invoked the
+shared wrapper from the temporary repo root with `OFFCUT_QLTY_STOP_HOOK_ACTIVE=1`.
+The current Pi lifecycle API exposes shutdown cleanup hooks, not a Codex/Claude
+style block-and-continue stop decision.
+
+## Smoke Checks
+
+Run the hook/config fixture tests with:
+
+```sh
+./tests/agent_hooks_config.sh
+```
+
+The script validates the Codex, Claude Code, and Pi project config shapes, then
+exercises `.qlty/hooks/qlty-check.py` with stubbed `qlty` binaries for success,
+failure, root resolution, and recursion-guard behavior.

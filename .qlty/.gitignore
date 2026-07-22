@@ -1,0 +1,8 @@
+*
+!configs
+!configs/**
+!hooks
+!hooks/**
+hooks/**/__pycache__/
+!qlty.toml
+!.gitignore
