@@ -459,11 +459,7 @@ pub fn format_clean_review(
     emit_colors: bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    out.push(format!(
-        "⟩ analyzing {} · {}",
-        color_for_stream(&project_name(path), OwoStyle::new().bold(), emit_colors),
-        dim(&path.display().to_string(), emit_colors)
-    ));
+    out.push(format_review_header(path, width, emit_colors));
     out.push(format!(
         "status   {}",
         color_for_stream(
@@ -498,6 +494,35 @@ pub fn format_clean_review(
         total_size.map(|s| format!(" · ~{s}")).unwrap_or_default()
     ));
     out
+}
+
+/// Format the review panel's header — `⟩ analyzing <name> · <path>` — inside
+/// `width` display columns.
+///
+/// It is the one panel line carrying both the project name and its full path,
+/// so it is also the one that soft-wraps first. The name identifies the panel
+/// and takes its columns first; the path gets what is left, truncated from the
+/// left so the distinguishing tail survives. With no columns left for a path,
+/// the separator goes with it rather than dangling at the end of the line.
+fn format_review_header(path: &Path, width: usize, emit_colors: bool) -> String {
+    const PREFIX: &str = "⟩ analyzing ";
+    const SEP: &str = " · ";
+    let prefix = truncate_cols(PREFIX, width);
+    let budget = width.saturating_sub(prefix.width());
+    let name = truncate_path_cols(&project_name(path), budget);
+    let path_budget = budget.saturating_sub(name.width() + SEP.width());
+    let mut line = format!(
+        "{prefix}{}",
+        color_for_stream(&name, OwoStyle::new().bold(), emit_colors)
+    );
+    if path_budget > 0 {
+        line.push_str(SEP);
+        line.push_str(&dim(
+            &truncate_path_cols(&path.display().to_string(), path_budget),
+            emit_colors,
+        ));
+    }
+    line
 }
 
 /// Format the blocked clean state for a non-cleanable project.
@@ -1059,6 +1084,53 @@ mod tests {
             format_clean_review(Path::new("/w/dash"), "main", &rows, None, 90, false).join("\n");
         assert!(rendered.contains("deleting"), "review: {rendered}");
         assert!(!rendered.contains("needs approval"), "review: {rendered}");
+    }
+
+    /// The review header carries both the project name and its full path, so
+    /// a long path or a narrow terminal used to soft-wrap it onto a second
+    /// line while every other panel line stayed inside the width.
+    #[test]
+    fn clean_review_header_fits_the_terminal_width() {
+        let items = vec![CleanItem {
+            rel_path: std::path::PathBuf::from("node_modules"),
+            is_dir: true,
+            classification: Classification::Safe,
+        }];
+        let rows = clean_review_rows(&items, |_| "will delete");
+        let path = Path::new(
+            "/var/folders/s0/zl64g7m92b7bf0d72vc0cskw0000gn/T/offcut-demo/projects/payments-api",
+        );
+        for width in [10, 20, 40, 56, 60, 80, 120] {
+            for emit_colors in [false, true] {
+                let header = strip_ansi(&format_clean_review(
+                    path,
+                    "main · clean tree · remote ✓ pushed",
+                    &rows,
+                    Some("2.34 MB"),
+                    width,
+                    emit_colors,
+                )[0]);
+                assert!(
+                    header.width() <= width,
+                    "width {width} (colors {emit_colors}): header of {} columns: {header:?}",
+                    header.width()
+                );
+            }
+        }
+    }
+
+    /// Truncating the header must not cost it the project's name — that is
+    /// what tells the user which project the panel is about.
+    #[test]
+    fn clean_review_header_keeps_the_project_name() {
+        let rows = Vec::new();
+        let path = Path::new("/a/very/long/workspace/path/that/eats/the/line/payments-api");
+        let header = strip_ansi(&format_clean_review(path, "main", &rows, None, 56, false)[0]);
+        assert!(
+            header.starts_with("⟩ analyzing payments-api · "),
+            "header: {header:?}"
+        );
+        assert!(header.ends_with("/payments-api"), "header: {header:?}");
     }
 
     /// Item columns are aligned by display width, not by char count: a path
