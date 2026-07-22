@@ -450,6 +450,53 @@ fn branch_state_line(project_path: &Path, status: classify::Status) -> String {
     }
 }
 
+/// Render the rich workspace-summary table for `rows` on stdout.
+///
+/// The BRANCH and CHANGED columns each need their own `git` invocation per
+/// project, so the reads run under a counted `reading N/M` progress phase —
+/// otherwise a workspace with hundreds of projects pauses silently between
+/// the sizing phase and the table. Shared by `run_listing` and `run_cleaning`
+/// so the two renderings cannot drift.
+fn render_workspace_table(
+    rows: &[(PathBuf, classify::Status)],
+    sizes: &[Option<String>],
+    cleanable_count: usize,
+    total_reclaimable: Option<&str>,
+    emit_colors: bool,
+) {
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    let mut branches: Vec<String> = Vec::with_capacity(rows.len());
+    let mut changed: Vec<String> = Vec::with_capacity(rows.len());
+    for (i, (path, status)) in rows.iter().enumerate() {
+        progress.update_phase("reading", i + 1, rows.len(), path);
+        branches.push(branch_label(path, *status));
+        changed.push(changed_label(path, *status));
+    }
+    progress.finish();
+
+    let table_rows: Vec<output::ProjectTableRow<'_>> = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, (path, status))| output::ProjectTableRow {
+            path,
+            status: *status,
+            size: sizes.get(idx).and_then(|s| s.as_deref()),
+            branch: Some(branches[idx].as_str()),
+            changed: Some(changed[idx].as_str()),
+        })
+        .collect();
+    println!("⟩ scanned configured workspaces · {} projects", rows.len());
+    for line in output::format_project_table(
+        &table_rows,
+        cleanable_count,
+        total_reclaimable,
+        output::terminal_width(),
+        emit_colors,
+    ) {
+        println!("{line}");
+    }
+}
+
 fn status_detail_lines(project_path: &Path, status: classify::Status) -> Vec<String> {
     if status != classify::Status::Wip {
         return Vec::new();
@@ -551,30 +598,13 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if output::stdout_terminal_ui_enabled() {
-        let emit_colors = output::stdout_color_enabled();
-        let branches: Vec<String> = rows.iter().map(|(p, s)| branch_label(p, *s)).collect();
-        let changed: Vec<String> = rows.iter().map(|(p, s)| changed_label(p, *s)).collect();
-        let table_rows: Vec<output::ProjectTableRow<'_>> = rows
-            .iter()
-            .enumerate()
-            .map(|(idx, (path, status))| output::ProjectTableRow {
-                path,
-                status: *status,
-                size: per_project_size[idx].as_deref(),
-                branch: Some(branches[idx].as_str()),
-                changed: Some(changed[idx].as_str()),
-            })
-            .collect();
-        println!("⟩ scanned configured workspaces · {} projects", rows.len());
-        for line in output::format_project_table(
-            &table_rows,
+        render_workspace_table(
+            &rows,
+            &per_project_size,
             cleanable_count,
             total_reclaimable_str.as_deref(),
-            output::terminal_width(),
-            emit_colors,
-        ) {
-            println!("{line}");
-        }
+            output::stdout_color_enabled(),
+        );
     } else {
         // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
         // lets `output::color` fall back to its runtime gate.
@@ -814,43 +844,24 @@ fn run_cleaning(
     } else {
         None
     };
-    let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
+    let mut cleanable_items: Vec<interactive::CleanableProject> = Vec::new();
     let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
     let rich_stdout = output::stdout_terminal_ui_enabled();
     let emit_colors = output::stdout_color_enabled();
+    // The interactive flow needs the same (path, status) pairs the table
+    // renders, so the projection is built once and shared.
+    let project_statuses: Vec<(PathBuf, classify::Status)> = all_projects
+        .iter()
+        .map(|(p, s, _)| (p.clone(), *s))
+        .collect();
     if rich_stdout {
-        let branches: Vec<String> = all_projects
-            .iter()
-            .map(|(p, s, _)| branch_label(p, *s))
-            .collect();
-        let changed: Vec<String> = all_projects
-            .iter()
-            .map(|(p, s, _)| changed_label(p, *s))
-            .collect();
-        let table_rows: Vec<output::ProjectTableRow<'_>> = all_projects
-            .iter()
-            .enumerate()
-            .map(|(idx, (path, status, _))| output::ProjectTableRow {
-                path,
-                status: *status,
-                size: per_project_size[idx].as_deref(),
-                branch: Some(branches[idx].as_str()),
-                changed: Some(changed[idx].as_str()),
-            })
-            .collect();
-        println!(
-            "⟩ scanned configured workspaces · {} projects",
-            all_projects.len()
-        );
-        for line in output::format_project_table(
-            &table_rows,
+        render_workspace_table(
+            &project_statuses,
+            &per_project_size,
             cleanable_count,
             total_reclaimable_str.as_deref(),
-            output::terminal_width(),
             emit_colors,
-        ) {
-            println!("{line}");
-        }
+        );
     } else {
         // The aggregate reclaimable is printed alongside the header — the
         // per-project rows below each carry their own size too.
@@ -892,7 +903,20 @@ fn run_cleaning(
                     )
                 );
             }
-            cleanable_items.push((path.clone(), items));
+            // The branch line only ever reaches the screen through the rich
+            // review panel, so the extra `git` call is skipped whenever the
+            // stream that shows the review cannot render it.
+            let branch_line = if output::stderr_terminal_ui_enabled() {
+                branch_state_line(path, *status)
+            } else {
+                String::new()
+            };
+            cleanable_items.push(interactive::CleanableProject {
+                path: path.clone(),
+                items,
+                branch_line,
+                total_size: per_project_size[idx].clone(),
+            });
             cleanable_meta.push((idx, safe_set));
         } else if !rich_stdout {
             println!("{}", output::format_project_row(path, *status, None, None));
@@ -925,10 +949,7 @@ fn run_cleaning(
     // process's stdin (locked, buffered for line reads). The flow itself
     // owns the decision state machine; the CLI hook owns the I/O plumbing.
     let inputs = interactive::InteractiveFlowInputs {
-        all_projects: all_projects
-            .iter()
-            .map(|(p, s, _)| (p.clone(), *s))
-            .collect(),
+        all_projects: project_statuses,
         per_project_items: cleanable_items,
         force: cli.force,
         dry_run: cli.dry_run,
@@ -945,22 +966,52 @@ fn run_cleaning(
     // output, so it is cleared in place before each print — a println after
     // an un-cleared padded line would wrap and leave the progress line
     // permanently on screen instead of overwriting it.
+    //
+    // The interactive flow already showed each project's review panel on
+    // stderr, immediately before the question it belongs to. Re-printing it
+    // here would repeat the whole listing after the decision was made; the
+    // panel is only rendered on stdout for the runs that never showed one
+    // (--force, --dry-run, or a stderr that cannot render it).
+    let review_shown_on_stderr = !cli.force && !cli.dry_run && output::stderr_terminal_ui_enabled();
     let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
     for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
         let will_execute = r.project_approved && !cli.dry_run;
+        // What this run will actually do to each item, once the approvals are
+        // in. Shared by the plain listing and the rich panel so neither can
+        // claim a fate the other contradicts.
+        let fate_of = |item: &clean::CleanItem| -> &'static str {
+            if r.would_delete.contains(&item.rel_path) {
+                if will_execute {
+                    "deleting"
+                } else {
+                    "would delete"
+                }
+            } else if cli.dry_run
+                && !cli.force
+                && item.classification == clean::Classification::Surfaced
+            {
+                // A real interactive run would ask about this item, so the
+                // preview must not claim either fate.
+                "would prompt"
+            } else {
+                "kept"
+            }
+        };
         clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
         clean_progress.clear();
         if rich_stdout {
-            let size = per_project_size[*idx].as_deref();
-            for line in output::format_clean_review(
-                &r.path,
-                &branch_state_line(&r.path, r.status),
-                &r.items,
-                size,
-                output::terminal_width(),
-                emit_colors,
-            ) {
-                println!("{line}");
+            if !review_shown_on_stderr {
+                let rows = output::clean_review_rows(&r.items, fate_of);
+                for line in output::format_clean_review(
+                    &r.path,
+                    &branch_state_line(&r.path, r.status),
+                    &rows,
+                    per_project_size[*idx].as_deref(),
+                    output::terminal_width(),
+                    emit_colors,
+                ) {
+                    println!("{line}");
+                }
             }
             if r.project_approved {
                 if will_execute {
@@ -988,28 +1039,12 @@ fn run_cleaning(
                     clean::Classification::Safe => "safe-to-delete",
                     clean::Classification::Surfaced => "surfaced",
                 };
-                let verdict = if r.would_delete.contains(&item.rel_path) {
-                    if will_execute {
-                        " (deleting)"
-                    } else {
-                        " (would delete)"
-                    }
-                } else if cli.dry_run
-                    && !cli.force
-                    && item.classification == clean::Classification::Surfaced
-                {
-                    // A real interactive run would ask about this item, so the
-                    // preview must not claim either fate.
-                    " (would prompt)"
-                } else {
-                    " (kept)"
-                };
                 println!(
-                    "  {}{} [{}]{}",
+                    "  {}{} [{}] ({})",
                     item.rel_path.display(),
                     if item.is_dir { "/" } else { "" },
                     label,
-                    verdict
+                    fate_of(item)
                 );
             }
         }
@@ -1030,6 +1065,32 @@ fn run_cleaning(
                 })
                 .cloned()
                 .collect();
+            // What this run frees is what it deletes: the sizing pass measured
+            // every deletable item, including any the user then declined, so
+            // reporting that figure would overstate the reclaim. Re-measure
+            // over the approved items only — and only when something was
+            // actually declined, so the common case keeps its single pass.
+            // Must happen before `clean` deletes the paths being measured.
+            let reclaimed = if !rich_stdout {
+                None
+            } else if r.items.iter().any(|i| {
+                matches!(
+                    i.classification,
+                    clean::Classification::Safe | clean::Classification::Surfaced
+                ) && !r.would_delete.contains(&i.rel_path)
+            }) {
+                let deleted: Vec<clean::CleanItem> = r
+                    .items
+                    .iter()
+                    .filter(|i| r.would_delete.contains(&i.rel_path))
+                    .cloned()
+                    .collect();
+                disk::compute_reclaimable_size(&r.path, &deleted)
+                    .ok()
+                    .map(disk::format_size)
+            } else {
+                per_project_size[*idx].clone()
+            };
             let ignore_set = &all_projects[*idx].2;
             clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
             let outcome = clean::clean(&r.path, ignore_set, safe_set, &approved, cli.force, false);
@@ -1040,7 +1101,7 @@ fn run_cleaning(
                         for line in output::format_clean_success(
                             &r.path,
                             r.would_delete.len(),
-                            per_project_size[*idx].as_deref(),
+                            reclaimed.as_deref(),
                             emit_colors,
                         ) {
                             println!("{line}");

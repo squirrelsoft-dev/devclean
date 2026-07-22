@@ -18,6 +18,7 @@
 //! output and `Some(false)` to verify plain degradation.
 
 use owo_colors::{OwoColorize, Style as OwoStyle};
+use std::ffi::OsStr;
 use std::io::IsTerminal;
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -41,7 +42,13 @@ pub fn stderr_is_tty() -> bool {
 /// Whether the current terminal can support the richer Offcut UI treatment.
 /// `TERM=dumb` is intentionally plain even when a stream is technically a TTY.
 pub fn terminal_ui_enabled(stream_is_tty: bool) -> bool {
-    stream_is_tty && !std::env::var_os("TERM").is_some_and(|v| v == "dumb")
+    terminal_ui_enabled_with(stream_is_tty, std::env::var_os("TERM").as_deref())
+}
+
+/// The gate itself, with `TERM` passed in so it is testable without mutating
+/// the process environment (which would race every other test in the binary).
+fn terminal_ui_enabled_with(stream_is_tty: bool, term: Option<&OsStr>) -> bool {
+    stream_is_tty && !term.is_some_and(|v| v == "dumb")
 }
 
 /// Whether stdout should receive the rich terminal presentation.
@@ -70,18 +77,31 @@ pub fn terminal_width() -> usize {
 /// `NO_COLOR` (any value, per the no-color.org convention) nor `CLICOLOR=0`
 /// asks for plain output.
 fn color_enabled() -> bool {
+    color_enabled_for(is_tty())
+}
+
+/// The color gate for one stream: the `NO_COLOR`/`CLICOLOR` conventions
+/// apply to every stream; only the TTY test differs per stream.
+fn color_enabled_for(stream_is_tty: bool) -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
     if std::env::var_os("CLICOLOR").is_some_and(|v| v == "0") {
         return false;
     }
-    is_tty()
+    stream_is_tty
 }
 
 /// Whether stdout should emit ANSI color under the current environment.
 pub fn stdout_color_enabled() -> bool {
     color_enabled()
+}
+
+/// Whether stderr should emit ANSI color under the current environment.
+/// Interactive prompts and their review panel go to stderr, so they need
+/// their own gate rather than borrowing stdout's redirection state.
+pub fn stderr_color_enabled() -> bool {
+    color_enabled_for(stderr_is_tty())
 }
 
 /// Color `text` with `style`, gated by `emit_colors`.
@@ -197,6 +217,13 @@ fn status_style(status: Status) -> OwoStyle {
     }
 }
 
+/// Fixed column widths for the wide workspace table. The PROJECT column
+/// takes whatever the terminal has left over.
+const STATUS_W: usize = 12;
+const RECLAIM_W: usize = 10;
+const BRANCH_W: usize = 16;
+const CHANGED_W: usize = 10;
+
 /// One row in the reference-style workspace project table.
 #[derive(Debug, Clone, Copy)]
 pub struct ProjectTableRow<'a> {
@@ -231,23 +258,34 @@ pub fn format_project_table(
     };
 
     if width >= 84 {
-        let project_w = width.saturating_sub(12 + 10 + 16 + 10 + 14).max(18);
+        let project_w = width
+            .saturating_sub(STATUS_W + RECLAIM_W + BRANCH_W + CHANGED_W + 14)
+            .max(18);
         out.push(format!(
-            "{}  {:<12}  {:>10}  {:<16}  {:>10}",
+            "{}  {}  {}  {}  {}",
             pad_or_truncate("PROJECT", project_w),
-            "STATUS",
-            "RECLAIM",
-            "BRANCH",
-            "CHANGED"
+            pad_or_truncate("STATUS", STATUS_W),
+            pad_start("RECLAIM", RECLAIM_W),
+            pad_or_truncate("BRANCH", BRANCH_W),
+            pad_start("CHANGED", CHANGED_W)
         ));
         for row in rows {
             out.push(format!(
-                "{}  {:<12}  {:>10}  {:<16}  {:>10}",
-                pad_or_truncate(&project_name(row.path), project_w),
-                colored_status(row.status, emit_colors),
-                row.size.unwrap_or("-"),
-                pad_or_truncate(row.branch.unwrap_or("-"), 16),
-                row.changed.unwrap_or("-")
+                "{}  {}  {}  {}  {}",
+                pad_path(&project_label(row.path), project_w),
+                // Padding is measured on the plain label and appended
+                // outside the escape sequence: `{:<N}` counts chars, so a
+                // colored label would blow past N and ragged every column
+                // to its right.
+                styled_padded(
+                    row.status.label(),
+                    STATUS_W,
+                    status_style(row.status),
+                    emit_colors
+                ),
+                pad_start(row.size.unwrap_or("-"), RECLAIM_W),
+                pad_or_truncate(row.branch.unwrap_or("-"), BRANCH_W),
+                pad_start(row.changed.unwrap_or("-"), CHANGED_W)
             ));
         }
     } else {
@@ -255,7 +293,7 @@ pub fn format_project_table(
             out.push(format!(
                 "{} {}",
                 color_for_stream("●", status_style(row.status), emit_colors),
-                project_name(row.path)
+                truncate_path_cols(&project_label(row.path), width.saturating_sub(2))
             ));
             out.push(format!(
                 "  {} · reclaim {} · branch {} · changed {}",
@@ -294,11 +332,57 @@ pub fn format_project_table(
     out
 }
 
-/// Format the project-review state shown immediately before approval.
+/// Column widths for the clean-review item list: the widest classification
+/// label (`safe-to-delete`) and the widest fate (`needs approval`).
+const LABEL_W: usize = 14;
+const FATE_W: usize = 14;
+
+/// One reviewed gitignored path: what it is, and what Offcut will do with it.
+///
+/// The caller supplies `fate` because only the caller knows which side of the
+/// approval the panel is being rendered on — `needs approval` before the
+/// prompt, `deleting` / `would delete` / `kept` after it.
+#[derive(Debug, Clone, Copy)]
+pub struct CleanReviewRow<'a> {
+    pub rel_path: &'a Path,
+    pub is_dir: bool,
+    pub label: &'a str,
+    pub fate: &'a str,
+}
+
+/// Build the review rows for one project's items, pairing each item's
+/// classification label with the fate `fate_of` reports for it. Keeps the two
+/// call sites (pre-approval review, post-approval outcome) on one mapping.
+pub fn clean_review_rows<'a>(
+    items: &'a [CleanItem],
+    fate_of: impl Fn(&CleanItem) -> &'static str,
+) -> Vec<CleanReviewRow<'a>> {
+    items
+        .iter()
+        .map(|item| CleanReviewRow {
+            rel_path: item.rel_path.as_path(),
+            is_dir: item.is_dir,
+            label: match item.classification {
+                Classification::Protected => "protected",
+                Classification::Safe => "safe-to-delete",
+                Classification::Surfaced => "surfaced",
+            },
+            fate: fate_of(item),
+        })
+        .collect()
+}
+
+/// Format the project-review panel: the project's branch state and every
+/// gitignored path with its classification and its fate.
+///
+/// The panel carries no question of its own. The confirmation the user answers
+/// is the real prompt (`interactive::collect_project_approval`), which is
+/// emitted right after this panel on the same stream the answer is read for —
+/// a panel-rendered question would be a second, unanswerable copy.
 pub fn format_clean_review(
     path: &Path,
     branch_line: &str,
-    items: &[CleanItem],
+    rows: &[CleanReviewRow<'_>],
     total_size: Option<&str>,
     width: usize,
     emit_colors: bool,
@@ -320,34 +404,27 @@ pub fn format_clean_review(
     out.push(format!("branch   {branch_line}"));
     out.push(String::new());
     out.push(dim("GITIGNORED REVIEW", emit_colors));
-    let item_width = width.saturating_sub(18).max(10);
-    for item in items {
-        let label = match item.classification {
-            Classification::Protected => "protected",
-            Classification::Safe => "safe-to-delete",
-            Classification::Surfaced => "needs approval",
-        };
+    // " ▸ " prefix (4) + item + gap (1) + label + gap (1) + fate.
+    let item_width = width.saturating_sub(4 + 1 + LABEL_W + 1 + FATE_W).max(10);
+    for row in rows {
         out.push(format!(
-            "  ▸ {:<item_width$} {}",
-            pad_or_truncate(
+            "  ▸ {} {} {}",
+            pad_path(
                 &format!(
                     "{}{}",
-                    item.rel_path.display(),
-                    if item.is_dir { "/" } else { "" }
+                    row.rel_path.display(),
+                    if row.is_dir { "/" } else { "" }
                 ),
                 item_width
             ),
-            dim(label, emit_colors)
+            styled_padded(row.label, LABEL_W, OwoStyle::new().dimmed(), emit_colors),
+            dim(row.fate, emit_colors)
         ));
     }
     out.push(format!(
         "total · {} item(s){}",
-        items.len(),
+        rows.len(),
         total_size.map(|s| format!(" · ~{s}")).unwrap_or_default()
-    ));
-    out.push(format!(
-        "? Remove these gitignored paths? {}",
-        dim("[y/N]", emit_colors)
     ));
     out
 }
@@ -406,11 +483,13 @@ pub fn format_clean_success(
     reclaimed: Option<&str>,
     emit_colors: bool,
 ) -> Vec<String> {
-    let size = reclaimed.map(|s| format!("~{s} - ")).unwrap_or_default();
+    let size = reclaimed
+        .map(|s| format!("reclaimed ~{s} - "))
+        .unwrap_or_default();
     vec![
         color_for_stream(
             &format!(
-                "✓ reclaimed {size}removed {deleted_count} item(s) from {}",
+                "✓ {size}removed {deleted_count} item(s) from {}",
                 project_name(path)
             ),
             OwoStyle::new().green().bold(),
@@ -435,10 +514,94 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// The label a project is listed under: its full path, with the home
+/// directory abbreviated to `~`.
+///
+/// A leaf name alone would render `~/work/api` and `~/oss/api` as two
+/// identical rows, and could not be pasted back into `offcut clean <path>`,
+/// which needs a real path. Over-long labels are truncated from the left
+/// (see `pad_path`) so the distinguishing tail always survives.
+fn project_label(path: &Path) -> String {
+    let display = path.display().to_string();
+    let Some(home) = dirs::home_dir() else {
+        return display;
+    };
+    let home = home.display().to_string();
+    if home.is_empty() || !display.starts_with(&home) {
+        return display;
+    }
+    let rest = &display[home.len()..];
+    if rest.is_empty() {
+        return "~".to_string();
+    }
+    if rest.starts_with(std::path::MAIN_SEPARATOR) {
+        return format!("~{rest}");
+    }
+    display
+}
+
 fn pad_or_truncate(text: &str, width: usize) -> String {
     let truncated = truncate_cols(text, width);
     let pad = width.saturating_sub(truncated.width());
     format!("{truncated}{}", " ".repeat(pad))
+}
+
+/// Right-align `text` in `width` display columns.
+fn pad_start(text: &str, width: usize) -> String {
+    let truncated = truncate_cols(text, width);
+    let pad = width.saturating_sub(truncated.width());
+    format!("{}{truncated}", " ".repeat(pad))
+}
+
+/// Left-align a path in `width` display columns, truncating from the *left*
+/// so the leaf (the part that distinguishes one row from another) survives.
+fn pad_path(text: &str, width: usize) -> String {
+    let truncated = truncate_path_cols(text, width);
+    let pad = width.saturating_sub(truncated.width());
+    format!("{truncated}{}", " ".repeat(pad))
+}
+
+/// Style `plain` and pad the result to `width` display columns.
+///
+/// The padding is measured on the unstyled text and appended outside the
+/// escape sequence: a format-spec width (`{:<N}`) counts chars, so a styled
+/// cell would overrun `N` by the length of its ANSI codes and shift every
+/// column to its right.
+fn styled_padded(plain: &str, width: usize, style: OwoStyle, emit_colors: bool) -> String {
+    let truncated = truncate_cols(plain, width);
+    let pad = width.saturating_sub(truncated.width());
+    format!(
+        "{}{}",
+        color_for_stream(&truncated, style, emit_colors),
+        " ".repeat(pad)
+    )
+}
+
+/// Truncate to `width` display columns keeping the *tail*, with a leading
+/// ellipsis. Mirrors the progress writer's path treatment.
+fn truncate_path_cols(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let ellipsis = "…";
+    if width <= ellipsis.width() {
+        return ellipsis.to_string();
+    }
+    let keep = width - ellipsis.width();
+    let mut cols = 0;
+    let mut start = text.len();
+    for (i, ch) in text.char_indices().rev() {
+        let ch_width = ch.width().unwrap_or(0);
+        if cols + ch_width > keep {
+            break;
+        }
+        cols += ch_width;
+        start = i;
+    }
+    format!("{ellipsis}{}", &text[start..])
 }
 
 fn truncate_cols(text: &str, width: usize) -> String {
@@ -767,17 +930,32 @@ mod tests {
         assert!(!rendered.contains("\x1b["));
     }
 
+    /// The review panel states each item's fate but asks nothing: the single
+    /// confirmation the user answers is the real prompt on stderr. A question
+    /// rendered here would be a second copy nobody reads an answer for.
     #[test]
-    fn clean_review_renders_confirmation_control() {
-        let items = vec![CleanItem {
-            rel_path: std::path::PathBuf::from("node_modules"),
-            is_dir: true,
-            classification: Classification::Safe,
-        }];
+    fn clean_review_lists_fates_and_asks_nothing() {
+        let items = vec![
+            CleanItem {
+                rel_path: std::path::PathBuf::from("node_modules"),
+                is_dir: true,
+                classification: Classification::Safe,
+            },
+            CleanItem {
+                rel_path: std::path::PathBuf::from("scratch.tmp"),
+                is_dir: false,
+                classification: Classification::Surfaced,
+            },
+        ];
+        let rows = clean_review_rows(&items, |item| match item.classification {
+            Classification::Protected => "kept",
+            Classification::Safe => "will delete",
+            Classification::Surfaced => "needs approval",
+        });
         let rendered = format_clean_review(
             Path::new("/workspace/dashboard"),
             "main · clean tree · remote ✓ pushed",
-            &items,
+            &rows,
             Some("1.2 GB"),
             90,
             false,
@@ -785,7 +963,173 @@ mod tests {
         .join("\n");
         assert!(rendered.contains("GITIGNORED REVIEW"));
         assert!(rendered.contains("node_modules/"));
-        assert!(rendered.contains("? Remove these gitignored paths? [y/N]"));
+        assert!(rendered.contains("safe-to-delete"));
+        assert!(rendered.contains("will delete"));
+        assert!(rendered.contains("needs approval"));
+        assert!(rendered.contains("total · 2 item(s) · ~1.2 GB"));
+        assert!(
+            !rendered.contains('?'),
+            "the panel must not embed a prompt: {rendered}"
+        );
+        assert!(!rendered.contains("[y/N]"), "review: {rendered}");
+    }
+
+    /// The same panel renders the post-approval fates, so a `--force` run
+    /// never labels an item `needs approval` while deleting it.
+    #[test]
+    fn clean_review_carries_post_approval_fates() {
+        let items = vec![CleanItem {
+            rel_path: std::path::PathBuf::from("scratch.tmp"),
+            is_dir: false,
+            classification: Classification::Surfaced,
+        }];
+        let rows = clean_review_rows(&items, |_| "deleting");
+        let rendered =
+            format_clean_review(Path::new("/w/dash"), "main", &rows, None, 90, false).join("\n");
+        assert!(rendered.contains("deleting"), "review: {rendered}");
+        assert!(!rendered.contains("needs approval"), "review: {rendered}");
+    }
+
+    /// Item columns are aligned by display width, not by char count: a path
+    /// of wide (CJK) characters must not push the label column right.
+    #[test]
+    fn clean_review_item_columns_align_by_display_width() {
+        let items = vec![
+            CleanItem {
+                rel_path: std::path::PathBuf::from("node_modules"),
+                is_dir: true,
+                classification: Classification::Safe,
+            },
+            CleanItem {
+                rel_path: std::path::PathBuf::from("工程目录"),
+                is_dir: true,
+                classification: Classification::Safe,
+            },
+        ];
+        let rows = clean_review_rows(&items, |_| "will delete");
+        let rendered = format_clean_review(Path::new("/w/dash"), "main", &rows, None, 90, false);
+        let label_columns: Vec<usize> = rendered
+            .iter()
+            .filter(|line| line.contains("safe-to-delete"))
+            .map(|line| {
+                let idx = line.find("safe-to-delete").unwrap();
+                line[..idx].width()
+            })
+            .collect();
+        assert_eq!(label_columns.len(), 2, "rendered: {rendered:?}");
+        assert_eq!(
+            label_columns[0], label_columns[1],
+            "wide-character paths must not shift the label column: {rendered:?}"
+        );
+    }
+
+    /// Every wide-table column starts at the header's column, for every
+    /// status. Colored labels carry ANSI escapes whose bytes must not be
+    /// counted as padding — the regression this guards is a table that is
+    /// ragged whenever color is on, which is the default on a TTY.
+    #[test]
+    fn table_columns_line_up_under_color_and_plain() {
+        let rows = vec![
+            ProjectTableRow {
+                path: Path::new("/workspace/dashboard"),
+                status: Status::Cleanable,
+                size: Some("1.2 GB"),
+                branch: Some("main"),
+                changed: Some("2h ago"),
+            },
+            ProjectTableRow {
+                path: Path::new("/workspace/design-system"),
+                status: Status::Wip,
+                size: Some("540 MB"),
+                branch: Some("feat/tokens"),
+                changed: Some("12m ago"),
+            },
+            ProjectTableRow {
+                path: Path::new("/workspace/scratch"),
+                status: Status::NoGit,
+                size: None,
+                branch: None,
+                changed: None,
+            },
+        ];
+        let plain = format_project_table(&rows, 1, Some("1.2 GB"), 100, false);
+        let colored = format_project_table(&rows, 1, Some("1.2 GB"), 100, true);
+        assert!(
+            colored.join("\n").contains("\x1b["),
+            "colored table should carry escapes"
+        );
+        let stripped: Vec<String> = colored.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(
+            stripped, plain,
+            "color must not change the visible layout by a single column"
+        );
+
+        let status_col = plain[0].find("STATUS").unwrap();
+        for (i, row) in rows.iter().enumerate() {
+            let line = &plain[i + 1];
+            assert!(
+                line[status_col..].starts_with(row.status.label()),
+                "row {i} status column misaligned: {line:?}"
+            );
+        }
+    }
+
+    /// The PROJECT column keeps enough path to tell two same-named projects
+    /// apart — a leaf name alone renders them as identical rows.
+    #[test]
+    fn table_project_column_disambiguates_same_leaf_names() {
+        let rows = vec![
+            ProjectTableRow {
+                path: Path::new("/work/api"),
+                status: Status::Cleanable,
+                size: None,
+                branch: None,
+                changed: None,
+            },
+            ProjectTableRow {
+                path: Path::new("/oss/api"),
+                status: Status::Cleanable,
+                size: None,
+                branch: None,
+                changed: None,
+            },
+        ];
+        let rendered = format_project_table(&rows, 2, None, 100, false);
+        assert!(rendered[1].contains("/work/api"), "{:?}", rendered[1]);
+        assert!(rendered[2].contains("/oss/api"), "{:?}", rendered[2]);
+        assert_ne!(rendered[1], rendered[2]);
+    }
+
+    /// Over-long project paths keep their tail (the distinguishing part) and
+    /// lose the head to a leading ellipsis.
+    #[test]
+    fn table_project_column_truncates_from_the_left() {
+        let rows = vec![ProjectTableRow {
+            path: Path::new("/very/deeply/nested/workspace/tree/for/the/team/dashboard"),
+            status: Status::Cleanable,
+            size: None,
+            branch: None,
+            changed: None,
+        }];
+        let rendered = format_project_table(&rows, 1, None, 84, false);
+        assert!(rendered[1].contains('…'), "{:?}", rendered[1]);
+        assert!(rendered[1].contains("dashboard"), "{:?}", rendered[1]);
+    }
+
+    /// The success panel reports the size it is handed — the caller measures
+    /// the approved items — and degrades to a count-only line without one.
+    #[test]
+    fn clean_success_reports_reclaimed_size_when_known() {
+        let with_size =
+            format_clean_success(Path::new("/w/dashboard"), 2, Some("1.2 GB"), false).join("\n");
+        assert!(with_size.contains("~1.2 GB"), "{with_size}");
+        assert!(with_size.contains("removed 2 item(s)"), "{with_size}");
+        assert!(with_size.contains("dashboard"), "{with_size}");
+        assert!(!with_size.contains("\x1b["), "{with_size}");
+
+        let without = format_clean_success(Path::new("/w/dashboard"), 2, None, false).join("\n");
+        assert!(without.contains("✓ removed 2 item(s)"), "{without}");
+        assert!(!without.contains("reclaimed"), "{without}");
     }
 
     #[test]
@@ -808,5 +1152,83 @@ mod tests {
     #[test]
     fn terminal_ui_disabled_for_non_tty_streams() {
         assert!(!terminal_ui_enabled(false));
+    }
+
+    /// `TERM=dumb` degrades to the plain presentation even on a real TTY,
+    /// and a capable (or unset) `TERM` on a TTY keeps the rich one. The gate
+    /// takes `TERM` as an argument so this needs no environment mutation.
+    #[test]
+    fn terminal_ui_gate_honors_term_and_tty() {
+        let dumb = std::ffi::OsString::from("dumb");
+        let capable = std::ffi::OsString::from("xterm-256color");
+        assert!(!terminal_ui_enabled_with(true, Some(&dumb)));
+        assert!(terminal_ui_enabled_with(true, Some(&capable)));
+        assert!(terminal_ui_enabled_with(true, None));
+        // A non-TTY stream is plain regardless of TERM: piped output must
+        // stay line-oriented for scripts.
+        assert!(!terminal_ui_enabled_with(false, Some(&capable)));
+        assert!(!terminal_ui_enabled_with(false, None));
+    }
+
+    /// The color gate is per-stream but shares the `NO_COLOR`/`CLICOLOR`
+    /// conventions: a non-TTY stream never emits color.
+    #[test]
+    fn color_gate_is_off_for_non_tty_streams() {
+        assert!(!color_enabled_for(false));
+    }
+
+    /// Every rich renderer degrades to plain text with `emit_colors = false`
+    /// — the state a piped stream, `NO_COLOR`, or `TERM=dumb` lands in.
+    #[test]
+    fn rich_renderers_emit_no_escapes_when_colors_are_off() {
+        let table_rows = vec![ProjectTableRow {
+            path: Path::new("/workspace/dashboard"),
+            status: Status::Cleanable,
+            size: Some("1.2 GB"),
+            branch: Some("main"),
+            changed: Some("2h ago"),
+        }];
+        let items = vec![CleanItem {
+            rel_path: std::path::PathBuf::from("node_modules"),
+            is_dir: true,
+            classification: Classification::Safe,
+        }];
+        let review_rows = clean_review_rows(&items, |_| "will delete");
+        let rendered = [
+            format_project_table(&table_rows, 1, Some("1.2 GB"), 100, false),
+            format_project_table(&table_rows, 1, Some("1.2 GB"), 40, false),
+            format_clean_review(Path::new("/w/dash"), "main", &review_rows, None, 90, false),
+            format_blocked_project(
+                Path::new("/w/dash"),
+                Status::Wip,
+                "main · uncommitted changes",
+                &[" M src/a.ts".to_string()],
+                Some("540 MB"),
+                false,
+            ),
+            format_clean_success(Path::new("/w/dash"), 1, Some("1.2 GB"), false),
+        ]
+        .concat()
+        .join("\n");
+        assert!(!rendered.contains("\x1b["), "plain rendering: {rendered:?}");
+    }
+
+    /// Strip ANSI SGR sequences so a colored rendering can be compared
+    /// against the plain one column for column.
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for next in chars.by_ref() {
+                    if next == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 }

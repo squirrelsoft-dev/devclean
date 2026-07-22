@@ -11,7 +11,7 @@
 //!
 //! | flag            | all-cleanup prompt | per-item prompts | per-project prompt | execute?
 //! |-----------------|-------------------|------------------|--------------------|--------|
-//! | interactive     | yes → y/n         | yes → delete/keep | yes → clean?      | yes if approved
+//! | interactive     | yes → [y/N]       | yes → delete/keep | yes → remove?     | yes if approved
 //! | --force         | no                | no               | no                 | yes
 //! | --dry-run       | no                | no               | no                 | no
 //! | --force --dry-run | no              | no               | no                 | no (show)
@@ -20,19 +20,26 @@
 //!
 //! 1. **Report phase** — show every project sorted by status, report each
 //!    non-cleanable one with a one-line reason, list each cleanable one.
-//! 2. **All-cleanup prompt** — "Clean the N cleanable projects? (y/n)". If
-//!    no (or EOF / --force / --dry-run), exit without touching any project:
-//!    no further prompts are shown and every result comes back unapproved.
+//! 2. **All-cleanup prompt** — "Remove gitignored paths from the N cleanable
+//!    projects? [y/N]" (`(y/n)` on a plain stderr). If no (or EOF / --force /
+//!    --dry-run), exit without touching any project: no further prompts are
+//!    shown and every result comes back unapproved.
 //! 3. **Per-project loop** (in sorted order, each cleanable):
 //!    a. enumerate untracked items (dry-run);
-//!    b. print the project path and the list of each item that would be
-//!    deleted;
+//!    b. print the review of the project: its path and every enumerated item
+//!    with its classification and fate — the rich review panel on a capable
+//!    stderr, the plain listing otherwise;
 //!    c. for each `Surfaced` item: prompt keep or delete; record approval;
-//!    d. prompt per-project confirmation ("Clean <path>? (y/n)"); record
-//!    approval;
+//!    d. prompt per-project confirmation ("Remove these gitignored paths from
+//!    <path>? [y/N]"); record approval;
 //!    e. if approved (or --force): execute `git clean -xfd -e <globs>`;
 //!    if --dry-run: print the report only.
 //! 4. **Zero cleanable** — summary, exit 0, no prompts.
+//!
+//! Every question the user answers is asked exactly once, from this module,
+//! on stderr. The review rendering is deliberately question-free (see
+//! `output::format_clean_review`) so no other stream can show a second,
+//! unanswerable copy of the confirmation.
 //!
 //! ## Approval contract
 //!
@@ -71,11 +78,29 @@ pub struct InteractiveFlowInputs {
     pub all_projects: Vec<(PathBuf, Status)>,
     /// Each cleanable (status-5) project's enumerated items, in the same
     /// order as `all_projects`.
-    pub per_project_items: Vec<(PathBuf, Vec<CleanItem>)>,
+    pub per_project_items: Vec<CleanableProject>,
     /// Force: skip all prompts, auto-approve each surfaced item.
     pub force: bool,
     /// Dry-run: show what would be deleted, delete nothing.
     pub dry_run: bool,
+}
+
+/// One cleanable project as the flow sees it: the enumerated items plus the
+/// context the review needs to be worth reading before answering.
+///
+/// `branch_line` and `total_size` are display-only and are computed by the
+/// caller (git plumbing and the sizing pass both live in `main`); they may be
+/// empty/`None` when the stream showing the review cannot render the panel.
+#[derive(Debug, Clone)]
+pub struct CleanableProject {
+    /// The project path.
+    pub path: PathBuf,
+    /// Each untracked item enumerated for this project.
+    pub items: Vec<CleanItem>,
+    /// One-line branch/tree state, e.g. `main · clean tree · remote ✓ pushed`.
+    pub branch_line: String,
+    /// Human-readable reclaimable size for the whole project, if computed.
+    pub total_size: Option<String>,
 }
 
 /// Per-project result produced by the interactive flow.
@@ -164,23 +189,52 @@ pub fn collect_all_approval<R: BufRead>(reader: &mut R, num_cleanable: usize) ->
     matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
 }
 
+/// The fate each item carries *before* any approval is collected. Shared by
+/// the plain listing and the rich review panel so the two cannot drift.
+fn pending_fate(item: &CleanItem) -> &'static str {
+    match item.classification {
+        Classification::Protected => "kept",
+        Classification::Safe => "will delete",
+        Classification::Surfaced => "needs approval",
+    }
+}
+
 /// Print the pre-approval report for one project: its path and every
 /// enumerated item with its classification and fate. Goes to stderr — the
 /// same stream as the prompts — so the user sees exactly what they are
 /// about to approve, in order, before any question is asked.
-fn print_project_report(path: &std::path::Path, items: &[CleanItem]) {
-    eprintln!("{}:", path.display());
+///
+/// A capable stderr gets the rich review panel; anything else (piped,
+/// redirected, `TERM=dumb`) keeps the plain line-oriented listing so scripts
+/// and logs read the same as they always have.
+fn print_project_report(project: &CleanableProject) {
+    if output::stderr_terminal_ui_enabled() {
+        let rows = output::clean_review_rows(&project.items, pending_fate);
+        for line in output::format_clean_review(
+            &project.path,
+            &project.branch_line,
+            &rows,
+            project.total_size.as_deref(),
+            output::terminal_width(),
+            output::stderr_color_enabled(),
+        ) {
+            eprintln!("{line}");
+        }
+        return;
+    }
+    eprintln!("{}:", project.path.display());
     eprintln!("  Gitignored review");
-    for item in items {
-        let (label, fate) = match item.classification {
-            Classification::Protected => ("protected", "kept"),
-            Classification::Safe => ("safe-to-delete", "will delete"),
-            Classification::Surfaced => ("surfaced", "needs approval"),
+    for item in &project.items {
+        let label = match item.classification {
+            Classification::Protected => "protected",
+            Classification::Safe => "safe-to-delete",
+            Classification::Surfaced => "surfaced",
         };
         eprintln!(
-            "  {}{} [{label}] ({fate})",
+            "  {}{} [{label}] ({})",
             item.rel_path.display(),
             if item.is_dir { "/" } else { "" },
+            pending_fate(item),
         );
     }
 }
@@ -284,11 +338,12 @@ pub fn run<R: BufRead>(inputs: InteractiveFlowInputs, reader: &mut R) -> Vec<Pro
 
     // Step 3: per-project loop.
     let mut results: Vec<ProjectResult> = Vec::new();
-    for (path, items) in &inputs.per_project_items {
+    for project in &inputs.per_project_items {
+        let (path, items) = (&project.path, &project.items);
         // Show what would be deleted, then ask. A declined all-cleanup
         // prompt suppresses every later prompt: the user already said no.
         let item_approvals: Vec<(PathBuf, bool)> = if interactive && all_approved {
-            print_project_report(path, items);
+            print_project_report(project);
             collect_each_item(reader, path, items)
         } else {
             Vec::new()
@@ -364,11 +419,20 @@ mod tests {
         }
     }
 
+    fn cleanable(path: &str, items: &[CleanItem]) -> CleanableProject {
+        CleanableProject {
+            path: PathBuf::from(path),
+            items: items.to_vec(),
+            branch_line: "main · clean tree · remote ✓ pushed".to_string(),
+            total_size: None,
+        }
+    }
+
     fn inputs_for(items: &[CleanItem], force: bool, dry_run: bool) -> InteractiveFlowInputs {
         let path = PathBuf::from("/tmp/project");
         InteractiveFlowInputs {
-            all_projects: vec![(path.clone(), Status::Cleanable)],
-            per_project_items: vec![(path, items.to_vec())],
+            all_projects: vec![(path, Status::Cleanable)],
+            per_project_items: vec![cleanable("/tmp/project", items)],
             force,
             dry_run,
         }
@@ -575,10 +639,12 @@ mod tests {
                 (PathBuf::from("/tmp/aa-no-git"), Status::NoGit),
                 (cleanable.clone(), Status::Cleanable),
             ],
-            per_project_items: vec![(
-                cleanable.clone(),
-                vec![make_item("target", Classification::Safe, true)],
-            )],
+            per_project_items: vec![CleanableProject {
+                path: cleanable.clone(),
+                items: vec![make_item("target", Classification::Safe, true)],
+                branch_line: String::new(),
+                total_size: None,
+            }],
             force: false,
             dry_run: true,
         };

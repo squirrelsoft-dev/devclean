@@ -127,13 +127,18 @@ On a capable terminal, `offcut list`, the default `offcut` run, and
   single live spinner line with the current path and, where known, an `N/M`
   counter. Press Ctrl-C to cancel; no partially approved delete is resumed.
 - **Workspace summary** — after discovery/classification, projects are shown
-  in a table with project name, status, reclaimable size, branch, and last
-  commit age where git can report it. Narrow terminals fall back to stacked
-  rows so paths and labels do not wrap into adjacent columns.
+  in a table with the project path (abbreviated with `~`, and truncated from
+  the left so the leaf stays readable), status, reclaimable size, branch, and
+  last commit age where git can report it. Narrow terminals fall back to
+  stacked rows so paths and labels do not wrap into adjacent columns.
 - **Clean review** — each cleanable project has a review panel showing its
   branch state and every gitignored path Offcut would remove or ask about,
-  followed by the same `[y/N]` approval controls used by the plain prompt
-  flow.
+  each with its classification and its fate. The panel is printed
+  immediately before the real `[y/N]` approval prompt it belongs to and asks
+  nothing itself, so the destructive confirmation is asked exactly once. In
+  `--force` / `--dry-run` runs, where no question is asked, the panel is
+  printed with the fate each item actually gets (`deleting`, `would delete`,
+  `would prompt`, `kept`).
 - **Blocked** — a targeted `offcut clean <PROJECT_PATH>` against a
   non-cleanable project shows the refusal reason, relevant `git status`
   detail for WIP trees, and the command to rerun after the project is clean
@@ -406,9 +411,11 @@ later phases: while each project's git state is examined the line reads
 `<spinner> classifying N/M: <path>`, while each cleanable project's
 reclaimable size is computed the line reads `<spinner> sizing N/M: <path>`
 (single-pass — bytes are stored once and the aggregate is the sum of those
-already-computed bytes, not a second walk), and while an approved project's
-untracked junk is deleted it reads `<spinner> cleaning N/M: <path>` (N is the
-1-based project counter, M the total). When stdout is piped, redirected, or
+already-computed bytes, not a second walk), while the branch and last-commit
+columns of the summary table are read from git it reads
+`<spinner> reading N/M: <path>`, and while an approved project's untracked
+junk is deleted it reads `<spinner> cleaning N/M: <path>` (N is the 1-based
+project counter, M the total). When stdout is piped, redirected, or
 `TERM=dumb`, nothing is rendered — a stream of CR-terminated partial paths
 would be garbage in a pipe or log file. Terminal width is resolved via the
 `terminal_size` crate, falling back to `COLUMNS` then a default of 80; paths

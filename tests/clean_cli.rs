@@ -93,6 +93,27 @@ where
     run_with_stdin(args, "")
 }
 
+/// Run the real binary with an extra environment variable set, returning
+/// stdout. Used to exercise the terminal-capability fallbacks end to end.
+fn run_with_env<I, S>(args: I, key: &str, value: &str) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let exe = env!("CARGO_BIN_EXE_offcut");
+    let out = std::process::Command::new(exe)
+        .args(args)
+        .env("HOME", "/nonexistent-home")
+        .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+        .env(key, value)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// Run the real binary with `input` piped to stdin — the interactive flow
 /// reads its approval answers from there. Returns stdout.
 fn run_with_stdin<I, S>(args: I, input: &str) -> String
@@ -986,5 +1007,66 @@ fn clean_project_path_force_skips_non_cleanable_project() {
     assert!(
         !out.contains("deleted"),
         "non-cleanable target must not report a deletion: {out}"
+    );
+}
+
+/// Non-interactive compatibility: with stdout redirected (as it is here),
+/// `offcut list` and the clean preview keep the plain line-oriented shape —
+/// no ANSI escapes, no rich table header, no live progress line, and no
+/// confirmation question on stdout. `TERM=dumb` must not change that either
+/// way: it can only ever move output *toward* plain.
+#[test]
+fn piped_output_stays_plain_including_term_dumb() {
+    let root = root_for("plain-fallback");
+    init_repo_with_commit(&root);
+    add_pushed_remote(&root);
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), "safe junk").unwrap();
+
+    let home = root_for("home-plain-fallback");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[root.to_str().unwrap()], 2);
+    let cfg = config.to_str().unwrap().to_string();
+
+    for term in ["xterm-256color", "dumb"] {
+        let listing = run_with_env(["--config", cfg.as_str(), "list"], "TERM", term);
+        assert!(
+            !listing.contains('\u{1b}'),
+            "TERM={term}: piped listing must carry no ANSI escapes: {listing:?}"
+        );
+        assert!(
+            !listing.contains("PROJECT"),
+            "TERM={term}: piped listing must not render the rich table: {listing}"
+        );
+        assert!(
+            !listing.contains('\r'),
+            "TERM={term}: piped listing must render no live progress line: {listing:?}"
+        );
+        assert!(
+            listing.contains("listing:") && listing.contains("cleanable"),
+            "TERM={term}: piped listing keeps the plain rows: {listing}"
+        );
+
+        let preview = run_with_env(
+            ["--dry-run", "--config", cfg.as_str(), "clean"],
+            "TERM",
+            term,
+        );
+        assert!(
+            !preview.contains('\u{1b}'),
+            "TERM={term}: piped preview must carry no ANSI escapes: {preview:?}"
+        );
+        assert!(
+            preview.contains("safe-to-delete") && preview.contains("(would delete)"),
+            "TERM={term}: piped preview keeps the plain per-item verdicts: {preview}"
+        );
+        assert!(
+            !preview.contains("[y/N]"),
+            "TERM={term}: stdout must never carry a confirmation prompt: {preview}"
+        );
+    }
+    assert!(
+        root.join("target/bin").is_file(),
+        "preview must not delete anything"
     );
 }
