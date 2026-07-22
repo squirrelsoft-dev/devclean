@@ -30,6 +30,8 @@ cargo run -- clean
 cargo test
 ```
 
+The Qlty agent stop hooks and their fixture suite: [docs/qlty-agent-hooks.md](docs/qlty-agent-hooks.md).
+
 ## Release
 
 `Cargo.toml`'s package `version` is the release version source of truth. To
