@@ -65,6 +65,9 @@ default = true
 name = "actionlint"
 
 [[plugin]]
+name = "biome"
+
+[[plugin]]
 name = "clippy"
 
 [[plugin]]
@@ -73,6 +76,12 @@ name = "osv-scanner"
 [[plugin]]
 name = "ripgrep"
 mode = "comment"
+
+[[plugin]]
+name = "ruff"
+
+[[plugin]]
+name = "shellcheck"
 
 [[plugin]]
 name = "trufflehog"

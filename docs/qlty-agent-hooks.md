@@ -21,17 +21,34 @@ agent a blocking reason that says only `qlty check exited with code N`.
 Qlty was initialized with `.qlty/qlty.toml`. The `.qlty/.gitignore` keeps Qlty
 cache/plugin churn out of git while allowing checked-in config and hooks.
 
+The plugin set covers the hook implementation itself, not just Offcut's Rust
+sources: `ruff` for `.qlty/hooks/qlty-check.py`, `biome` for
+`.pi/extensions/qlty-stop-hook.ts`, and `shellcheck` for
+`tests/agent_hooks_config.sh`. A gate that cannot see its own wrapper would
+report clean while the wrapper rots, so `tests/agent_hooks_config.sh` asserts
+those three plugins stay enabled.
+
 The wrapper distinguishes repository problems from environment problems:
 
 - **Qlty reported issues**, `.qlty/qlty.toml` is missing, or the repository root
   cannot be resolved because the hook ran outside a repository: the stop is
   blocked, because the agent can act on all three from inside the repository.
-- **`qlty` or `git` is not installed or not on PATH**, or `qlty check` outran
-  its time budget: the stop is *not* blocked. The wrapper prints the reason on
-  stderr and exits non-zero, which every supported tool treats as a non-blocking
-  hook error, so the message is visible without holding the session open.
-  Contributors missing either tool are never asked to change committed hook
-  configuration to get their agent to stop.
+- **`qlty` or `git` is not installed or not on PATH**, `qlty check` outran its
+  time budget, or `qlty check` could not produce a report at all: the stop is
+  *not* blocked. The wrapper prints the reason on stderr and exits non-zero,
+  which every supported tool treats as a non-blocking hook error, so the message
+  is visible without holding the session open. Contributors missing either tool
+  are never asked to change committed hook configuration to get their agent to
+  stop.
+
+The last case is read off `qlty check`'s exit code, which is the stable signal
+for the split: **1** means Qlty ran and has findings to report (the `--no-fail` /
+`--no-error` failure path), while **any other non-zero code** — 99 on the
+current build — means Qlty errored out before it could report. Verified against
+`qlty 0.636.0`: findings exit `1`; an unknown plugin name, a plugin install that
+404s, and a directory with no Qlty setup all exit `99`. The wrapper keys on
+"exit code 1" rather than "exit code 99" so that a future Qlty error code still
+fails open instead of blocking on findings that do not exist.
 
 `qlty check` runs under a wrapper-owned budget (540s by default, overridable
 with `OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS`) that is deliberately under each host's
@@ -45,6 +62,15 @@ process group (SIGTERM, then SIGKILL) before reporting a distinct
 The two cases are separate exception types (`RootResolutionError` versus
 `ToolUnavailableError`) rather than a parsed message, so every future failure
 path has to pick a side deliberately.
+
+Root resolution asks `git rev-parse --show-toplevel` first but only accepts that
+answer when the named root owns `.qlty/qlty.toml`; otherwise it walks the hook's
+cwd upward for the nearest directory that does. A scratch repository `git init`ed
+inside the worktree — routine for a tool whose job is walking git projects —
+would otherwise be named as the root and block every stop with a "restore the
+Qlty config" instruction that would scatter a stray `.qlty/` into it. The git
+root is still what the misconfiguration message names when no ancestor owns a
+config, so a genuinely Qlty-less repository still blocks.
 
 ## Codex
 
@@ -171,10 +197,18 @@ Run it directly while iterating:
 ./tests/agent_hooks_config.sh
 ```
 
-The script validates the Codex, Claude Code, and Pi project config shapes, then
-exercises `.qlty/hooks/qlty-check.py` with stubbed `qlty` binaries for success,
-failure, root resolution, the `stop_hook_active` recursion guard, the non-JSON
-(`--tool pi`) stderr path for a repository with no `.qlty/qlty.toml`, the
-missing-binary paths where `qlty` (and then `git`) are absent from `PATH`, and a
-timeout whose stub spawns a grandchild — asserting both the distinct non-blocking
-message and that the grandchild died with the killed process group.
+The script derives the repository root from its own location rather than from
+`git rev-parse`, for the same reason the Pi extension does: it has to work in a
+source tarball with no `.git` and inside a checkout vendored under another
+repository.
+
+It validates the Codex, Claude Code, and Pi project config shapes plus the
+plugin coverage above, then exercises `.qlty/hooks/qlty-check.py` with stubbed
+`qlty` binaries for success, an exit-1 findings failure that blocks, an exit-99
+setup failure that fails open for all three tools, root resolution from a nested
+git repository that owns no Qlty config, the `stop_hook_active` recursion guard,
+the non-JSON (`--tool pi`) stderr path for a repository with no
+`.qlty/qlty.toml`, the missing-binary paths where `qlty` (and then `git`) are
+absent from `PATH`, and a timeout whose stub spawns a grandchild — asserting both
+the distinct non-blocking message and that the grandchild died with the killed
+process group.

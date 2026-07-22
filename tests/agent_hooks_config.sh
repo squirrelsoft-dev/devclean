@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(git rev-parse --show-toplevel)"
+# This script lives at <root>/tests, so its own location names the root exactly.
+# Asking git would fail in a source tarball with no .git, and would name the outer
+# root when Offcut is vendored as a plain subdirectory of another repository.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${repo_root}"
 
 refute_match() {
@@ -17,6 +20,12 @@ import tomllib
 from pathlib import Path
 
 root = Path.cwd()
+
+qlty_config = tomllib.loads((root / ".qlty" / "qlty.toml").read_text())
+plugin_names = {plugin["name"] for plugin in qlty_config["plugin"]}
+# The hook implementation this config gates is Python, TypeScript, and Bash. Without
+# these plugins the quality gate would report clean on its own sources.
+assert {"ruff", "biome", "shellcheck"} <= plugin_names, plugin_names
 
 codex_project_config = root / ".codex" / "config.toml"
 if codex_project_config.exists():
@@ -60,11 +69,12 @@ assert "qlty-check.py" in pi_extension
 assert "OFFCUT_QLTY_STOP_HOOK_ACTIVE" in pi_extension
 assert 'event.reason !== "quit"' in pi_extension
 assert "console.error(message)" in pi_extension
-assert pi_extension.index("Qlty stop hook: running qlty check") < pi_extension.index('pi.exec("python3"')
+assert '"python3"' in pi_extension
+assert pi_extension.index("Qlty stop hook: running qlty check") < pi_extension.index("pi.exec(")
 # The extension file lives at <root>/.pi/extensions, so its own location names the
 # root exactly; shelling out to git would reintroduce a nested-repo failure mode.
 assert 'resolve(import.meta.dirname, "..", "..")' in pi_extension
-assert 'pi.exec("git"' not in pi_extension
+assert '"git"' not in pi_extension
 PY
 
 python3 -m py_compile "${repo_root}/.qlty/hooks/qlty-check.py"
@@ -95,12 +105,25 @@ test ! -s "${tmp}/success.out"
 grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
 grep -F "args=check --no-progress --no-upgrade-check --print-errors" "${QLTY_STUB_LOG}" >/dev/null
 
+mkdir -p "${tmp}/repo/nested"
+git -C "${tmp}/repo/nested" init --quiet
+export QLTY_STUB_LOG="${tmp}/qlty-nested.log"
+
+printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo/nested" |
+  python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool codex > "${tmp}/nested.out"
+
+test ! -s "${tmp}/nested.out"
+# A nested git repository owning no .qlty/qlty.toml must not become the root: git
+# names it, but the wrapper falls through to the nearest ancestor that owns a config
+# instead of blocking the stop over a config the nested repo was never meant to have.
+grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
+
 cat > "${tmp}/bin/qlty" <<'SH'
 #!/usr/bin/env bash
 printf 'cwd=%s\nargs=%s\n' "$PWD" "$*" > "${QLTY_STUB_LOG:?}"
 echo "problem from stdout"
 echo "problem from stderr" >&2
-exit 7
+exit 1
 SH
 chmod +x "${tmp}/bin/qlty"
 
@@ -120,6 +143,36 @@ assert "problem from stderr" in payload["reason"]
 PY
 
 grep -F "cwd=${repo_real}" "${QLTY_STUB_LOG}" >/dev/null
+
+# Qlty exits 1 when it has findings to report and a different code (99 for this build)
+# when it could not produce a report at all — a failed plugin install, a cold plugin
+# cache with no network, an unsupported runtime. Those are environment failures, so
+# they must fail open visibly rather than order the agent to fix findings that do not
+# exist.
+cat > "${tmp}/bin/qlty" <<'SH'
+#!/usr/bin/env bash
+printf 'cwd=%s\nargs=%s\n' "$PWD" "$*" > "${QLTY_STUB_LOG:?}"
+echo "Error installing actionlint@1.7.9: status code 404" >&2
+exit 99
+SH
+chmod +x "${tmp}/bin/qlty"
+
+for tool in claude codex pi; do
+  export QLTY_STUB_LOG="${tmp}/qlty-setup-${tool}.log"
+  status=0
+  printf '{"cwd":"%s","hook_event_name":"Stop","stop_hook_active":false}\n' "${tmp}/repo" |
+    python3 "${repo_root}/.qlty/hooks/qlty-check.py" --tool "${tool}" \
+      > "${tmp}/setup-${tool}.out" 2> "${tmp}/setup-${tool}.err" || status=$?
+
+  test "${status}" -eq 1
+  test ! -s "${tmp}/setup-${tool}.out"
+  grep -F "qlty check was skipped" "${tmp}/setup-${tool}.err" >/dev/null
+  grep -F "exit code 99" "${tmp}/setup-${tool}.err" >/dev/null
+  grep -F "Error installing actionlint" "${tmp}/setup-${tool}.err" >/dev/null
+  grep -F "no repository file needs to change" "${tmp}/setup-${tool}.err" >/dev/null
+  refute_match "decision" "${tmp}/setup-${tool}.err"
+  refute_match "Fix the reported Qlty issues" "${tmp}/setup-${tool}.err"
+done
 
 export QLTY_STUB_LOG="${tmp}/qlty-guard.log"
 rm -f "${QLTY_STUB_LOG}"

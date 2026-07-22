@@ -17,6 +17,8 @@ TIMEOUT_ENV = "OFFCUT_QLTY_CHECK_TIMEOUT_SECONDS"
 MAX_REASON_CHARS = 6000
 DEFAULT_TIMEOUT_SECONDS = 540.0
 GROUP_KILL_GRACE_SECONDS = 5.0
+FINDINGS_EXIT_CODE = 1
+QLTY_CONFIG_RELATIVE = Path(".qlty") / "qlty.toml"
 
 
 class RootResolutionError(RuntimeError):
@@ -33,8 +35,12 @@ class CheckTimeoutError(RuntimeError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run qlty check for agent stop hooks")
-    parser.add_argument("--tool", choices=["codex", "claude", "pi", "generic"], default="generic")
-    parser.add_argument("--cwd", help="Fallback working directory when hook input omits cwd")
+    parser.add_argument(
+        "--tool", choices=["codex", "claude", "pi", "generic"], default="generic"
+    )
+    parser.add_argument(
+        "--cwd", help="Fallback working directory when hook input omits cwd"
+    )
     return parser.parse_args()
 
 
@@ -81,7 +87,12 @@ def skip_check(detail: str, remedy: str) -> int:
     return 1
 
 
+def qlty_config_path(root: Path) -> Path:
+    return root / QLTY_CONFIG_RELATIVE
+
+
 def find_repo_root(cwd: Path) -> Path:
+    git_root: Path | None = None
     git_unavailable = False
     try:
         git = subprocess.run(
@@ -95,13 +106,20 @@ def find_repo_root(cwd: Path) -> Path:
         detail = f"git could not be executed ({error})"
     else:
         if git.returncode == 0:
-            return Path(git.stdout.strip()).resolve()
-        detail = git.stderr.strip() or "not a git repository"
+            git_root = Path(git.stdout.strip()).resolve()
+            if qlty_config_path(git_root).is_file():
+                return git_root
+            detail = f"{git_root} is a git root without {QLTY_CONFIG_RELATIVE}"
+        else:
+            detail = git.stderr.strip() or "not a git repository"
 
     current = cwd.resolve()
     for candidate in [current, *current.parents]:
-        if (candidate / ".qlty" / "qlty.toml").is_file():
+        if qlty_config_path(candidate).is_file():
             return candidate
+
+    if git_root is not None:
+        return git_root
 
     message = f"could not resolve repository root from {cwd}: {detail}"
     if git_unavailable:
@@ -155,10 +173,17 @@ def run_check(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[st
     return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
-def build_reason(root: Path, result: subprocess.CompletedProcess[str]) -> str:
-    combined = "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip())
+def captured_output(result: subprocess.CompletedProcess[str]) -> str:
+    combined = "\n".join(
+        part.strip() for part in [result.stdout, result.stderr] if part.strip()
+    )
     if len(combined) > MAX_REASON_CHARS:
         combined = combined[:MAX_REASON_CHARS] + "\n... output truncated ..."
+    return combined
+
+
+def build_reason(root: Path, result: subprocess.CompletedProcess[str]) -> str:
+    combined = captured_output(result)
     if not combined:
         combined = f"qlty check exited with code {result.returncode}"
     return (
@@ -179,7 +204,12 @@ def main() -> int:
     if hook_input.get("stop_hook_active") is True:
         return allow_stop()
 
-    cwd_value = hook_input.get("cwd") or args.cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    cwd_value = (
+        hook_input.get("cwd")
+        or args.cwd
+        or os.environ.get("CLAUDE_PROJECT_DIR")
+        or os.getcwd()
+    )
     cwd = Path(str(cwd_value))
 
     try:
@@ -192,7 +222,7 @@ def main() -> int:
     except RootResolutionError as error:
         return block_stop(args.tool, str(error))
 
-    config_path = root / ".qlty" / "qlty.toml"
+    config_path = qlty_config_path(root)
     if not config_path.is_file():
         return block_stop(
             args.tool,
@@ -225,7 +255,18 @@ def main() -> int:
     if result.returncode == 0:
         return allow_stop()
 
-    return block_stop(args.tool, build_reason(root, result))
+    if result.returncode == FINDINGS_EXIT_CODE:
+        return block_stop(args.tool, build_reason(root, result))
+
+    detail = captured_output(result)
+    return skip_check(
+        f"qlty check could not complete in {root} (exit code {result.returncode})."
+        + (f"\n\n{detail}" if detail else ""),
+        f"qlty exits {FINDINGS_EXIT_CODE} when it has findings to report and a different "
+        "code when it cannot produce a report at all — an unknown plugin, a failed plugin "
+        "install, a cold-cache network failure, or an unsupported runtime. Repair the Qlty "
+        "setup with `qlty check --no-progress --no-upgrade-check --print-errors` by hand.",
+    )
 
 
 if __name__ == "__main__":
