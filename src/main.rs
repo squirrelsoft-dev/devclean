@@ -1208,22 +1208,13 @@ fn run_cleaning(
         // in. Shared by the plain listing and the rich panel so neither can
         // claim a fate the other contradicts.
         let fate_of = |item: &clean::CleanItem| -> &'static str {
-            if r.would_delete.contains(&item.rel_path) {
-                if will_execute {
-                    "deleting"
-                } else {
-                    "would delete"
-                }
-            } else if cli.dry_run
-                && !cli.force
-                && item.classification == clean::Classification::Surfaced
-            {
-                // A real interactive run would ask about this item, so the
-                // preview must not claim either fate.
-                "would prompt"
-            } else {
-                "kept"
-            }
+            item_fate(
+                item,
+                &r.would_delete,
+                r.project_approved,
+                cli.force,
+                cli.dry_run,
+            )
         };
         clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
         clean_progress.clear();
@@ -1359,6 +1350,125 @@ fn run_cleaning(
         }
     }
     Ok(())
+}
+
+// What this run will actually do to one item after approvals are known.
+// Used by both plain output and rich review rows so neither can claim a fate
+// the other contradicts.
+fn item_fate(
+    item: &clean::CleanItem,
+    would_delete: &[PathBuf],
+    project_approved: bool,
+    force: bool,
+    dry_run: bool,
+) -> &'static str {
+    let will_execute = project_approved && !dry_run;
+    if !project_approved && !dry_run {
+        return "kept";
+    }
+    if would_delete.contains(&item.rel_path) {
+        if will_execute {
+            "deleting"
+        } else {
+            "would delete"
+        }
+    } else if dry_run && !force && item.classification == clean::Classification::Surfaced {
+        // A real interactive run would ask about this item, so the preview
+        // must not claim either fate.
+        "would prompt"
+    } else {
+        "kept"
+    }
+}
+
+#[cfg(test)]
+mod item_fate_tests {
+    use super::*;
+
+    fn item(path: &str, classification: clean::Classification) -> clean::CleanItem {
+        clean::CleanItem {
+            rel_path: PathBuf::from(path),
+            is_dir: false,
+            classification,
+        }
+    }
+
+    fn rendered_fates(
+        items: &[clean::CleanItem],
+        would_delete: &[PathBuf],
+        project_approved: bool,
+    ) -> String {
+        let rows = output::clean_review_rows(items, |item| {
+            item_fate(item, would_delete, project_approved, false, false)
+        });
+        output::format_clean_review(
+            Path::new("/workspace/app"),
+            "main · clean tree · remote ✓ pushed",
+            &rows,
+            Some("10 KB"),
+            100,
+            false,
+        )
+        .join("\n")
+    }
+
+    /// Declining the all-cleanup prompt means no project was approved, so the
+    /// post-decision rich review must report every item as kept even though
+    /// the pre-decision plan included safe-listed paths in `would_delete`.
+    #[test]
+    fn declined_all_cleanup_rich_review_reports_every_item_kept() {
+        let items = vec![
+            item("target", clean::Classification::Safe),
+            item("scratch.txt", clean::Classification::Surfaced),
+        ];
+        let would_delete = vec![PathBuf::from("target"), PathBuf::from("scratch.txt")];
+
+        let rendered = rendered_fates(&items, &would_delete, false);
+
+        assert!(rendered.contains("target"), "{rendered}");
+        assert!(rendered.contains("scratch.txt"), "{rendered}");
+        assert_eq!(
+            rendered.matches("kept").count(),
+            2,
+            "declined real run keeps every item: {rendered}"
+        );
+        assert!(
+            !rendered.contains("would delete"),
+            "declined real run must not promise deletion: {rendered}"
+        );
+    }
+
+    /// The same fate rule applies after a user reaches an individual project
+    /// prompt and declines it: safe and surfaced entries alike are untouched.
+    #[test]
+    fn declined_per_project_rich_review_reports_every_item_kept() {
+        let items = vec![
+            item("node_modules", clean::Classification::Safe),
+            item("coverage.tmp", clean::Classification::Surfaced),
+            item("keep.dat", clean::Classification::Protected),
+        ];
+        let would_delete = vec![PathBuf::from("node_modules"), PathBuf::from("coverage.tmp")];
+
+        let rendered = rendered_fates(&items, &would_delete, false);
+
+        assert_eq!(
+            rendered.matches("kept").count(),
+            3,
+            "declined project keeps safe, surfaced, and protected items: {rendered}"
+        );
+        assert!(!rendered.contains("would delete"), "{rendered}");
+        assert!(!rendered.contains("deleting"), "{rendered}");
+    }
+
+    #[test]
+    fn approved_project_still_reports_planned_deletions() {
+        let items = vec![item("target", clean::Classification::Safe)];
+        let would_delete = vec![PathBuf::from("target")];
+
+        let rendered = rendered_fates(&items, &would_delete, true);
+
+        assert!(rendered.contains("deleting"), "{rendered}");
+    }
 }
 
 // ---------------------------------------------------------------------------

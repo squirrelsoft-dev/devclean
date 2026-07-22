@@ -22,15 +22,17 @@
 //!
 //! ## Truncation
 //!
-//! A path that wraps to a second line would scroll and defeat the single-line
-//! purpose. The module picks terminal width via terminal_size (lightweight,
-//! no ANSI escapes), falling back to the COLUMNS env var, then a default of
-//! 80. Paths are truncated to fit with a leading ellipsis (U+2026) so the
-//! leaf (the dir currently being visited) stays visible on the right. Fit is
-//! measured in display columns via unicode-width -- wide chars (CJK, emoji)
-//! occupy two columns each -- never in bytes or chars, or wide paths would
-//! wrap and scroll. Each update pads with spaces and CR so a shorter path
-//! fully overwrites a longer previous one (no leftover trailing characters).
+//! A path or fixed progress label that wraps to a second line would scroll and
+//! defeat the single-line purpose. The module picks terminal width via
+//! terminal_size (lightweight, no ANSI escapes), falling back to the COLUMNS
+//! env var, then a default of 80. Labels are clipped first; paths are appended
+//! only when a label leaves budget, and truncated with a leading ellipsis
+//! (U+2026) so the leaf (the dir currently being visited) stays visible on the
+//! right. Fit is measured in display columns via unicode-width -- wide chars
+//! (CJK, emoji) occupy two columns each -- never in bytes or chars, or wide
+//! paths would wrap and scroll. Each update pads with spaces and CR so a
+//! shorter path fully overwrites a longer previous one (no leftover trailing
+//! characters).
 //!
 //! ## Clear and finish
 //!
@@ -196,10 +198,12 @@ pub fn terminal_width() -> usize {
 /// The returned string is padded with trailing spaces to `width` so each
 /// update fully overwrites a longer previous one.
 fn render_line(label: impl AsRef<str>, path: &Path, width: usize) -> String {
-    let label = label.as_ref();
+    let label = clip_left(label.as_ref(), width);
     let display = path.display().to_string();
     let max_cols = width.saturating_sub(label.width());
-    let truncated = if display.width() > max_cols {
+    let truncated = if max_cols == 0 {
+        String::new()
+    } else if display.width() > max_cols {
         let ellipsis = "\u{2026}";
         // Right-align: the leaf (current dir) stays visible. We keep chars
         // from the right whose total display width fits, accounting for
@@ -225,6 +229,20 @@ fn render_line(label: impl AsRef<str>, path: &Path, width: usize) -> String {
     // in display columns: wide chars (CJK, emoji) occupy two columns each.
     let pad = width.saturating_sub(line.width());
     format!("{}{}", line, " ".repeat(pad))
+}
+
+fn clip_left(s: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut cols = 0;
+    for ch in s.chars() {
+        let ch_cols = ch.width().unwrap_or(0);
+        if cols + ch_cols > width {
+            break;
+        }
+        out.push(ch);
+        cols += ch_cols;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -372,7 +390,7 @@ mod tests {
     }
 
     /// A terminal narrower than the label plus the ellipsis must not underflow
-    /// or panic; the update degrades to the ellipsis alone.
+    /// or panic; the fixed label itself is clipped to the available columns.
     #[test]
     fn tiny_width_does_not_panic() {
         let buf: Vec<u8> = Vec::new();
@@ -386,10 +404,35 @@ mod tests {
         pw.finish();
         let bytes = String::from_utf8_lossy(&pw.writer);
         assert!(
-            bytes.contains("walking: "),
-            "label still emitted: {:?}",
+            bytes.contains("walking:"),
+            "width 10 can still carry the walking label: {:?}",
             bytes
         );
+    }
+
+    /// Even when COLUMNS is smaller than the spinner/label itself, the live
+    /// progress line must stay on one row. Paths and ellipses are appended
+    /// only after the clipped label leaves budget.
+    #[test]
+    fn progress_lines_fit_tiny_widths() {
+        for width in 0..=12 {
+            for line in [
+                render_line("⠋ walking: ", Path::new("/some/deep/project"), width),
+                render_line("⠙ sizing 1/1: ", Path::new("/some/deep/project"), width),
+            ] {
+                assert!(
+                    line.width() <= width,
+                    "width {width}: rendered {} columns: {line:?}",
+                    line.width()
+                );
+                if width < "⠋ walking: ".width() {
+                    assert!(
+                        !line.contains('/'),
+                        "path must not be appended until the label leaves budget: {line:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// clear erases the line in place without emitting a newline, so the
