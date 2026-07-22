@@ -120,6 +120,12 @@ pub struct ProjectResult {
     pub would_delete: Vec<PathBuf>,
     /// Whether the user (or --force) approved this project for cleaning.
     pub project_approved: bool,
+    /// Whether this project's rich review panel was actually rendered on
+    /// stderr by the flow. A declined all-cleanup prompt skips the per-project
+    /// report entirely, so the caller cannot predict this from the flags alone
+    /// — and a caller that assumes it was shown leaves the outcome with no
+    /// project path and no item listing anywhere.
+    pub review_shown: bool,
 }
 
 /// Reasons each non-cleanable project needs manual attention. One line per
@@ -207,7 +213,10 @@ fn pending_fate(item: &CleanItem) -> &'static str {
 /// A capable stderr gets the rich review panel; anything else (piped,
 /// redirected, `TERM=dumb`) keeps the plain line-oriented listing so scripts
 /// and logs read the same as they always have.
-fn print_project_report(project: &CleanableProject) {
+///
+/// Returns whether the rich panel was the rendering used, so the caller knows
+/// whether the outcome phase still owes the user one.
+fn print_project_report(project: &CleanableProject) -> bool {
     if output::stderr_terminal_ui_enabled() {
         let rows = output::clean_review_rows(&project.items, pending_fate);
         for line in output::format_clean_review(
@@ -220,7 +229,7 @@ fn print_project_report(project: &CleanableProject) {
         ) {
             eprintln!("{line}");
         }
-        return;
+        return true;
     }
     eprintln!("{}:", project.path.display());
     eprintln!("  Gitignored review");
@@ -237,6 +246,7 @@ fn print_project_report(project: &CleanableProject) {
             pending_fate(item),
         );
     }
+    false
 }
 
 /// Prompt the user about each surfaced item for `project_path`. Each
@@ -342,8 +352,9 @@ pub fn run<R: BufRead>(inputs: InteractiveFlowInputs, reader: &mut R) -> Vec<Pro
         let (path, items) = (&project.path, &project.items);
         // Show what would be deleted, then ask. A declined all-cleanup
         // prompt suppresses every later prompt: the user already said no.
+        let mut review_shown = false;
         let item_approvals: Vec<(PathBuf, bool)> = if interactive && all_approved {
-            print_project_report(project);
+            review_shown = print_project_report(project);
             collect_each_item(reader, path, items)
         } else {
             Vec::new()
@@ -394,6 +405,7 @@ pub fn run<R: BufRead>(inputs: InteractiveFlowInputs, reader: &mut R) -> Vec<Pro
             items: items.clone(),
             would_delete: would_delete_paths,
             project_approved,
+            review_shown,
         });
     }
 
@@ -474,6 +486,23 @@ mod tests {
         let results = run_with_answers(inputs, "n\n");
         assert_eq!(results.len(), 1);
         assert!(!results[0].project_approved);
+    }
+
+    /// A declined all-cleanup prompt skips the per-project report entirely, so
+    /// the result must not claim a review was shown — a caller that assumed it
+    /// was suppressed its own copy too, leaving the outcome with no project
+    /// path and no item listing on either stream.
+    #[test]
+    fn declined_all_prompt_reports_no_review_shown() {
+        let items = vec![make_item("target", Classification::Safe, true)];
+        let results = run_with_answers(inputs_for(&items, false, false), "n\n");
+        assert!(!results[0].review_shown);
+
+        // Non-interactive runs never render one either.
+        let forced = run_with_answers(inputs_for(&items, true, false), "");
+        assert!(!forced[0].review_shown);
+        let previewed = run_with_answers(inputs_for(&items, false, true), "");
+        assert!(!previewed[0].review_shown);
     }
 
     /// Interactive mode with "n" on a per-item: that item is excluded (kept).

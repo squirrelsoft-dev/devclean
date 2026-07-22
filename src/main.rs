@@ -493,11 +493,16 @@ fn branch_state_line(branch: &str, status: classify::Status) -> String {
 ///
 /// Returns the branch label read for each row, in row order, so a caller that
 /// renders further panels reuses them instead of re-spawning `git`.
+///
+/// `targeted` says whether the rows came from `discovery::discover_single`
+/// rather than a workspace walk: that run never reads a configured workspace
+/// root, so the header must not claim a scan that did not happen.
 fn render_workspace_table(
     rows: &[(PathBuf, classify::Status)],
     sizes: &[Option<String>],
     cleanable_count: usize,
     total_reclaimable: Option<&str>,
+    targeted: bool,
     emit_colors: bool,
 ) -> Vec<String> {
     let mut progress = progress::ProgressWriter::new(std::io::stdout());
@@ -521,7 +526,16 @@ fn render_workspace_table(
             changed: Some(changed[idx].as_str()),
         })
         .collect();
-    println!("⟩ scanned configured workspaces · {} projects", rows.len());
+    println!(
+        "⟩ {} · {} {}",
+        if targeted {
+            "inspected the requested project"
+        } else {
+            "scanned configured workspaces"
+        },
+        rows.len(),
+        output::projects_word(rows.len())
+    );
     for line in output::format_project_table(
         &table_rows,
         cleanable_count,
@@ -532,6 +546,46 @@ fn render_workspace_table(
         println!("{line}");
     }
     branches
+}
+
+/// The panel a targeted `offcut clean <PROJECT_PATH>` ends on when the run
+/// found nothing to clean, or `None` when no panel states this outcome
+/// truthfully.
+///
+/// A blocking tree state gets the refusal and the action that unblocks it. An
+/// already-clean project gets the nothing-to-reclaim state instead: it is
+/// committed, pushed, and carries no junk, so "commit, push, or initialize as
+/// needed" is advice it cannot act on. A `Cleanable` project only reaches here
+/// when its own inspection failed — the sizing pass already warned about that
+/// on stderr, and no panel would be honest about it.
+fn targeted_outcome_panel(
+    path: &Path,
+    status: classify::Status,
+    branch_line: &str,
+    details: &[String],
+    width: usize,
+    emit_colors: bool,
+) -> Option<Vec<String>> {
+    if output::blocks_cleaning(status) {
+        return Some(output::format_blocked_project(
+            path,
+            status,
+            branch_line,
+            details,
+            None,
+            width,
+            emit_colors,
+        ));
+    }
+    if status == classify::Status::Clean {
+        return Some(output::format_nothing_to_reclaim(
+            path,
+            branch_line,
+            width,
+            emit_colors,
+        ));
+    }
+    None
 }
 
 fn status_detail_lines(project_path: &Path, status: classify::Status) -> Vec<String> {
@@ -640,6 +694,7 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             &per_project_size,
             cleanable_count,
             total_reclaimable_str.as_deref(),
+            false,
             output::stdout_color_enabled(),
         );
     } else {
@@ -891,10 +946,13 @@ fn run_cleaning(
         .iter()
         .map(|(p, s, _)| (p.clone(), *s))
         .collect();
-    // The pre-approval review panel is rendered by the interactive flow, and
-    // only when the flow actually prompts on a stderr that can draw it. Any
-    // other run reaches the panel (if at all) through the outcome loop below.
-    let review_shown_on_stderr = !cli.force && !cli.dry_run && output::stderr_terminal_ui_enabled();
+    // Whether the interactive flow *may* draw the pre-approval review panel on
+    // stderr. It is only a prediction — the flow skips the panel outright when
+    // the user declines the all-cleanup prompt — so it gates nothing but the
+    // branch read below, which has to happen before the flow runs. What was
+    // actually rendered comes back per project as `ProjectResult::review_shown`.
+    let stderr_may_render_review =
+        !cli.force && !cli.dry_run && output::stderr_terminal_ui_enabled();
     let mut branch_labels = BranchLabels::new(all_projects.len());
     if rich_stdout {
         branch_labels.seed(render_workspace_table(
@@ -902,6 +960,7 @@ fn run_cleaning(
             &per_project_size,
             cleanable_count,
             total_reclaimable_str.as_deref(),
+            project_path.is_some(),
             emit_colors,
         ));
     } else {
@@ -947,7 +1006,7 @@ fn run_cleaning(
             }
             // The branch line only reaches the screen through the pre-approval
             // review panel, so it is read only for the runs that render one.
-            let branch_line = if review_shown_on_stderr {
+            let branch_line = if stderr_may_render_review {
                 branch_state_line(&branch_labels.get(idx, path, *status), *status)
             } else {
                 String::new()
@@ -967,22 +1026,32 @@ fn run_cleaning(
     // Zero cleanable: summary and exit 0 — no prompts, no enumeration,
     // nothing to clean. The flow only runs when there is a subject to clean.
     if cleanable_items.is_empty() {
-        if rich_stdout && project_path.is_some() {
-            if let Some((path, status, _)) = all_projects.first() {
-                let branch = branch_labels.get(0, path, *status);
-                for line in output::format_blocked_project(
+        let panel = if rich_stdout && project_path.is_some() {
+            all_projects.first().map(|(path, status, _)| {
+                let branch = branch_state_line(&branch_labels.get(0, path, *status), *status);
+                targeted_outcome_panel(
                     path,
                     *status,
-                    &branch_state_line(&branch, *status),
+                    &branch,
                     &status_detail_lines(path, *status),
-                    None,
+                    output::terminal_width(),
                     emit_colors,
-                ) {
+                )
+            })
+        } else {
+            None
+        };
+        match panel.flatten() {
+            Some(lines) => {
+                for line in lines {
                     println!("{line}");
                 }
             }
-        } else {
-            println!("clean: no cleanable projects — nothing to delete");
+            // No panel fits this outcome — an empty project list (every
+            // project skipped by `classify_projects`, warned about on stderr)
+            // or a cleanable project whose inspection failed. Either way the
+            // run still says what it did.
+            None => println!("clean: no cleanable projects — nothing to delete"),
         }
         return Ok(());
     }
@@ -1009,11 +1078,12 @@ fn run_cleaning(
     // an un-cleared padded line would wrap and leave the progress line
     // permanently on screen instead of overwriting it.
     //
-    // The interactive flow already showed each project's review panel on
-    // stderr, immediately before the question it belongs to. Re-printing it
-    // here would repeat the whole listing after the decision was made; the
-    // panel is only rendered on stdout for the runs that never showed one
-    // (--force, --dry-run, or a stderr that cannot render it).
+    // A project whose review the flow already showed on stderr — immediately
+    // before the question it belongs to — must not have it repeated here after
+    // the decision was made. Every other project (--force, --dry-run, a stderr
+    // that cannot render it, or a declined all-cleanup prompt that skipped the
+    // per-project report entirely) gets the panel on stdout, so no outcome is
+    // reported without the project and items it is about.
     let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
     for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
         let will_execute = r.project_approved && !cli.dry_run;
@@ -1041,7 +1111,7 @@ fn run_cleaning(
         clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
         clean_progress.clear();
         if rich_stdout {
-            if !review_shown_on_stderr {
+            if !r.review_shown {
                 let rows = output::clean_review_rows(&r.items, fate_of);
                 let branch = branch_labels.get(*idx, &r.path, r.status);
                 for line in output::format_clean_review(
@@ -1062,7 +1132,7 @@ fn run_cleaning(
                     println!("⟩ dry-run only - nothing deleted");
                 }
             } else {
-                println!("⟩ skipped by user");
+                println!("⟩ skipped by user · {}", r.path.display());
             }
         } else {
             println!(
@@ -1163,6 +1233,62 @@ fn run_cleaning(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Targeted-run outcome panel: unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod targeted_panel_tests {
+    use super::*;
+
+    fn panel(status: classify::Status) -> Option<String> {
+        targeted_outcome_panel(
+            Path::new("/workspace/dashboard"),
+            status,
+            &branch_state_line("main", status),
+            &[],
+            80,
+            false,
+        )
+        .map(|lines| lines.join("\n"))
+    }
+
+    /// A committed, pushed project with nothing left to delete is not blocked
+    /// on anything: refusing to clean it and asking the user to commit and push
+    /// would be advice they cannot act on.
+    #[test]
+    fn clean_project_reports_nothing_to_reclaim_instead_of_a_refusal() {
+        let rendered = panel(classify::Status::Clean).expect("clean projects get a panel");
+        assert!(rendered.contains("nothing to reclaim"), "{rendered}");
+        assert!(!rendered.contains("refusing to clean"), "{rendered}");
+        assert!(!rendered.contains("commit, push"), "{rendered}");
+    }
+
+    /// Every tree state the user can act on keeps the refusal and the rerun
+    /// hint that unblocks it.
+    #[test]
+    fn blocking_states_keep_the_refusal_panel() {
+        for status in [
+            classify::Status::NoGit,
+            classify::Status::NoRemote,
+            classify::Status::Unpushed,
+            classify::Status::Wip,
+        ] {
+            let rendered = panel(status).unwrap_or_else(|| panic!("{status:?} gets a panel"));
+            assert!(rendered.contains("refusing to clean"), "{status:?}");
+            assert!(rendered.contains("offcut clean"), "{status:?}");
+        }
+    }
+
+    /// A cleanable project only reaches this branch when its own inspection
+    /// failed — already warned about on stderr. No panel states that
+    /// truthfully, so the caller falls back to the plain summary line.
+    #[test]
+    fn uninspectable_cleanable_project_gets_no_panel() {
+        assert!(panel(classify::Status::Cleanable).is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------

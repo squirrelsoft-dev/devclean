@@ -138,13 +138,19 @@ On a capable terminal, `offcut list`, the default `offcut` run, and
   each with its classification and its fate. The panel is printed
   immediately before the real `[y/N]` approval prompt it belongs to and asks
   nothing itself, so the destructive confirmation is asked exactly once. In
-  `--force` / `--dry-run` runs, where no question is asked, the panel is
-  printed with the fate each item actually gets (`deleting`, `would delete`,
-  `would prompt`, `kept`).
-- **Blocked** — a targeted `offcut clean <PROJECT_PATH>` against a
-  non-cleanable project shows the refusal reason, relevant `git status`
-  detail for WIP trees, and the command to rerun after the project is clean
-  and pushed.
+  `--force` / `--dry-run` runs, where no question is asked — and when the
+  all-cleanup prompt is declined, which skips the per-project review — the
+  panel is printed with the fate each item actually gets (`deleting`,
+  `would delete`, `would prompt`, `kept`). On a terminal too narrow for the
+  aligned columns, each item's classification and fate stack under its path
+  instead of wrapping.
+- **Blocked** — a targeted `offcut clean <PROJECT_PATH>` against a project
+  whose tree blocks cleaning (not a repo, no remote, unpushed, or uncommitted
+  work) shows the refusal reason, relevant `git status` detail for WIP trees,
+  and the command to rerun after the project is clean and pushed. A targeted
+  run against a project that is already committed, pushed, and free of
+  gitignored build output reports that there is nothing to reclaim — it is
+  not a refusal and asks for nothing.
 
 When stdout is piped, redirected, or `TERM=dumb`, Offcut keeps the plain
 line-oriented output and suppresses live progress. Color is independently

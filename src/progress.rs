@@ -172,7 +172,11 @@ impl<W: Write> ProgressWriter<W> {
 
 /// Resolve terminal width: terminal_size first, then COLUMNS env var,
 /// then a default of 80.
-fn terminal_width() -> usize {
+///
+/// This module owns the fallback rule for the whole crate — `output` renders
+/// its panels and tables against this same function rather than repeating the
+/// chain.
+pub fn terminal_width() -> usize {
     if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
         return w as usize;
     }

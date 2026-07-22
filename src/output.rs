@@ -61,16 +61,18 @@ pub fn stderr_terminal_ui_enabled() -> bool {
     terminal_ui_enabled(stderr_is_tty())
 }
 
-/// Current terminal width, used by table renderers. Kept here so presentation
-/// code does not duplicate terminal-size fallback rules.
+/// Current terminal width, used by the panel and table renderers.
+///
+/// The terminal-size → `COLUMNS` → 80 fallback chain has exactly one
+/// implementation, in `progress`; this is the presentation-side name for it so
+/// the two cannot drift apart.
 pub fn terminal_width() -> usize {
-    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
-        return w as usize;
-    }
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(80)
+    crate::progress::terminal_width()
+}
+
+/// The noun for `count` projects, so no rendered line reads "1 projects".
+pub fn projects_word(count: usize) -> &'static str {
+    if count == 1 { "project" } else { "projects" }
 }
 
 /// Runtime color gate: colored only on a TTY, and only when neither
@@ -245,15 +247,13 @@ pub fn format_project_table(
     emit_colors: bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
+    let counted = format!("✓ {} {}", rows.len(), projects_word(rows.len()));
     let summary = match total_reclaimable {
         Some(size) if cleanable_count > 0 => vec![
-            format!("✓ {} projects", rows.len()),
+            counted,
             format!("~{size} reclaimable across {cleanable_count} cleanable"),
         ],
-        _ => vec![
-            format!("✓ {} projects", rows.len()),
-            format!("{cleanable_count} cleanable"),
-        ],
+        _ => vec![counted, format!("{cleanable_count} cleanable")],
     };
 
     if width >= 84 {
@@ -408,6 +408,13 @@ fn pack_columns(entries: &[(usize, String)], width: usize, sep: &str) -> Vec<Str
 const LABEL_W: usize = 14;
 const FATE_W: usize = 14;
 
+/// Narrowest item column the three-column review row stays readable in, and
+/// the terminal width that implies once the prefix, gaps, label, and fate are
+/// accounted for. Below it the row degrades to a stacked layout — the same
+/// treatment the workspace table gives a terminal too narrow for its columns.
+const REVIEW_MIN_ITEM_W: usize = 12;
+const REVIEW_COLUMNAR_MIN_W: usize = 4 + REVIEW_MIN_ITEM_W + 1 + LABEL_W + 1 + FATE_W;
+
 /// One reviewed gitignored path: what it is, and what Offcut will do with it.
 ///
 /// The caller supplies `fate` because only the caller knows which side of the
@@ -458,42 +465,103 @@ pub fn format_clean_review(
     width: usize,
     emit_colors: bool,
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    out.push(format_review_header(path, width, emit_colors));
-    out.push(format!(
-        "status   {}",
-        color_for_stream(
-            Status::Cleanable.label(),
-            status_style(Status::Cleanable),
-            emit_colors
-        )
-    ));
-    out.push(format!("branch   {branch_line}"));
-    out.push(String::new());
-    out.push(dim("GITIGNORED REVIEW", emit_colors));
+    let mut out = panel_head(path, Status::Cleanable, branch_line, width, emit_colors);
+    out.push(dim(&truncate_cols("GITIGNORED REVIEW", width), emit_colors));
     // " ▸ " prefix (4) + item + gap (1) + label + gap (1) + fate.
-    let item_width = width.saturating_sub(4 + 1 + LABEL_W + 1 + FATE_W).max(10);
+    let columnar = width >= REVIEW_COLUMNAR_MIN_W;
+    let item_width = width.saturating_sub(4 + 1 + LABEL_W + 1 + FATE_W);
     for row in rows {
+        let item = format!(
+            "{}{}",
+            row.rel_path.display(),
+            if row.is_dir { "/" } else { "" }
+        );
+        if columnar {
+            out.push(format!(
+                "  ▸ {} {} {}",
+                pad_path(&item, item_width),
+                styled_padded(row.label, LABEL_W, OwoStyle::new().dimmed(), emit_colors),
+                dim(row.fate, emit_colors)
+            ));
+            continue;
+        }
+        // Too narrow for three columns: stack the classification and the fate
+        // under the path instead of letting every row soft-wrap, which is the
+        // one thing the aligned panel exists to prevent.
+        let body_width = width.saturating_sub(4);
         out.push(format!(
-            "  ▸ {} {} {}",
-            pad_path(
-                &format!(
-                    "{}{}",
-                    row.rel_path.display(),
-                    if row.is_dir { "/" } else { "" }
-                ),
-                item_width
-            ),
-            styled_padded(row.label, LABEL_W, OwoStyle::new().dimmed(), emit_colors),
-            dim(row.fate, emit_colors)
+            "  ▸ {}",
+            truncate_path_cols(&item, body_width.max(1))
         ));
+        let label = truncate_cols(row.label, body_width);
+        let fate = truncate_cols(row.fate, body_width);
+        let detail = [
+            (label.width(), dim(&label, emit_colors)),
+            (fate.width(), dim(&fate, emit_colors)),
+        ];
+        for line in pack_columns(&detail, body_width, " · ") {
+            out.push(format!("    {line}"));
+        }
     }
-    out.push(format!(
-        "total · {} item(s){}",
-        rows.len(),
-        total_size.map(|s| format!(" · ~{s}")).unwrap_or_default()
+    out.extend(wrap_plain(
+        &format!(
+            "total · {} item(s){}",
+            rows.len(),
+            total_size.map(|s| format!(" · ~{s}")).unwrap_or_default()
+        ),
+        width,
     ));
     out
+}
+
+/// The three lines every project panel opens with: the header, the status, and
+/// the branch state, followed by a blank separator. Shared by the review, the
+/// blocked state, and the nothing-to-reclaim state so one panel cannot drift
+/// out of the width budget the others respect.
+fn panel_head(
+    path: &Path,
+    status: Status,
+    branch_line: &str,
+    width: usize,
+    emit_colors: bool,
+) -> Vec<String> {
+    // "status   " / "branch   " are both 9 display columns.
+    let value_width = width.saturating_sub(9);
+    vec![
+        format_review_header(path, width, emit_colors),
+        format!(
+            "status   {}",
+            color_for_stream(
+                &truncate_cols(status.label(), value_width),
+                status_style(status),
+                emit_colors
+            )
+        ),
+        format!("branch   {}", truncate_cols(branch_line, value_width)),
+        String::new(),
+    ]
+}
+
+/// Split `text` into word cells no wider than `width`, so packing them can
+/// never produce a line that overruns the terminal.
+fn word_cells(text: &str, width: usize) -> Vec<(usize, String)> {
+    text.split_whitespace()
+        .map(|word| cell(&truncate_cols(word, width)))
+        .collect()
+}
+
+/// Word-wrap `text` into lines of at most `width` display columns.
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    pack_columns(&word_cells(text, width), width, " ")
+}
+
+/// Word-wrap `text` and style each produced line. Styling per line rather than
+/// per paragraph keeps the escape sequences out of the width measurement.
+fn wrap_styled(text: &str, width: usize, style: OwoStyle, emit_colors: bool) -> Vec<String> {
+    wrap_plain(text, width)
+        .iter()
+        .map(|line| color_for_stream(line, style, emit_colors))
+        .collect()
 }
 
 /// Format the review panel's header — `⟩ analyzing <name> · <path>` — inside
@@ -525,51 +593,107 @@ fn format_review_header(path: &Path, width: usize, emit_colors: bool) -> String 
     line
 }
 
-/// Format the blocked clean state for a non-cleanable project.
+/// Format the blocked clean state for a project whose tree blocks cleaning.
+///
+/// Only the statuses that actually block belong here (see `blocks_cleaning`):
+/// telling the user to commit and push a project that is already committed and
+/// pushed is a refusal it cannot act on. An already-clean project gets
+/// `format_nothing_to_reclaim` instead.
+///
+/// Every line is wrapped or truncated to `width`, prose included: this panel
+/// carries the longest sentences Offcut prints, and an unwrapped one soft-wraps
+/// on an ordinary 80-column terminal.
 pub fn format_blocked_project(
     path: &Path,
     status: Status,
     branch_line: &str,
     details: &[String],
     possible_reclaim: Option<&str>,
+    width: usize,
     emit_colors: bool,
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    out.push(format!(
-        "⟩ analyzing {} · {}",
-        color_for_stream(&project_name(path), OwoStyle::new().bold(), emit_colors),
-        dim(&path.display().to_string(), emit_colors)
-    ));
-    out.push(format!(
-        "status   {}",
-        color_for_stream(status.label(), status_style(status), emit_colors)
-    ));
-    out.push(format!("branch   {branch_line}"));
-    out.push(String::new());
-    out.push(color_for_stream(
+    let mut out = panel_head(path, status, branch_line, width, emit_colors);
+    out.extend(wrap_styled(
         &format!("✗ refusing to clean - {}", status_reason(status)),
+        width,
         status_style(status).bold(),
         emit_colors,
     ));
-    out.push("offcut only cleans projects with a clean, pushed tree, so nothing in progress is ever lost.".to_string());
-    for detail in details {
-        out.push(format!("   {}", dim(detail, emit_colors)));
-    }
-    out.push(format!(
-        "→ commit, push, or initialize as needed, then run {} again",
-        color_for_stream(
-            &format!("offcut clean {}", path.display()),
-            OwoStyle::new().bold(),
-            emit_colors
-        )
+    out.extend(wrap_plain(
+        "offcut only cleans projects with a clean, pushed tree, so nothing in progress is ever lost.",
+        width,
     ));
-    if let Some(size) = possible_reclaim {
-        out.push(dim(
-            &format!("   ~{size} would become reclaimable once the project is cleanable."),
-            emit_colors,
+    let detail_width = width.saturating_sub(3);
+    for detail in details {
+        out.push(format!(
+            "   {}",
+            dim(&truncate_cols(detail, detail_width), emit_colors)
         ));
     }
+    // The command carries the project path, so it is the one segment that can
+    // outgrow the terminal on its own; it is truncated from the left (keeping
+    // the leaf) before the hint is packed.
+    let command = truncate_path_cols(&format!("offcut clean {}", path.display()), width);
+    let mut hint = word_cells("→ commit, push, or initialize as needed, then run", width);
+    hint.push((
+        command.width(),
+        color_for_stream(&command, OwoStyle::new().bold(), emit_colors),
+    ));
+    hint.extend(word_cells("again", width));
+    out.extend(pack_columns(&hint, width, " "));
+    if let Some(size) = possible_reclaim {
+        out.extend(
+            wrap_styled(
+                &format!("~{size} would become reclaimable once the project is cleanable."),
+                detail_width,
+                OwoStyle::new().dimmed(),
+                emit_colors,
+            )
+            .into_iter()
+            .map(|line| format!("   {line}")),
+        );
+    }
     out
+}
+
+/// Format the already-tidy state: a targeted run against a `Clean` project.
+///
+/// The project is committed, pushed, and carries no gitignored junk, so there
+/// is nothing to refuse and nothing to ask for — the panel reports the absence
+/// of work rather than a blocked action.
+pub fn format_nothing_to_reclaim(
+    path: &Path,
+    branch_line: &str,
+    width: usize,
+    emit_colors: bool,
+) -> Vec<String> {
+    let mut out = panel_head(path, Status::Clean, branch_line, width, emit_colors);
+    out.extend(wrap_styled(
+        &format!(
+            "✓ nothing to reclaim - {} is already tidy",
+            project_name(path)
+        ),
+        width,
+        OwoStyle::new().green().bold(),
+        emit_colors,
+    ));
+    out.extend(wrap_plain(
+        "no gitignored build output was found, so there is nothing to delete.",
+        width,
+    ));
+    out
+}
+
+/// Whether `status` is a tree state that blocks cleaning and needs the user to
+/// act before a rerun can do anything.
+///
+/// `Clean` is deliberately not blocked — it is the already-tidy outcome — and
+/// `Cleanable` is the state the flow acts on.
+pub fn blocks_cleaning(status: Status) -> bool {
+    match status {
+        Status::NoGit | Status::NoRemote | Status::Unpushed | Status::Wip => true,
+        Status::Cleanable | Status::Clean => false,
+    }
 }
 
 /// Format the post-clean success state.
@@ -1102,14 +1226,16 @@ mod tests {
         );
         for width in [10, 20, 40, 56, 60, 80, 120] {
             for emit_colors in [false, true] {
-                let header = strip_ansi(&format_clean_review(
-                    path,
-                    "main · clean tree · remote ✓ pushed",
-                    &rows,
-                    Some("2.34 MB"),
-                    width,
-                    emit_colors,
-                )[0]);
+                let header = strip_ansi(
+                    &format_clean_review(
+                        path,
+                        "main · clean tree · remote ✓ pushed",
+                        &rows,
+                        Some("2.34 MB"),
+                        width,
+                        emit_colors,
+                    )[0],
+                );
                 assert!(
                     header.width() <= width,
                     "width {width} (colors {emit_colors}): header of {} columns: {header:?}",
@@ -1117,6 +1243,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The header is not the only line that can overrun: the branch state, the
+    /// item rows, and the total each carry caller-supplied text. Below the
+    /// width the three-column row needs, the rows stack rather than wrap.
+    #[test]
+    fn every_clean_review_line_fits_the_terminal_width() {
+        let items = vec![
+            CleanItem {
+                rel_path: std::path::PathBuf::from("node_modules"),
+                is_dir: true,
+                classification: Classification::Safe,
+            },
+            CleanItem {
+                rel_path: std::path::PathBuf::from(
+                    "packages/design-system/.turbo/cache/build-output",
+                ),
+                is_dir: true,
+                classification: Classification::Surfaced,
+            },
+        ];
+        let rows = clean_review_rows(&items, |_| "needs approval");
+        let path = Path::new(
+            "/var/folders/s0/zl64g7m92b7bf0d72vc0cskw0000gn/T/offcut-demo/projects/payments-api",
+        );
+        for width in [10, 20, 40, 45, 46, 56, 80, 120] {
+            for emit_colors in [false, true] {
+                for line in format_clean_review(
+                    path,
+                    "feature/some-long-branch-name · clean tree · remote ✓ pushed",
+                    &rows,
+                    Some("2.34 MB"),
+                    width,
+                    emit_colors,
+                ) {
+                    let visible = strip_ansi(&line);
+                    assert!(
+                        visible.width() <= width,
+                        "width {width} (colors {emit_colors}): line of {} columns: {visible:?}",
+                        visible.width()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Below the columnar minimum, each item's classification and fate move to
+    /// their own line under the path instead of being squeezed into columns
+    /// that no longer fit — the same degradation the workspace table makes.
+    #[test]
+    fn clean_review_stacks_item_rows_on_a_narrow_terminal() {
+        let items = vec![CleanItem {
+            rel_path: std::path::PathBuf::from("node_modules"),
+            is_dir: true,
+            classification: Classification::Safe,
+        }];
+        let rows = clean_review_rows(&items, |_| "will delete");
+        let narrow = format_clean_review(Path::new("/w/dash"), "main", &rows, None, 40, false);
+        let item_line = narrow
+            .iter()
+            .find(|line| line.contains("node_modules"))
+            .expect("item row rendered");
+        assert!(
+            !item_line.contains("safe-to-delete"),
+            "narrow rows stack: {narrow:?}"
+        );
+        let detail = narrow
+            .iter()
+            .find(|line| line.contains("safe-to-delete"))
+            .expect("classification rendered");
+        assert!(detail.contains("will delete"), "detail: {detail:?}");
+
+        // Above the minimum the three-column row is back.
+        const { assert!(REVIEW_COLUMNAR_MIN_W > 40) };
+        let wide = format_clean_review(Path::new("/w/dash"), "main", &rows, None, 60, false);
+        assert!(
+            wide.iter()
+                .any(|line| line.contains("node_modules") && line.contains("safe-to-delete")),
+            "columnar rows: {wide:?}"
+        );
     }
 
     /// Truncating the header must not cost it the project's name — that is
@@ -1365,6 +1571,7 @@ mod tests {
             "feat/tokens · uncommitted changes · remote ✓",
             &[" M src/tokens/color.ts".to_string()],
             Some("540 MB"),
+            100,
             false,
         )
         .join("\n");
@@ -1372,6 +1579,124 @@ mod tests {
         assert!(rendered.contains("uncommitted work in progress"));
         assert!(rendered.contains("M src/tokens/color.ts"));
         assert!(rendered.contains("would become reclaimable"));
+    }
+
+    /// The blocked panel carries the longest prose Offcut prints plus the full
+    /// project path in its rerun hint. Unwrapped, both overran an ordinary
+    /// 80-column terminal and soft-wrapped into the next line.
+    #[test]
+    fn blocked_panel_fits_the_terminal_width() {
+        let path = Path::new(
+            "/var/folders/s0/zl64g7m92b7bf0d72vc0cskw0000gn/T/offcut-demo/projects/design-system",
+        );
+        for width in [10, 20, 40, 60, 80, 100, 140] {
+            for emit_colors in [false, true] {
+                for line in format_blocked_project(
+                    path,
+                    Status::Wip,
+                    "feat/tokens · uncommitted changes · remote ✓",
+                    &[" M src/tokens/color-primitives-and-aliases.ts".to_string()],
+                    Some("540 MB"),
+                    width,
+                    emit_colors,
+                ) {
+                    let visible = strip_ansi(&line);
+                    assert!(
+                        visible.width() <= width,
+                        "width {width} (colors {emit_colors}): line of {} columns: {visible:?}",
+                        visible.width()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Wrapping the blocked panel must not cost it the reason, the git detail,
+    /// or the command that unblocks the project.
+    #[test]
+    fn blocked_panel_keeps_its_content_when_wrapped() {
+        let rendered = format_blocked_project(
+            Path::new("/workspace/design-system"),
+            Status::Wip,
+            "feat/tokens · uncommitted changes · remote ✓",
+            &[" M src/tokens/color.ts".to_string()],
+            Some("540 MB"),
+            60,
+            false,
+        )
+        .join("\n");
+        assert!(rendered.contains("refusing to clean"), "{rendered}");
+        assert!(rendered.contains("uncommitted work"), "{rendered}");
+        assert!(rendered.contains("M src/tokens/color.ts"), "{rendered}");
+        assert!(rendered.contains("offcut clean"), "{rendered}");
+        assert!(rendered.contains("design-system"), "{rendered}");
+    }
+
+    /// An already-clean project is committed, pushed, and carries no junk:
+    /// refusing to clean it and telling the user to commit and push is advice
+    /// they cannot act on. It gets the nothing-to-reclaim state instead.
+    #[test]
+    fn nothing_to_reclaim_state_makes_no_refusal() {
+        let rendered = format_nothing_to_reclaim(
+            Path::new("/workspace/dashboard"),
+            "main · clean tree · remote ✓ pushed",
+            80,
+            false,
+        )
+        .join("\n");
+        assert!(rendered.contains("nothing to reclaim"), "{rendered}");
+        assert!(rendered.contains("dashboard"), "{rendered}");
+        assert!(rendered.contains(Status::Clean.label()), "{rendered}");
+        assert!(!rendered.contains("refusing to clean"), "{rendered}");
+        assert!(!rendered.contains("commit, push"), "{rendered}");
+
+        for width in [10, 20, 40, 60, 80, 140] {
+            for line in format_nothing_to_reclaim(
+                Path::new("/workspace/dashboard"),
+                "main · clean tree · remote ✓ pushed",
+                width,
+                true,
+            ) {
+                let visible = strip_ansi(&line);
+                assert!(
+                    visible.width() <= width,
+                    "width {width}: line of {} columns: {visible:?}",
+                    visible.width()
+                );
+            }
+        }
+    }
+
+    /// Only a tree state the user can act on blocks cleaning. `Clean` is the
+    /// already-tidy outcome and `Cleanable` is what the flow acts on, so
+    /// neither may be routed to the refusal panel.
+    #[test]
+    fn only_actionable_tree_states_block_cleaning() {
+        assert!(blocks_cleaning(Status::NoGit));
+        assert!(blocks_cleaning(Status::NoRemote));
+        assert!(blocks_cleaning(Status::Unpushed));
+        assert!(blocks_cleaning(Status::Wip));
+        assert!(!blocks_cleaning(Status::Cleanable));
+        assert!(!blocks_cleaning(Status::Clean));
+    }
+
+    /// A one-project run must not read "1 projects".
+    #[test]
+    fn table_summary_counts_one_project_in_the_singular() {
+        let rows = vec![ProjectTableRow {
+            path: Path::new("/workspace/dashboard"),
+            status: Status::Cleanable,
+            size: Some("1.2 GB"),
+            branch: Some("main"),
+            changed: Some("2h ago"),
+        }];
+        let one = format_project_table(&rows, 1, Some("1.2 GB"), 100, false).join("\n");
+        assert!(one.contains("✓ 1 project"), "{one}");
+        assert!(!one.contains("1 projects"), "{one}");
+
+        let two = vec![rows[0], rows[0]];
+        let many = format_project_table(&two, 2, Some("1.2 GB"), 100, false).join("\n");
+        assert!(many.contains("✓ 2 projects"), "{many}");
     }
 
     #[test]
@@ -1423,14 +1748,17 @@ mod tests {
             format_project_table(&table_rows, 1, Some("1.2 GB"), 100, false),
             format_project_table(&table_rows, 1, Some("1.2 GB"), 40, false),
             format_clean_review(Path::new("/w/dash"), "main", &review_rows, None, 90, false),
+            format_clean_review(Path::new("/w/dash"), "main", &review_rows, None, 40, false),
             format_blocked_project(
                 Path::new("/w/dash"),
                 Status::Wip,
                 "main · uncommitted changes",
                 &[" M src/a.ts".to_string()],
                 Some("540 MB"),
+                90,
                 false,
             ),
+            format_nothing_to_reclaim(Path::new("/w/dash"), "main · clean tree", 90, false),
             format_clean_success(Path::new("/w/dash"), 1, Some("1.2 GB"), false),
         ]
         .concat()
