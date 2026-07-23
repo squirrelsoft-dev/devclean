@@ -11,7 +11,7 @@
 //!
 //! | flag            | all-cleanup prompt | per-item prompts | per-project prompt | execute?
 //! |-----------------|-------------------|------------------|--------------------|--------|
-//! | interactive     | yes → y/n         | yes → delete/keep | yes → clean?      | yes if approved
+//! | interactive     | yes → [y/N]       | yes → delete/keep | yes → remove?     | yes if approved
 //! | --force         | no                | no               | no                 | yes
 //! | --dry-run       | no                | no               | no                 | no
 //! | --force --dry-run | no              | no               | no                 | no (show)
@@ -20,19 +20,26 @@
 //!
 //! 1. **Report phase** — show every project sorted by status, report each
 //!    non-cleanable one with a one-line reason, list each cleanable one.
-//! 2. **All-cleanup prompt** — "Clean the N cleanable projects? (y/n)". If
-//!    no (or EOF / --force / --dry-run), exit without touching any project:
-//!    no further prompts are shown and every result comes back unapproved.
+//! 2. **All-cleanup prompt** — "Remove gitignored paths from N cleanable
+//!    project(s)? [y/N]" (`(y/n)` on a plain stderr). If no (or EOF / --force /
+//!    --dry-run), exit without touching any project: no further prompts are
+//!    shown and every result comes back unapproved.
 //! 3. **Per-project loop** (in sorted order, each cleanable):
 //!    a. enumerate untracked items (dry-run);
-//!    b. print the project path and the list of each item that would be
-//!    deleted;
+//!    b. print the review of the project: its path and every enumerated item
+//!    with its classification and fate — the rich review panel on a capable
+//!    stderr, the plain listing otherwise;
 //!    c. for each `Surfaced` item: prompt keep or delete; record approval;
-//!    d. prompt per-project confirmation ("Clean <path>? (y/n)"); record
-//!    approval;
+//!    d. prompt per-project confirmation ("Remove these gitignored paths from
+//!    <path>? [y/N]"); record approval;
 //!    e. if approved (or --force): execute `git clean -xfd -e <globs>`;
 //!    if --dry-run: print the report only.
 //! 4. **Zero cleanable** — summary, exit 0, no prompts.
+//!
+//! Every question the user answers is asked exactly once, from this module,
+//! on stderr. The review rendering is deliberately question-free (see
+//! `output::format_clean_review`) so no other stream can show a second,
+//! unanswerable copy of the confirmation.
 //!
 //! ## Approval contract
 //!
@@ -56,6 +63,7 @@ use std::path::PathBuf;
 
 use crate::classify::Status;
 use crate::clean::{Classification, CleanItem};
+use crate::output;
 
 /// Pre-computed inputs for the interactive flow: the discovered projects
 /// already classified and sorted, the flags, and the per-project items
@@ -70,11 +78,29 @@ pub struct InteractiveFlowInputs {
     pub all_projects: Vec<(PathBuf, Status)>,
     /// Each cleanable (status-5) project's enumerated items, in the same
     /// order as `all_projects`.
-    pub per_project_items: Vec<(PathBuf, Vec<CleanItem>)>,
+    pub per_project_items: Vec<CleanableProject>,
     /// Force: skip all prompts, auto-approve each surfaced item.
     pub force: bool,
     /// Dry-run: show what would be deleted, delete nothing.
     pub dry_run: bool,
+}
+
+/// One cleanable project as the flow sees it: the enumerated items plus the
+/// context the review needs to be worth reading before answering.
+///
+/// `branch_line` and `total_size` are display-only and are computed by the
+/// caller (git plumbing and the sizing pass both live in `main`); they may be
+/// empty/`None` when the stream showing the review cannot render the panel.
+#[derive(Debug, Clone)]
+pub struct CleanableProject {
+    /// The project path.
+    pub path: PathBuf,
+    /// Each untracked item enumerated for this project.
+    pub items: Vec<CleanItem>,
+    /// One-line branch/tree state, e.g. `main · clean tree · remote ✓ pushed`.
+    pub branch_line: String,
+    /// Human-readable reclaimable size for the whole project, if computed.
+    pub total_size: Option<String>,
 }
 
 /// Per-project result produced by the interactive flow.
@@ -94,6 +120,12 @@ pub struct ProjectResult {
     pub would_delete: Vec<PathBuf>,
     /// Whether the user (or --force) approved this project for cleaning.
     pub project_approved: bool,
+    /// Whether this project's rich review panel was actually rendered on
+    /// stderr by the flow. A declined all-cleanup prompt skips the per-project
+    /// report entirely, so the caller cannot predict this from the flags alone
+    /// — and a caller that assumes it was shown leaves the outcome with no
+    /// project path and no item listing anywhere.
+    pub review_shown: bool,
 }
 
 /// Reasons each non-cleanable project needs manual attention. One line per
@@ -106,6 +138,22 @@ pub fn status_reason(status: Status) -> &'static str {
         Status::Wip => "uncommitted work in progress",
         Status::Cleanable => "cleanable",
         Status::Clean => "clean",
+    }
+}
+
+/// The refusal reason for a blocked project, refined by a fact the status
+/// alone does not carry: whether anything has been committed.
+///
+/// `Status::Unpushed` covers both a branch whose commits were never pushed and
+/// a repo that has never committed anything (`classify::status_unpushed`
+/// short-circuits on a missing `HEAD`). Only that pair needs telling apart, so
+/// every other status — and every committed unpushed branch — keeps
+/// `status_reason` verbatim. A blocked panel states the branch's commit state
+/// two lines above its refusal, so the two must not assert opposite facts.
+pub fn blocked_reason(status: Status, committed: bool) -> &'static str {
+    match status {
+        Status::Unpushed if !committed => "nothing committed yet",
+        _ => status_reason(status),
     }
 }
 
@@ -139,9 +187,13 @@ fn read_line<R: BufRead>(reader: &mut R) -> Option<String> {
     }
 }
 
-/// Prompt the user: "Clean the N cleanable projects? (y/n)". Returns
-/// whether the user answered "y" (or EOF → "no") — callers exit cleanly on
-/// "no".
+/// Prompt the user: "Remove gitignored paths from N cleanable project(s)? [y/N]".
+/// Returns whether the user answered "y" (or EOF → "no") — callers exit cleanly
+/// on "no".
+///
+/// The noun agrees with the count (`output::projects_word`): a targeted
+/// `offcut clean <PROJECT_PATH>` run always has exactly one cleanable project,
+/// so the destructive confirmation would otherwise read "1 projects".
 ///
 /// In `--force` / `--dry-run` this is skipped — the flow state machine calls
 /// it only for interactive mode.
@@ -152,29 +204,73 @@ pub fn collect_all_approval<R: BufRead>(reader: &mut R, num_cleanable: usize) ->
     if num_cleanable == 0 {
         return false;
     }
-    let question = format!("Clean the {num_cleanable} cleanable projects? (y/n)",);
+    let hint = if output::stderr_terminal_ui_enabled() {
+        "[y/N]"
+    } else {
+        "(y/n)"
+    };
+    let question = format!(
+        "Remove gitignored paths from {num_cleanable} cleanable {}? {hint}",
+        output::projects_word(num_cleanable)
+    );
     eprintln!("? {question}");
     matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
+}
+
+/// The fate each item carries *before* any approval is collected. Shared by
+/// the plain listing and the rich review panel so the two cannot drift.
+fn pending_fate(item: &CleanItem) -> &'static str {
+    match item.classification {
+        Classification::Protected => "kept",
+        Classification::Safe => "will delete",
+        Classification::Surfaced => "needs approval",
+    }
 }
 
 /// Print the pre-approval report for one project: its path and every
 /// enumerated item with its classification and fate. Goes to stderr — the
 /// same stream as the prompts — so the user sees exactly what they are
 /// about to approve, in order, before any question is asked.
-fn print_project_report(path: &std::path::Path, items: &[CleanItem]) {
-    eprintln!("{}:", path.display());
-    for item in items {
-        let (label, fate) = match item.classification {
-            Classification::Protected => ("protected", "kept"),
-            Classification::Safe => ("safe-to-delete", "will delete"),
-            Classification::Surfaced => ("surfaced", "needs approval"),
+///
+/// A capable stderr gets the rich review panel; anything else (piped,
+/// redirected, `TERM=dumb`) keeps the plain line-oriented listing so scripts
+/// and logs read the same as they always have — the same lines, in the same
+/// order, with nothing added. Panel furniture (headers, rules, framing) belongs
+/// to the rich rendering alone: a header printed here would be a line every
+/// existing consumer of this stream has never seen.
+///
+/// Returns whether the rich panel was the rendering used, so the caller knows
+/// whether the outcome phase still owes the user one.
+fn print_project_report(project: &CleanableProject) -> bool {
+    if output::stderr_terminal_ui_enabled() {
+        let rows = output::clean_review_rows(&project.items, pending_fate);
+        for line in output::format_clean_review(
+            &project.path,
+            &project.branch_line,
+            &rows,
+            project.total_size.as_deref(),
+            output::terminal_width(),
+            output::stderr_color_enabled(),
+        ) {
+            eprintln!("{line}");
+        }
+        return true;
+    }
+    eprintln!("{}:", project.path.display());
+    for item in &project.items {
+        let label = match item.classification {
+            Classification::Protected => "protected",
+            Classification::Safe => "safe-to-delete",
+            Classification::Surfaced => "surfaced",
         };
         eprintln!(
-            "  {}{} [{label}] ({fate})",
+            "  {}{} [{label}] ({})",
             item.rel_path.display(),
             if item.is_dir { "/" } else { "" },
+            pending_fate(item),
         );
     }
+    false
 }
 
 /// Prompt the user about each surfaced item for `project_path`. Each
@@ -199,9 +295,14 @@ pub fn collect_each_item<R: BufRead>(
             continue;
         }
         eprintln!(
-            "? {}{} [surfaced] delete or keep? (y/n)",
+            "? {}{} [surfaced] delete? {}",
             item.rel_path.display(),
             if item.is_dir { "/" } else { "" },
+            if output::stderr_terminal_ui_enabled() {
+                "[y/N]"
+            } else {
+                "(y/n)"
+            },
         );
         let approved =
             matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"));
@@ -218,7 +319,15 @@ pub fn collect_project_approval<R: BufRead>(
     reader: &mut R,
     project_path: &std::path::Path,
 ) -> bool {
-    let question = format!("Clean {}? (y/n)", project_path.display(),);
+    let hint = if output::stderr_terminal_ui_enabled() {
+        "[y/N]"
+    } else {
+        "(y/n)"
+    };
+    let question = format!(
+        "Remove these gitignored paths from {}? {hint}",
+        project_path.display(),
+    );
     eprintln!("? {question}");
     matches!(read_line(reader), Some(answer) if answer.eq_ignore_ascii_case("y"))
 }
@@ -263,11 +372,13 @@ pub fn run<R: BufRead>(inputs: InteractiveFlowInputs, reader: &mut R) -> Vec<Pro
 
     // Step 3: per-project loop.
     let mut results: Vec<ProjectResult> = Vec::new();
-    for (path, items) in &inputs.per_project_items {
+    for project in &inputs.per_project_items {
+        let (path, items) = (&project.path, &project.items);
         // Show what would be deleted, then ask. A declined all-cleanup
         // prompt suppresses every later prompt: the user already said no.
+        let mut review_shown = false;
         let item_approvals: Vec<(PathBuf, bool)> = if interactive && all_approved {
-            print_project_report(path, items);
+            review_shown = print_project_report(project);
             collect_each_item(reader, path, items)
         } else {
             Vec::new()
@@ -318,6 +429,7 @@ pub fn run<R: BufRead>(inputs: InteractiveFlowInputs, reader: &mut R) -> Vec<Pro
             items: items.clone(),
             would_delete: would_delete_paths,
             project_approved,
+            review_shown,
         });
     }
 
@@ -343,11 +455,20 @@ mod tests {
         }
     }
 
+    fn cleanable(path: &str, items: &[CleanItem]) -> CleanableProject {
+        CleanableProject {
+            path: PathBuf::from(path),
+            items: items.to_vec(),
+            branch_line: "main · clean tree · remote ✓ pushed".to_string(),
+            total_size: None,
+        }
+    }
+
     fn inputs_for(items: &[CleanItem], force: bool, dry_run: bool) -> InteractiveFlowInputs {
         let path = PathBuf::from("/tmp/project");
         InteractiveFlowInputs {
-            all_projects: vec![(path.clone(), Status::Cleanable)],
-            per_project_items: vec![(path, items.to_vec())],
+            all_projects: vec![(path, Status::Cleanable)],
+            per_project_items: vec![cleanable("/tmp/project", items)],
             force,
             dry_run,
         }
@@ -357,6 +478,36 @@ mod tests {
         let reader = BufReader::new(answers.as_bytes());
         let mut r = reader;
         run(inputs, &mut r)
+    }
+
+    /// The commit fact refines exactly one refusal and leaves every other one
+    /// alone. `status_reason` is also the plain listing's `(reason)` suffix, so
+    /// a wider divergence would change scriptable output nobody asked to change.
+    #[test]
+    fn blocked_reason_refines_only_the_uncommitted_unpushed_case() {
+        assert_eq!(
+            blocked_reason(Status::Unpushed, false),
+            "nothing committed yet"
+        );
+        assert_eq!(
+            blocked_reason(Status::Unpushed, true),
+            status_reason(Status::Unpushed)
+        );
+        for status in [
+            Status::NoGit,
+            Status::NoRemote,
+            Status::Wip,
+            Status::Cleanable,
+            Status::Clean,
+        ] {
+            for committed in [false, true] {
+                assert_eq!(
+                    blocked_reason(status, committed),
+                    status_reason(status),
+                    "{status:?} (committed {committed}) must keep its reason"
+                );
+            }
+        }
     }
 
     /// Interactive mode with every answer "y": the project is approved and
@@ -389,6 +540,23 @@ mod tests {
         let results = run_with_answers(inputs, "n\n");
         assert_eq!(results.len(), 1);
         assert!(!results[0].project_approved);
+    }
+
+    /// A declined all-cleanup prompt skips the per-project report entirely, so
+    /// the result must not claim a review was shown — a caller that assumed it
+    /// was suppressed its own copy too, leaving the outcome with no project
+    /// path and no item listing on either stream.
+    #[test]
+    fn declined_all_prompt_reports_no_review_shown() {
+        let items = vec![make_item("target", Classification::Safe, true)];
+        let results = run_with_answers(inputs_for(&items, false, false), "n\n");
+        assert!(!results[0].review_shown);
+
+        // Non-interactive runs never render one either.
+        let forced = run_with_answers(inputs_for(&items, true, false), "");
+        assert!(!forced[0].review_shown);
+        let previewed = run_with_answers(inputs_for(&items, false, true), "");
+        assert!(!previewed[0].review_shown);
     }
 
     /// Interactive mode with "n" on a per-item: that item is excluded (kept).
@@ -554,10 +722,12 @@ mod tests {
                 (PathBuf::from("/tmp/aa-no-git"), Status::NoGit),
                 (cleanable.clone(), Status::Cleanable),
             ],
-            per_project_items: vec![(
-                cleanable.clone(),
-                vec![make_item("target", Classification::Safe, true)],
-            )],
+            per_project_items: vec![CleanableProject {
+                path: cleanable.clone(),
+                items: vec![make_item("target", Classification::Safe, true)],
+                branch_line: String::new(),
+                total_size: None,
+            }],
             force: false,
             dry_run: true,
         };

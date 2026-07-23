@@ -197,3 +197,41 @@ fn default_run_emits_no_progress_when_piped() {
         "piped output must not contain classifying lines: {out}"
     );
 }
+
+/// Test that the richer discovery scanning panel remains entirely TTY-gated:
+/// a piped `offcut discovery` run prints only the plain discovery report.
+#[test]
+fn discovery_emits_no_scanning_panel_when_piped() {
+    let ws = root_for("discovery-pipe");
+
+    let p1 = ws.join("p1");
+    std::fs::create_dir_all(&p1).unwrap();
+    init_repo_with_commit(&p1);
+
+    let p2 = ws.join("p2");
+    std::fs::create_dir_all(&p2).unwrap();
+    init_repo_with_commit(&p2);
+
+    let home = root_for("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let config = write_config(&home.join(".config"), &[ws.to_str().unwrap()], 2);
+
+    let out = run(["--config", config.to_str().unwrap(), "discovery"]);
+
+    assert!(
+        !out.contains("scanning"),
+        "piped discovery output must not contain the scanning panel: {out}"
+    );
+    assert!(
+        !out.contains("Discovered so far"),
+        "piped discovery output must not contain the live found list: {out}"
+    );
+    assert!(
+        !out.contains('\r') && !out.contains("\u{1b}["),
+        "piped discovery output must not contain live terminal controls: {out:?}"
+    );
+    assert!(
+        out.contains("discovered 2 project(s):"),
+        "plain discovery report must still render: {out}"
+    );
+}

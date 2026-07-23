@@ -10,7 +10,8 @@ mod progress;
 mod safelist;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use clap::{Parser, Subcommand};
 
@@ -398,11 +399,306 @@ fn classify_projects(
     out
 }
 
+fn git_text(project_path: &Path, args: &[&str]) -> Option<String> {
+    let out = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn branch_label(project_path: &Path, status: classify::Status) -> String {
+    if status == classify::Status::NoGit {
+        return "-".to_string();
+    }
+    git_text(project_path, &["branch", "--show-current"])
+        .or_else(|| {
+            git_text(project_path, &["rev-parse", "--short", "HEAD"])
+                .map(|h| format!("detached@{h}"))
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn changed_label(project_path: &Path, status: classify::Status) -> String {
+    if status == classify::Status::NoGit {
+        return "-".to_string();
+    }
+    git_text(project_path, &["log", "-1", "--format=%cr"]).unwrap_or_else(|| "-".to_string())
+}
+
+/// Per-project branch labels, read from `git` at most once each.
+///
+/// The workspace table already reads every project's branch for its BRANCH
+/// column; the review and blocked panels need the same string. Seeding the
+/// cache from the table's read keeps a rendered run at one `git branch`
+/// invocation per project instead of one per panel that mentions it.
+struct BranchLabels {
+    labels: Vec<Option<String>>,
+}
+
+impl BranchLabels {
+    fn new(len: usize) -> Self {
+        Self {
+            labels: vec![None; len],
+        }
+    }
+
+    fn seed(&mut self, labels: Vec<String>) {
+        self.labels = labels.into_iter().map(Some).collect();
+    }
+
+    fn get(&mut self, idx: usize, project_path: &Path, status: classify::Status) -> String {
+        match self.labels.get(idx) {
+            Some(Some(label)) => label.clone(),
+            Some(None) => {
+                let label = branch_label(project_path, status);
+                self.labels[idx] = Some(label.clone());
+                label
+            }
+            None => branch_label(project_path, status),
+        }
+    }
+}
+
+/// Whether `project_path` has any commit at all.
+///
+/// `Status::Unpushed` is the one status that does not answer this on its own:
+/// `classify::status_unpushed` short-circuits to true on a missing `HEAD`, so
+/// the status covers both a branch whose commits were never pushed and a repo
+/// that has never committed anything. The two need different copy, so the fact
+/// is read from the same `git` plumbing every other label here uses.
+fn has_commits(project_path: &Path) -> bool {
+    git_text(project_path, &["rev-parse", "--verify", "HEAD"]).is_some()
+}
+
+/// The commit fact every panel's copy is read against, for one project.
+///
+/// Only `Unpushed` copy turns on it, so it is the only status that pays for the
+/// extra plumbing call; every other status is committed as far as any panel is
+/// concerned. One owner for the shortcut means the branch state and the refusal
+/// beneath it are read from the same answer rather than two independent ones.
+fn committed_state(project_path: &Path, status: classify::Status) -> bool {
+    status != classify::Status::Unpushed || has_commits(project_path)
+}
+
+/// The one-line tree/remote state under `project_path`'s panel header.
+///
+/// Reads the one fact the status cannot supply, then hands off to
+/// `format_branch_state`. A caller that also renders the blocked panel should
+/// read `committed_state` once and call `format_branch_state` directly instead,
+/// so both lines answer from one `git` call.
+fn branch_state_line(project_path: &Path, branch: &str, status: classify::Status) -> String {
+    format_branch_state(branch, status, committed_state(project_path, status))
+}
+
+/// Render the tree/remote state from facts already gathered.
+///
+/// It reports the two facts the header needs — the working tree and the remote
+/// — in their own vocabulary, and only the ones actually established:
+/// `Unpushed` is decided before `Wip` (see `classify::Status`), so an unpushed
+/// project may still have uncommitted work and claiming a clean tree for it
+/// would be a lie; `committed` is false for a repo with no commits, which must
+/// not be described as having local commits ahead of anything.
+///
+/// Deliberately none of these arms repeat `interactive::status_reason`. The
+/// blocked panel prints this line and that reason two lines apart, so a verbatim
+/// copy would both make the panel say the same thing twice and leave one
+/// sentence owned by two modules, free to drift.
+fn format_branch_state(branch: &str, status: classify::Status, committed: bool) -> String {
+    let (tree, remote) = match status {
+        classify::Status::Cleanable | classify::Status::Clean => ("clean tree", "remote ✓ pushed"),
+        classify::Status::Wip => ("uncommitted changes", "remote ✓"),
+        classify::Status::Unpushed if committed => ("local commits ahead", "remote ✗ not pushed"),
+        classify::Status::Unpushed => ("no commits yet", "remote ✗ nothing pushed"),
+        classify::Status::NoRemote => ("local only", "remote ✗ none"),
+        classify::Status::NoGit => return "-".to_string(),
+    };
+    format!("{branch} · {tree} · {remote}")
+}
+
+/// Render the rich workspace-summary table for `rows` on stdout.
+///
+/// The BRANCH and CHANGED columns each need their own `git` invocation per
+/// project, so the reads run under a counted `reading N/M` progress phase —
+/// otherwise a workspace with hundreds of projects pauses silently between
+/// the sizing phase and the table. Shared by `run_listing` and `run_cleaning`
+/// so the two renderings cannot drift.
+///
+/// Returns the branch label read for each row, in row order, so a caller that
+/// renders further panels reuses them instead of re-spawning `git`.
+///
+/// `targeted` says whether the rows came from `discovery::discover_single`
+/// rather than a workspace walk: that run never reads a configured workspace
+/// root, so the header must not claim a scan that did not happen.
+fn render_workspace_table(
+    rows: &[(PathBuf, classify::Status)],
+    sizes: &[Option<String>],
+    cleanable_count: usize,
+    total_reclaimable: Option<&str>,
+    targeted: bool,
+    emit_colors: bool,
+) -> Vec<String> {
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    let mut branches: Vec<String> = Vec::with_capacity(rows.len());
+    let mut changed: Vec<String> = Vec::with_capacity(rows.len());
+    for (i, (path, status)) in rows.iter().enumerate() {
+        progress.update_phase("reading", i + 1, rows.len(), path);
+        branches.push(branch_label(path, *status));
+        changed.push(changed_label(path, *status));
+    }
+    progress.finish();
+
+    let table_rows: Vec<output::ProjectTableRow<'_>> = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, (path, status))| output::ProjectTableRow {
+            path,
+            status: *status,
+            size: sizes.get(idx).and_then(|s| s.as_deref()),
+            branch: Some(branches[idx].as_str()),
+            changed: Some(changed[idx].as_str()),
+        })
+        .collect();
+    let width = output::terminal_width();
+    for line in output::wrap_line(
+        &format!(
+            "⟩ {} · {} {}",
+            if targeted {
+                "inspected the requested project"
+            } else {
+                "scanned configured workspaces"
+            },
+            rows.len(),
+            output::projects_word(rows.len())
+        ),
+        width,
+    ) {
+        println!("{line}");
+    }
+    for line in output::format_project_table(
+        &table_rows,
+        cleanable_count,
+        total_reclaimable,
+        width,
+        emit_colors,
+    ) {
+        println!("{line}");
+    }
+    branches
+}
+
+/// The panel a targeted `offcut clean <PROJECT_PATH>` ends on when the run
+/// found nothing to clean, or `None` when no panel states this outcome
+/// truthfully.
+///
+/// A blocking tree state gets the refusal, the action that unblocks it, and
+/// what cleaning would free once it is unblocked. An already-clean project gets
+/// the nothing-to-reclaim state instead: it is committed, pushed, and carries
+/// nothing offcut may delete, so "commit, push, or initialize as needed" is
+/// advice it cannot act on. A `Cleanable` project only reaches here when its
+/// own inspection failed — the sizing pass already warned about that on
+/// stderr, and no panel would be honest about it.
+///
+/// `committed` is the same `committed_state` answer `branch_line` was rendered
+/// from, so the refusal and the branch state cannot disagree about whether the
+/// project has commits.
+fn targeted_outcome_panel(
+    path: &Path,
+    status: classify::Status,
+    committed: bool,
+    branch_line: &str,
+    details: &[String],
+    possible_reclaim: Option<&str>,
+    width: usize,
+    emit_colors: bool,
+) -> Option<Vec<String>> {
+    if output::blocks_cleaning(status) {
+        return Some(output::format_blocked_project(
+            path,
+            status,
+            committed,
+            branch_line,
+            details,
+            possible_reclaim,
+            width,
+            emit_colors,
+        ));
+    }
+    if status == classify::Status::Clean {
+        return Some(output::format_nothing_to_reclaim(
+            path,
+            branch_line,
+            width,
+            emit_colors,
+        ));
+    }
+    None
+}
+
+/// What cleaning `project_path` would free if its tree stopped blocking, or
+/// `None` when the figure cannot be measured or would be zero.
+///
+/// Reuses the sizing pass's read-only pipeline — safe set, `clean::dry_run`,
+/// `disk::compute_reclaimable_size` — but counts `Safe` items only. A blocked
+/// project's `Surfaced` items are untracked paths that are neither protected
+/// nor safe-listed, i.e. routinely the user's own new work; the very action
+/// this panel demands (commit and push) makes them tracked, so offcut would
+/// never delete them and quoting their bytes promises a reclaim that can never
+/// arrive. Safe-listed build output is what cleaning takes without asking, so
+/// it is the only part of the figure the panel can stand behind.
+///
+/// Only the one targeted project is measured: a workspace run never reaches
+/// this, so the listing keeps its cost. Every failure (no repo to enumerate,
+/// an unbuildable safe set) degrades to no figure rather than to an error —
+/// the panel's subject is the blocked tree, not the measurement.
+fn blocked_reclaim(
+    project_path: &Path,
+    ignore_set: &ignore::IgnoreSet,
+    cfg: &Config,
+) -> Option<String> {
+    let mut progress = progress::ProgressWriter::new(std::io::stdout());
+    progress.update_phase("sizing", 1, 1, project_path);
+    let measured = safelist::SafeSet::from_config(project_path, cfg)
+        .ok()
+        .and_then(|safe_set| clean::dry_run(project_path, ignore_set, &safe_set).ok())
+        .and_then(|items| {
+            let safe_only: Vec<clean::CleanItem> = items
+                .into_iter()
+                .filter(|item| item.classification == clean::Classification::Safe)
+                .collect();
+            disk::compute_reclaimable_size(project_path, &safe_only).ok()
+        })
+        .filter(|&bytes| bytes > 0)
+        .map(disk::format_size);
+    progress.finish();
+    measured
+}
+
+fn status_detail_lines(project_path: &Path, status: classify::Status) -> Vec<String> {
+    if status != classify::Status::Wip {
+        return Vec::new();
+    }
+    git_text(project_path, &["status", "--porcelain"])
+        .map(|s| s.lines().take(6).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// `offcut list`: show each discovered project with its git status, sorted
 /// by severity (most-needs-attention first). Read-only — no cleaning.
 ///
 /// Each row uses the formatted shape `[rank] path — label (reason)` with
-/// color coding per status. Cleanable rows carry a bold-green label so the
+/// color coding per status. Cleanable rows carry a bold-cyan label so the
 /// reader can tell which projects are subjects of the interactive clean flow.
 fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (_config_path, cfg) = load_cli_config(cli)?;
@@ -416,9 +712,9 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
-    let mut rows: Vec<(String, classify::Status)> = classify_projects(&projects)
+    let mut rows: Vec<(PathBuf, classify::Status)> = classify_projects(&projects)
         .into_iter()
-        .map(|(path, status, _)| (path.display().to_string(), status))
+        .map(|(path, status, _)| (path, status))
         .collect();
     rows.sort_by_key(|&(_, status)| status);
 
@@ -438,7 +734,7 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let m = cleanable_indices.len();
         let mut progress = progress::ProgressWriter::new(std::io::stdout());
         for (i, &idx) in cleanable_indices.iter().enumerate() {
-            let path = std::path::Path::new(&rows[idx].0);
+            let path = rows[idx].0.as_path();
             progress.update_phase("sizing", i + 1, m, path);
             let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
                 Ok(s) => s,
@@ -446,7 +742,7 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     progress.clear();
                     eprintln!(
                         "warning: {}: could not build safe-to-delete set: {e}",
-                        rows[idx].0
+                        rows[idx].0.display()
                     );
                     continue;
                 }
@@ -465,13 +761,13 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                         progress.clear();
                         eprintln!(
                             "warning: {}: could not compute reclaimable size: {e}",
-                            rows[idx].0
+                            rows[idx].0.display()
                         );
                     }
                 },
                 Err(e) => {
                     progress.clear();
-                    eprintln!("warning: {}: dry_run failed: {e}", rows[idx].0);
+                    eprintln!("warning: {}: dry_run failed: {e}", rows[idx].0.display());
                 }
             }
         }
@@ -489,27 +785,35 @@ fn run_listing(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
-    // lets `output::color` fall back to its runtime gate.
-    println!(
-        "{}",
-        output::format_summary(
-            rows.len(),
-            None,
-            if cleanable_count > 0 {
-                Some(cleanable_count)
-            } else {
-                None
-            },
+    if output::stdout_terminal_ui_enabled() {
+        render_workspace_table(
+            &rows,
+            &per_project_size,
+            cleanable_count,
             total_reclaimable_str.as_deref(),
-        )
-    );
-    for (idx, (path, status)) in rows.iter().enumerate() {
-        let size = per_project_size[idx].as_deref();
+            false,
+            output::stdout_color_enabled(),
+        );
+    } else {
+        // Gated on TTY — plain when piped, colored on a TTY. Passing `None`
+        // lets `output::color` fall back to its runtime gate.
         println!(
             "{}",
-            output::format_project_row(std::path::Path::new(path), *status, None, size,)
+            output::format_summary(
+                rows.len(),
+                None,
+                if cleanable_count > 0 {
+                    Some(cleanable_count)
+                } else {
+                    None
+                },
+                total_reclaimable_str.as_deref(),
+            )
         );
+        for (idx, (path, status)) in rows.iter().enumerate() {
+            let size = per_project_size[idx].as_deref();
+            println!("{}", output::format_project_row(path, *status, None, size,));
+        }
     }
     Ok(())
 }
@@ -585,9 +889,9 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Collect each project's status, then sort by severity. `Status` derives
     // `Ord` over variants declared most-severe-first, so it sorts directly.
-    let mut rows: Vec<(String, classify::Status)> = classify_projects(&projects)
+    let mut rows: Vec<(PathBuf, classify::Status)> = classify_projects(&projects)
         .into_iter()
-        .map(|(path, status, _)| (path.display().to_string(), status))
+        .map(|(path, status, _)| (path, status))
         .collect();
     rows.sort_by_key(|&(_, status)| status);
 
@@ -596,7 +900,12 @@ fn run_classification(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         rows.len()
     );
     for (path, status) in &rows {
-        println!("  [{}] {path} -> {}", status.rank(), status.label());
+        println!(
+            "  [{}] {} -> {}",
+            status.rank(),
+            path.display(),
+            status.label()
+        );
     }
     Ok(())
 }
@@ -724,37 +1033,64 @@ fn run_cleaning(
     } else {
         None
     };
-    // The aggregate reclaimable is printed alongside the header — the
-    // per-project rows below each carry their own size too.
-    println!(
-        "clean: {} project(s) — sorted by status",
-        all_projects.len()
-    );
-    println!(
-        "{}",
-        output::format_summary(
-            all_projects.len(),
-            None,
-            if cleanable_count > 0 {
-                Some(cleanable_count)
-            } else {
-                None
-            },
-            total_reclaimable_str.as_deref(),
-        )
-    );
-    let mut cleanable_items: Vec<(PathBuf, Vec<clean::CleanItem>)> = Vec::new();
+    let mut cleanable_items: Vec<interactive::CleanableProject> = Vec::new();
     let mut cleanable_meta: Vec<(usize, safelist::SafeSet)> = Vec::new();
+    let rich_stdout = output::stdout_terminal_ui_enabled();
+    let emit_colors = output::stdout_color_enabled();
+    // The interactive flow needs the same (path, status) pairs the table
+    // renders, so the projection is built once and shared.
+    let project_statuses: Vec<(PathBuf, classify::Status)> = all_projects
+        .iter()
+        .map(|(p, s, _)| (p.clone(), *s))
+        .collect();
+    // Whether the interactive flow *may* draw the pre-approval review panel on
+    // stderr. It is only a prediction — the flow skips the panel outright when
+    // the user declines the all-cleanup prompt — so it gates nothing but the
+    // branch read below, which has to happen before the flow runs. What was
+    // actually rendered comes back per project as `ProjectResult::review_shown`.
+    let stderr_may_render_review =
+        !cli.force && !cli.dry_run && output::stderr_terminal_ui_enabled();
+    let mut branch_labels = BranchLabels::new(all_projects.len());
+    if rich_stdout {
+        branch_labels.seed(render_workspace_table(
+            &project_statuses,
+            &per_project_size,
+            cleanable_count,
+            total_reclaimable_str.as_deref(),
+            project_path.is_some(),
+            emit_colors,
+        ));
+    } else {
+        // The aggregate reclaimable is printed alongside the header — the
+        // per-project rows below each carry their own size too.
+        println!(
+            "clean: {} project(s) — sorted by status",
+            all_projects.len()
+        );
+        println!(
+            "{}",
+            output::format_summary(
+                all_projects.len(),
+                None,
+                if cleanable_count > 0 {
+                    Some(cleanable_count)
+                } else {
+                    None
+                },
+                total_reclaimable_str.as_deref(),
+            )
+        );
+    }
     for (idx, (path, status, _ignore_set)) in all_projects.iter().enumerate() {
-        match status {
-            classify::Status::Cleanable => {
-                let (items, safe_set) = match (
-                    per_project_items[idx].take(),
-                    per_project_safe_set[idx].take(),
-                ) {
-                    (Some(items), Some(safe_set)) => (items, safe_set),
-                    _ => continue,
-                };
+        if *status == classify::Status::Cleanable {
+            let (items, safe_set) = match (
+                per_project_items[idx].take(),
+                per_project_safe_set[idx].take(),
+            ) {
+                (Some(items), Some(safe_set)) => (items, safe_set),
+                _ => continue,
+            };
+            if !rich_stdout {
                 println!(
                     "{}",
                     output::format_project_row(
@@ -764,19 +1100,75 @@ fn run_cleaning(
                         per_project_size[idx].as_deref()
                     )
                 );
-                cleanable_items.push((path.clone(), items));
-                cleanable_meta.push((idx, safe_set));
             }
-            _ => {
-                println!("{}", output::format_project_row(path, *status, None, None));
-            }
+            // The branch line only reaches the screen through the pre-approval
+            // review panel, so it is read only for the runs that render one.
+            let branch_line = if stderr_may_render_review {
+                branch_state_line(path, &branch_labels.get(idx, path, *status), *status)
+            } else {
+                String::new()
+            };
+            cleanable_items.push(interactive::CleanableProject {
+                path: path.clone(),
+                items,
+                branch_line,
+                total_size: per_project_size[idx].clone(),
+            });
+            cleanable_meta.push((idx, safe_set));
+        } else if !rich_stdout {
+            println!("{}", output::format_project_row(path, *status, None, None));
         }
     }
 
     // Zero cleanable: summary and exit 0 — no prompts, no enumeration,
     // nothing to clean. The flow only runs when there is a subject to clean.
     if cleanable_items.is_empty() {
-        println!("clean: no cleanable projects — nothing to delete");
+        let panel = if rich_stdout && project_path.is_some() {
+            all_projects.first().map(|(path, status, ignore_set)| {
+                let committed = committed_state(path, *status);
+                let branch =
+                    format_branch_state(&branch_labels.get(0, path, *status), *status, committed);
+                let reclaim = if output::blocks_cleaning(*status) {
+                    blocked_reclaim(path, ignore_set, &cfg)
+                } else {
+                    None
+                };
+                targeted_outcome_panel(
+                    path,
+                    *status,
+                    committed,
+                    &branch,
+                    &status_detail_lines(path, *status),
+                    reclaim.as_deref(),
+                    output::terminal_width(),
+                    emit_colors,
+                )
+            })
+        } else {
+            None
+        };
+        match panel.flatten() {
+            Some(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            // No panel fits this outcome — an empty project list (every
+            // project skipped by `classify_projects`, warned about on stderr)
+            // or a cleanable project whose inspection failed. Either way the
+            // run still says what it did: bounded on a rendering terminal,
+            // and on one line for the scripts reading the plain stream.
+            None => {
+                let summary = "clean: no cleanable projects — nothing to delete";
+                if rich_stdout {
+                    for line in output::wrap_line(summary, output::terminal_width()) {
+                        println!("{line}");
+                    }
+                } else {
+                    println!("{summary}");
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -784,10 +1176,7 @@ fn run_cleaning(
     // process's stdin (locked, buffered for line reads). The flow itself
     // owns the decision state machine; the CLI hook owns the I/O plumbing.
     let inputs = interactive::InteractiveFlowInputs {
-        all_projects: all_projects
-            .iter()
-            .map(|(p, s, _)| (p.clone(), *s))
-            .collect(),
+        all_projects: project_statuses,
         per_project_items: cleanable_items,
         force: cli.force,
         dry_run: cli.dry_run,
@@ -804,50 +1193,87 @@ fn run_cleaning(
     // output, so it is cleared in place before each print — a println after
     // an un-cleared padded line would wrap and leave the progress line
     // permanently on screen instead of overwriting it.
+    //
+    // A project whose review the flow already showed on stderr — immediately
+    // before the question it belongs to — must not have it repeated here after
+    // the decision was made. Every other project (--force, --dry-run, a stderr
+    // that cannot render it, or a declined all-cleanup prompt that skipped the
+    // per-project report entirely) gets the panel on stdout, so no outcome is
+    // reported without the project and items it is about.
     let mut clean_progress = progress::ProgressWriter::new(std::io::stdout());
+    let width = output::terminal_width();
     for (i, (r, (idx, safe_set))) in results.iter().zip(&cleanable_meta).enumerate() {
-        let will_execute = r.project_approved && !cli.dry_run;
-        clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
+        let will_execute = enters_cleaning_execution_phase(r.project_approved, cli.dry_run);
+        // What this run will actually do to each item, once the approvals are
+        // in. Shared by the plain listing and the rich panel so neither can
+        // claim a fate the other contradicts.
+        let fate_of = |item: &clean::CleanItem| -> &'static str {
+            item_fate(
+                item,
+                &r.would_delete,
+                r.project_approved,
+                cli.force,
+                cli.dry_run,
+            )
+        };
         clean_progress.clear();
-        println!(
-            "clean {}: {} — {}",
-            r.path.display(),
-            if r.project_approved {
-                "approved"
-            } else {
-                "skipped"
-            },
-            r.status.label()
-        );
-        for item in &r.items {
-            let label = match item.classification {
-                clean::Classification::Protected => "protected",
-                clean::Classification::Safe => "safe-to-delete",
-                clean::Classification::Surfaced => "surfaced",
-            };
-            let verdict = if r.would_delete.contains(&item.rel_path) {
-                if will_execute {
-                    " (deleting)"
-                } else {
-                    " (would delete)"
+        if rich_stdout {
+            if !r.review_shown {
+                let rows = output::clean_review_rows(&r.items, fate_of);
+                let branch = branch_labels.get(*idx, &r.path, r.status);
+                for line in output::format_clean_review(
+                    &r.path,
+                    &branch_state_line(&r.path, &branch, r.status),
+                    &rows,
+                    per_project_size[*idx].as_deref(),
+                    width,
+                    emit_colors,
+                ) {
+                    println!("{line}");
                 }
-            } else if cli.dry_run
-                && !cli.force
-                && item.classification == clean::Classification::Surfaced
-            {
-                // A real interactive run would ask about this item, so the
-                // preview must not claim either fate.
-                " (would prompt)"
+            }
+            if r.project_approved {
+                if will_execute {
+                    println!(
+                        "{}",
+                        output::format_path_line("⟩ cleaning ", &r.path, width)
+                    );
+                } else {
+                    for line in output::wrap_line("⟩ dry-run only - nothing deleted", width) {
+                        println!("{line}");
+                    }
+                }
             } else {
-                " (kept)"
-            };
+                println!(
+                    "{}",
+                    output::format_path_line("⟩ skipped by user · ", &r.path, width)
+                );
+            }
+        } else {
             println!(
-                "  {}{} [{}]{}",
-                item.rel_path.display(),
-                if item.is_dir { "/" } else { "" },
-                label,
-                verdict
+                "clean {}: {} — {}",
+                r.path.display(),
+                if r.project_approved {
+                    "approved"
+                } else {
+                    "skipped"
+                },
+                r.status.label()
             );
+            for item in &r.items {
+                let label = match item.classification {
+                    clean::Classification::Protected => "protected",
+                    clean::Classification::Safe => "safe-to-delete",
+                    clean::Classification::Surfaced => "surfaced",
+                };
+                println!(
+                    "  {}{} [{}] ({})",
+                    item.rel_path.display(),
+                    if item.is_dir { "/" } else { "" },
+                    label,
+                    fate_of(item)
+                );
+            }
         }
 
         if will_execute {
@@ -866,17 +1292,55 @@ fn run_cleaning(
                 })
                 .cloned()
                 .collect();
+            // What this run frees is what it deletes: the sizing pass measured
+            // every deletable item, including any the user then declined, so
+            // reporting that figure would overstate the reclaim. Re-measure
+            // over the approved items only — and only when something was
+            // actually declined, so the common case keeps its single pass.
+            // Must happen before `clean` deletes the paths being measured.
+            let reclaimed = if !rich_stdout {
+                None
+            } else if r.items.iter().any(|i| {
+                matches!(
+                    i.classification,
+                    clean::Classification::Safe | clean::Classification::Surfaced
+                ) && !r.would_delete.contains(&i.rel_path)
+            }) {
+                let deleted: Vec<clean::CleanItem> = r
+                    .items
+                    .iter()
+                    .filter(|i| r.would_delete.contains(&i.rel_path))
+                    .cloned()
+                    .collect();
+                disk::compute_reclaimable_size(&r.path, &deleted)
+                    .ok()
+                    .map(disk::format_size)
+            } else {
+                per_project_size[*idx].clone()
+            };
             let ignore_set = &all_projects[*idx].2;
             clean_progress.update_phase("cleaning", i + 1, cleanable_meta.len(), &r.path);
             let outcome = clean::clean(&r.path, ignore_set, safe_set, &approved, cli.force, false);
             clean_progress.clear();
             match outcome {
                 Ok(_) => {
-                    println!(
-                        "clean {}: deleted {} item(s)",
-                        r.path.display(),
-                        r.would_delete.len()
-                    );
+                    if rich_stdout {
+                        for line in output::format_clean_success(
+                            &r.path,
+                            r.would_delete.len(),
+                            reclaimed.as_deref(),
+                            width,
+                            emit_colors,
+                        ) {
+                            println!("{line}");
+                        }
+                    } else {
+                        println!(
+                            "clean {}: deleted {} item(s)",
+                            r.path.display(),
+                            r.would_delete.len()
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!("clean {}: failed: {e}", r.path.display());
@@ -885,6 +1349,331 @@ fn run_cleaning(
         }
     }
     Ok(())
+}
+
+// What this run will actually do to one item after approvals are known.
+// Used by both plain output and rich review rows so neither can claim a fate
+// the other contradicts.
+fn item_fate(
+    item: &clean::CleanItem,
+    would_delete: &[PathBuf],
+    project_approved: bool,
+    force: bool,
+    dry_run: bool,
+) -> &'static str {
+    let will_execute = enters_cleaning_execution_phase(project_approved, dry_run);
+    if !project_approved && !dry_run {
+        return "kept";
+    }
+    if would_delete.contains(&item.rel_path) {
+        if will_execute {
+            "deleting"
+        } else {
+            "would delete"
+        }
+    } else if dry_run && !force && item.classification == clean::Classification::Surfaced {
+        // A real interactive run would ask about this item, so the preview
+        // must not claim either fate.
+        "would prompt"
+    } else {
+        "kept"
+    }
+}
+
+// The live `cleaning N/M` progress phase belongs to the destructive execution
+// step only. Dry-runs and declined projects still render outcomes, but they are
+// not actively cleaning anything.
+fn enters_cleaning_execution_phase(project_approved: bool, dry_run: bool) -> bool {
+    project_approved && !dry_run
+}
+
+#[cfg(test)]
+mod item_fate_tests {
+    use super::*;
+
+    fn item(path: &str, classification: clean::Classification) -> clean::CleanItem {
+        clean::CleanItem {
+            rel_path: PathBuf::from(path),
+            is_dir: false,
+            classification,
+        }
+    }
+
+    fn rendered_fates(
+        items: &[clean::CleanItem],
+        would_delete: &[PathBuf],
+        project_approved: bool,
+    ) -> String {
+        let rows = output::clean_review_rows(items, |item| {
+            item_fate(item, would_delete, project_approved, false, false)
+        });
+        output::format_clean_review(
+            Path::new("/workspace/app"),
+            "main · clean tree · remote ✓ pushed",
+            &rows,
+            Some("10 KB"),
+            100,
+            false,
+        )
+        .join("\n")
+    }
+
+    /// Declining the all-cleanup prompt means no project was approved, so the
+    /// post-decision rich review must report every item as kept even though
+    /// the pre-decision plan included safe-listed paths in `would_delete`.
+    #[test]
+    fn declined_all_cleanup_rich_review_reports_every_item_kept() {
+        let items = vec![
+            item("target", clean::Classification::Safe),
+            item("scratch.txt", clean::Classification::Surfaced),
+        ];
+        let would_delete = vec![PathBuf::from("target"), PathBuf::from("scratch.txt")];
+
+        let rendered = rendered_fates(&items, &would_delete, false);
+
+        assert!(rendered.contains("target"), "{rendered}");
+        assert!(rendered.contains("scratch.txt"), "{rendered}");
+        assert_eq!(
+            rendered.matches("kept").count(),
+            2,
+            "declined real run keeps every item: {rendered}"
+        );
+        assert!(
+            !rendered.contains("would delete"),
+            "declined real run must not promise deletion: {rendered}"
+        );
+    }
+
+    /// The same fate rule applies after a user reaches an individual project
+    /// prompt and declines it: safe and surfaced entries alike are untouched.
+    #[test]
+    fn declined_per_project_rich_review_reports_every_item_kept() {
+        let items = vec![
+            item("node_modules", clean::Classification::Safe),
+            item("coverage.tmp", clean::Classification::Surfaced),
+            item("keep.dat", clean::Classification::Protected),
+        ];
+        let would_delete = vec![PathBuf::from("node_modules"), PathBuf::from("coverage.tmp")];
+
+        let rendered = rendered_fates(&items, &would_delete, false);
+
+        assert_eq!(
+            rendered.matches("kept").count(),
+            3,
+            "declined project keeps safe, surfaced, and protected items: {rendered}"
+        );
+        assert!(!rendered.contains("would delete"), "{rendered}");
+        assert!(!rendered.contains("deleting"), "{rendered}");
+    }
+
+    #[test]
+    fn approved_project_still_reports_planned_deletions() {
+        let items = vec![item("target", clean::Classification::Safe)];
+        let would_delete = vec![PathBuf::from("target")];
+
+        let rendered = rendered_fates(&items, &would_delete, true);
+
+        assert!(rendered.contains("deleting"), "{rendered}");
+    }
+
+    #[test]
+    fn live_cleaning_progress_is_only_for_real_approved_execution() {
+        assert!(enters_cleaning_execution_phase(true, false));
+        assert!(!enters_cleaning_execution_phase(true, true));
+        assert!(!enters_cleaning_execution_phase(false, false));
+        assert!(!enters_cleaning_execution_phase(false, true));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Targeted-run outcome panel: unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod targeted_panel_tests {
+    use super::*;
+    use std::fs;
+
+    fn panel_with(status: classify::Status, possible_reclaim: Option<&str>) -> Option<String> {
+        panel_for(status, possible_reclaim, true)
+    }
+
+    fn panel_for(
+        status: classify::Status,
+        possible_reclaim: Option<&str>,
+        committed: bool,
+    ) -> Option<String> {
+        targeted_outcome_panel(
+            Path::new("/workspace/dashboard"),
+            status,
+            committed,
+            &format_branch_state("main", status, committed),
+            &[],
+            possible_reclaim,
+            80,
+            false,
+        )
+        .map(|lines| lines.join("\n"))
+    }
+
+    fn panel(status: classify::Status) -> Option<String> {
+        panel_with(status, None)
+    }
+
+    /// A committed, pushed project with nothing left to delete is not blocked
+    /// on anything: refusing to clean it and asking the user to commit and push
+    /// would be advice they cannot act on.
+    #[test]
+    fn clean_project_reports_nothing_to_reclaim_instead_of_a_refusal() {
+        let rendered = panel(classify::Status::Clean).expect("clean projects get a panel");
+        assert!(rendered.contains("nothing to reclaim"), "{rendered}");
+        assert!(!rendered.contains("refusing to clean"), "{rendered}");
+        assert!(!rendered.contains("commit, push"), "{rendered}");
+    }
+
+    /// Every tree state the user can act on keeps the refusal and the rerun
+    /// hint that unblocks it.
+    #[test]
+    fn blocking_states_keep_the_refusal_panel() {
+        for status in [
+            classify::Status::NoGit,
+            classify::Status::NoRemote,
+            classify::Status::Unpushed,
+            classify::Status::Wip,
+        ] {
+            let rendered = panel(status).unwrap_or_else(|| panic!("{status:?} gets a panel"));
+            assert!(rendered.contains("refusing to clean"), "{status:?}");
+            assert!(rendered.contains("offcut clean"), "{status:?}");
+        }
+    }
+
+    /// A cleanable project only reaches this branch when its own inspection
+    /// failed — already warned about on stderr. No panel states that
+    /// truthfully, so the caller falls back to the plain summary line.
+    #[test]
+    fn uninspectable_cleanable_project_gets_no_panel() {
+        assert!(panel(classify::Status::Cleanable).is_none());
+    }
+
+    /// The blocked figure counts safe-listed build output only. A blocked
+    /// project's surfaced items are untracked paths offcut has not been told
+    /// it may delete — routinely the user's own new work — and the commit the
+    /// panel asks for makes them tracked, so counting them promises a reclaim
+    /// that can never arrive.
+    #[test]
+    fn blocked_reclaim_counts_safe_output_not_untracked_work() {
+        let root = std::env::temp_dir().join(format!(
+            "offcut-blocked-reclaim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join("scratch")).unwrap();
+        let git = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("init")
+            .output()
+            .unwrap();
+        assert!(git.status.success());
+        fs::write(root.join("node_modules/pkg.bin"), vec![b'x'; 2048]).unwrap();
+        fs::write(root.join("scratch/dataset.csv"), vec![b'y'; 8192]).unwrap();
+
+        let ignore_set = ignore::IgnoreSet::load(&root).unwrap();
+        let measured = blocked_reclaim(&root, &ignore_set, &Config::default());
+
+        assert_eq!(
+            measured.as_deref(),
+            Some(disk::format_size(2048).as_str()),
+            "only node_modules may count; scratch/dataset.csv is the user's work"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `Unpushed` covers a branch whose commits were never pushed *and* a repo
+    /// that has never committed anything, so the panel states the one it is
+    /// actually looking at rather than inventing commits for an empty repo.
+    ///
+    /// The refusal is checked alongside the branch state: the two lines are two
+    /// apart, so a refusal reading "has unpushed commits" under a branch line
+    /// reading "no commits yet" makes the panel argue with itself.
+    #[test]
+    fn unpushed_panel_does_not_claim_commits_an_empty_repo_lacks() {
+        let empty = panel_for(classify::Status::Unpushed, None, false).expect("panel");
+        assert!(empty.contains("no commits yet"), "{empty}");
+        assert!(!empty.contains("commits ahead"), "{empty}");
+        assert!(
+            empty.contains("refusing to clean - nothing committed yet"),
+            "{empty}"
+        );
+        assert!(!empty.contains("has unpushed commits"), "{empty}");
+        assert!(empty.contains("commit, push"), "{empty}");
+
+        let ahead = panel_for(classify::Status::Unpushed, None, true).expect("panel");
+        assert!(ahead.contains("local commits ahead"), "{ahead}");
+        assert!(!ahead.contains("no commits yet"), "{ahead}");
+        assert!(
+            ahead.contains("refusing to clean - has unpushed commits"),
+            "{ahead}"
+        );
+        assert!(!ahead.contains("nothing committed"), "{ahead}");
+    }
+
+    /// The commit fact the unpushed copy turns on is read from git, not
+    /// guessed: a freshly initialized repo has none, and one commit is enough.
+    #[test]
+    fn has_commits_reads_the_repository_not_the_status() {
+        let root = std::env::temp_dir().join(format!(
+            "offcut-has-commits-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init"]);
+        assert!(
+            !has_commits(&root),
+            "a repo with no commits has nothing ahead of a remote"
+        );
+
+        git(&["config", "user.email", "test@test.dev"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(root.join("initial.txt"), "initial").unwrap();
+        git(&["add", "initial.txt"]);
+        git(&["commit", "-m", "initial"]);
+        assert!(has_commits(&root));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A measured blocked project quotes what cleaning would free once the
+    /// tree stops blocking; an unmeasurable one simply omits the figure.
+    #[test]
+    fn blocked_panel_carries_the_measured_reclaim_when_known() {
+        let measured = panel_with(classify::Status::Wip, Some("540 MB")).expect("panel");
+        assert!(measured.contains("~540 MB"), "{measured}");
+        assert!(measured.contains("would become reclaimable"), "{measured}");
+
+        let unmeasured = panel(classify::Status::Wip).expect("panel");
+        assert!(
+            !unmeasured.contains("would become reclaimable"),
+            "{unmeasured}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

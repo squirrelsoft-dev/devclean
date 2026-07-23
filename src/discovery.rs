@@ -97,7 +97,9 @@ use glob::Pattern;
 use walkdir::WalkDir;
 
 use crate::config::Config;
-use crate::progress::ProgressWriter;
+use crate::progress::{
+    DISCOVERY_RECENT_LIMIT, DiscoveryProgress, DiscoveryProgressProject, ProgressWriter,
+};
 use crate::safelist::BUILT_IN_DEFAULTS;
 
 /// A single discovered project path and the marker that identified it.
@@ -215,6 +217,7 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
 
     let mut results: Vec<DiscoveredProject> = Vec::new();
     let mut progress = ProgressWriter::new(std::io::stdout());
+    let mut progress_state = DiscoveryProgressState::default();
     for root in &cfg.workspace_roots {
         if let Err(e) = walk_root(
             root,
@@ -223,6 +226,7 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
             &prune_basenames,
             &mut results,
             &mut progress,
+            &mut progress_state,
         ) {
             progress.finish();
             return Err(e);
@@ -231,6 +235,13 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
     progress.finish();
 
     Ok(results)
+}
+
+#[derive(Default)]
+struct DiscoveryProgressState {
+    dirs_scanned: usize,
+    indexed_bytes: u64,
+    recent_projects: Vec<(PathBuf, String)>,
 }
 
 /// Discover a single project at `path`, bypassing the workspace-root walk
@@ -609,10 +620,10 @@ fn build_prune_set(user_patterns: &[String]) -> std::collections::HashSet<String
 /// pruned — but `find_marker_in` reads the parent's children directly so a
 /// parent containing a `.git` is still detected as a project.
 ///
-/// `progress` is the live single-line progress writer: each
-/// visited directory is rendered on one line that overwrites itself in place
-/// via a carriage return on a TTY, giving the user feedback that offcut is
-/// working on a large workspace. When not a TTY the writer is a no-op.
+/// `progress` is the live discovery progress writer: each visited directory
+/// refreshes a capable-terminal panel with the current path, scanned count,
+/// found count, indexed bytes, and recent discovered projects. When not a TTY
+/// the writer is a no-op.
 fn walk_root(
     root: &Path,
     max_depth: usize,
@@ -620,6 +631,7 @@ fn walk_root(
     prune_basenames: &std::collections::HashSet<String>,
     out: &mut Vec<DiscoveredProject>,
     progress: &mut ProgressWriter<std::io::Stdout>,
+    progress_state: &mut DiscoveryProgressState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate the root exists before walking. An empty path or a non-existent
     // directory is a hard error — discovery must not silently absorb a typo.
@@ -647,15 +659,14 @@ fn walk_root(
         })
     {
         let entry = entry?;
+        if let Ok(metadata) = entry.metadata() {
+            progress_state.indexed_bytes =
+                progress_state.indexed_bytes.saturating_add(metadata.len());
+        }
         if !entry.file_type().is_dir() {
             continue;
         }
-        // Emit the current directory path on one line that overwrites itself
-        // in place via a carriage return. Each visited directory
-        // is reported so the user sees offcut working on a large workspace
-        // rather than appearing hung. The writer is TTY-gated: when not a TTY
-        // this is a no-op (no carriage-return garbage in a pipe or log file).
-        progress.update(entry.path());
+        progress_state.dirs_scanned += 1;
         // Check each direct child file for markers. Only look at *files* —
         // a marker is a file, never a directory (except `.git` which is a
         // directory on disk but is treated as a file-name marker).
@@ -669,8 +680,29 @@ fn walk_root(
                     path: entry.path().to_path_buf(),
                     marker: marker.to_string(),
                 });
+                progress_state
+                    .recent_projects
+                    .push((entry.path().to_path_buf(), marker.to_string()));
+                if progress_state.recent_projects.len() > DISCOVERY_RECENT_LIMIT {
+                    progress_state.recent_projects.remove(0);
+                }
             }
         }
+        let recent_projects: Vec<DiscoveryProgressProject<'_>> = progress_state
+            .recent_projects
+            .iter()
+            .map(|(path, marker)| DiscoveryProgressProject {
+                path,
+                marker: marker.as_str(),
+            })
+            .collect();
+        progress.update_discovery(DiscoveryProgress {
+            current_path: entry.path(),
+            dirs_scanned: progress_state.dirs_scanned,
+            projects_found: out.len(),
+            indexed_bytes: progress_state.indexed_bytes,
+            recent_projects: &recent_projects,
+        });
     }
     Ok(())
 }
