@@ -119,20 +119,23 @@ Guarantees:
   with no ANSI sequences, live progress, prompts, or extra text.
 - **stderr** carries diagnostics only.
 - **exit codes**: `0` success (including a no-op), `1` error,
-  `2` approval required (`clean --json` with neither `--force` nor
+  `3` approval required (`clean --json` with neither `--force` nor
   `--dry-run` — nothing is deleted; the document describes what would need
-  approval).
+  approval). A malformed CLI invocation exits `2` (clap's usage-error code)
+  and emits no JSON document; approval-required uses `3` so the two are
+  distinguishable by exit code alone.
 
 `--json` never prompts and never broadens deletion authority. A `clean` that
 would need a prompt either runs as a preview (`--dry-run`) or is
 auto-approved (`--force`); without one of those it returns the
-approval-required result and exits `2`.
+approval-required result and exits `3` (distinct from clap's usage-error
+exit `2`, which produces no JSON document).
 
 ```sh
-$ offcut list --json                       # one JSON document, no projects array
+$ offcut list --json                       # one JSON document (projects array, possibly empty)
 $ offcut --json clean --dry-run            # preview as JSON; deletes nothing
 $ offcut clean --json --force              # DESTRUCTIVE: deletes, reports as JSON
-$ offcut clean --json                      # approval required → exit 2, nothing deleted
+$ offcut clean --json                      # approval required → exit 3, nothing deleted
 ```
 
 The full schema, per-command result shapes, and exit behavior are documented

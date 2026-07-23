@@ -16,15 +16,28 @@ human-readable rendering to a single machine-readable JSON document on stdout.
   - `0` — success, including a no-op (nothing found / nothing deleted).
   - `1` — error (missing config file, unreadable project, bad path target,
     parse error, etc.).
-  - `2` — approval required: `--json` was given to `clean` (or the default
+  - `3` — approval required: `--json` was given to `clean` (or the default
     run) without `--force` or `--dry-run`, so a destructive action would need
     an interactive approval the noninteractive JSON run cannot ask for.
     Nothing is deleted. The JSON document describes what would need approval.
 
+  A malformed CLI invocation (unknown flag, bad value) fails inside clap
+  *before* `--json` is known to the program: it exits `2` (clap's own
+  usage-error code), prints plain text to stderr, and emits **no** JSON
+  document on stdout. Approval-required uses `3` so a caller can distinguish
+  "needs approval, read the JSON document" from "the invocation itself was
+  malformed, no document" by exit code alone.
+
 `--json` never prompts and never broadens deletion authority. A `clean` that
 would need a prompt either runs as a preview (`--dry-run`) or is auto-approved
 (`--force`); without one of those, it returns the approval-required result and
-exits `2`.
+exits `3`.
+
+A cleanable project whose sizing/enumeration fails (e.g. a malformed
+`safe_delete` glob, or an unreadable tree) is reported with its git status
+and an empty `items` array, the failure is logged on stderr, and the run is a
+no-op (exit `0`, `approval_required: false`) — mirroring the human path's
+"no cleanable projects — nothing to delete" outcome. Nothing is deleted.
 
 ## Applicable commands
 
@@ -115,7 +128,11 @@ is the sum across cleanable rows.
 }
 ```
 
-`config_file` is `null` when no config file was found or used.
+`config_file` is `null` only when the platform config dir itself cannot be
+ determined (`dirs::config_dir()` returns `None`). When a config file is
+ loaded, `config_file` is that path; when the default config location is
+ absent, offcut falls back to built-in defaults and `config_file` is still
+ the computed default path (the file simply does not exist on disk there).
 
 ### `ignore`
 
@@ -160,7 +177,9 @@ is the sum across cleanable rows.
 - `deleted` — the run deleted it (`--force`, no `--dry-run`).
 - `would-delete` — a preview (`--dry-run`) would delete it.
 - `would-prompt` — a real interactive run would ask; the JSON run did not.
-- `kept` — protected, or declined/not approved.
+- `kept` — protected (never deletable). A `Surfaced` item never reaches
+   `kept` under `--json`: it resolves to `deleted`, `would-delete`, or
+   `would-prompt` first, because JSON mode has no per-item "decline" step.
 
 Non-cleanable projects appear with their `status` and an empty `items`
 array. When `approval_required` is `true`, every cleanable project has

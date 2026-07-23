@@ -397,7 +397,8 @@ fn json_clean_force_deletes_and_reports() {
 }
 
 /// `clean --json` with neither --force nor --dry-run cannot prompt: it
-/// returns approval_required=true, deletes nothing, and exits 2.
+/// returns approval_required=true, deletes nothing, and exits 3.
+/// Exit 3 (not 2) so it is distinct from clap's usage-error exit code.
 #[test]
 fn json_clean_without_force_or_dry_run_is_approval_required() {
     let root = root_for("clean-approval");
@@ -411,11 +412,11 @@ fn json_clean_without_force_or_dry_run_is_approval_required() {
     let config = write_config(&home, &[root.to_str().unwrap()], 2);
     let (status, v, stdout, stderr) =
         run_json(["--config", config.to_str().unwrap(), "clean", "--json"]);
-    // Exit code 2 = approval required.
+    // Exit code 3 = approval required (distinct from clap's usage-error 2).
     assert_eq!(
         status.code(),
-        Some(2),
-        "approval-required must exit 2: stderr={stderr}"
+        Some(3),
+        "approval-required must exit 3: stderr={stderr}"
     );
     assert_eq!(v["ok"], false);
     assert_eq!(v["result"]["approval_required"], true);

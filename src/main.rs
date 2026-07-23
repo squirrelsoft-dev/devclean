@@ -209,6 +209,21 @@ fn main() {
             }
         }
         Some(Command::Init { workspace_path }) => {
+            // `init <WORKSPACE>` uses the positional exclusively; a global
+            // `--workspace` flag is silently a no-op. Emit one concise stderr
+            // notice (the same treatment `clean <PROJECT_PATH> --workspace`
+            // gets) so a mistyped invocation is not mistaken for adding the
+            // extra root.
+            if !cli.workspace.is_empty() {
+                eprintln!(
+                    "offcut: init <WORKSPACE> uses the positional workspace; --workspace {}",
+                    if cli.workspace.len() == 1 {
+                        format!("{} is ignored", cli.workspace[0])
+                    } else {
+                        format!("({} paths) is ignored", cli.workspace.len())
+                    }
+                );
+            }
             if let Err(e) = run_init(&cli, workspace_path) {
                 eprintln!("offcut: {e}");
                 std::process::exit(1);
@@ -226,10 +241,13 @@ fn cli_overrides(cli: &Cli) -> CliOverrides {
     }
 }
 
-/// Exit code returned by a JSON run: 0 success, 1 error, 2 approval-required.
+/// Exit code returned by a JSON run: 0 success, 1 error, 3
+/// approval-required. Approval-required uses 3 (not 2) so it is distinct
+/// from clap's own usage-error exit code, which fires before `--json` is
+/// even known to the program and produces no JSON document.
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERROR: i32 = 1;
-pub const EXIT_APPROVAL_REQUIRED: i32 = 2;
+pub const EXIT_APPROVAL_REQUIRED: i32 = 3;
 
 /// Dispatch a `--json` invocation to the matching JSON emitter and return the
 /// exit code. Each emitter prints exactly one JSON document on stdout and
@@ -260,7 +278,19 @@ fn run_json(cli: &Cli) -> i32 {
             }
             json_clean(cli, project_path.as_deref(), command)
         }
-        Some(Command::Init { workspace_path }) => json_init(cli, workspace_path, command),
+        Some(Command::Init { workspace_path }) => {
+            if !cli.workspace.is_empty() {
+                eprintln!(
+                    "offcut: init <WORKSPACE> uses the positional workspace; --workspace {}",
+                    if cli.workspace.len() == 1 {
+                        format!("{} is ignored", cli.workspace[0])
+                    } else {
+                        format!("({} paths) is ignored", cli.workspace.len())
+                    }
+                );
+            }
+            json_init(cli, workspace_path, command)
+        }
     }
 }
 
@@ -587,12 +617,15 @@ fn json_clean(cli: &Cli, project_path: Option<&std::path::Path>, command: &'stat
         }
 
         let interactive = !cli.force && !cli.dry_run;
-        let approval_required = interactive
-            && all_projects
-                .iter()
-                .any(|(_, status, _)| *status == classify::Status::Cleanable);
 
         let mut project_rows: Vec<json::CleanProjectRow> = Vec::new();
+        // Whether any cleanable project actually survived sizing with enumerable
+        // items. `approval_required` is computed from this — not from the raw
+        // classification pass — so a cleanable project whose safe set or dry-run
+        // failed (malformed `safe_delete`, unreadable tree) does not produce
+        // `approval_required: true` with nothing to act on. Mirrors
+        // `run_cleaning`'s `cleanable_items.is_empty()` no-op check.
+        let mut any_actionable_cleanable = false;
         for (idx, (path, status, ignore_set)) in all_projects.iter().enumerate() {
             if *status != classify::Status::Cleanable {
                 project_rows.push(json::CleanProjectRow {
@@ -610,8 +643,23 @@ fn json_clean(cli: &Cli, project_path: Option<&std::path::Path>, command: &'stat
                 per_project_safe_set[idx].take(),
             ) {
                 (Some(items), Some(safe_set)) => (items, safe_set),
-                _ => continue,
+                // The project was classified cleanable but its sizing/enumeration
+                // failed (warning already on stderr). Report it as a cleanable
+                // row with no actionable items rather than dropping it silently,
+                // so a caller can see it was found but nothing is deletable.
+                _ => {
+                    project_rows.push(json::CleanProjectRow {
+                        path: path.clone(),
+                        status: json::status_label(*status),
+                        approved: false,
+                        deleted_count: 0,
+                        reclaimable_bytes: None,
+                        items: Vec::new(),
+                    });
+                    continue;
+                }
             };
+            any_actionable_cleanable = true;
 
             // Determine approvals. Under --force every non-Protected item is
             // approved; under --dry-run nothing is executed (Safe would-delete,
@@ -681,6 +729,8 @@ fn json_clean(cli: &Cli, project_path: Option<&std::path::Path>, command: &'stat
                 items: item_rows,
             });
         }
+
+        let approval_required = interactive && any_actionable_cleanable;
 
         let env = json::Envelope {
             version: json::VERSION,
