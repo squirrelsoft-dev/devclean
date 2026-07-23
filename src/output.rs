@@ -22,11 +22,28 @@ use owo_colors::{OwoColorize, Style as OwoStyle};
 use std::ffi::OsStr;
 use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::classify::Status;
 use crate::clean::{Classification, CleanItem};
 use crate::interactive::{blocked_reason, status_reason};
+
+/// Process-wide gate set once in `main` when `--json` is active. Under JSON
+/// mode the rich terminal UI, color, and live progress are all suppressed so
+/// stdout carries exactly one JSON document — even when stdout is a TTY.
+static JSON_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Enable JSON mode for the rest of the process. Called once from `main`
+/// after clap parses.
+pub fn set_json_mode(enabled: bool) {
+    JSON_MODE.store(enabled, Ordering::SeqCst);
+}
+
+/// Whether JSON mode is active.
+pub fn json_mode() -> bool {
+    JSON_MODE.load(Ordering::SeqCst)
+}
 
 /// Whether stdout is a TTY. Used as the runtime gate for color emission:
 /// if stdout is a TTY, each formatted line is colored; otherwise plain.
@@ -54,12 +71,12 @@ fn terminal_ui_enabled_with(stream_is_tty: bool, term: Option<&OsStr>) -> bool {
 
 /// Whether stdout should receive the rich terminal presentation.
 pub fn stdout_terminal_ui_enabled() -> bool {
-    terminal_ui_enabled(is_tty())
+    !json_mode() && terminal_ui_enabled(is_tty())
 }
 
 /// Whether stderr should receive the rich interactive prompt presentation.
 pub fn stderr_terminal_ui_enabled() -> bool {
-    terminal_ui_enabled(stderr_is_tty())
+    !json_mode() && terminal_ui_enabled(stderr_is_tty())
 }
 
 /// Current terminal width, used by the panel and table renderers.
@@ -117,14 +134,14 @@ fn color_enabled_with(stream_is_tty: bool, term: Option<&OsStr>, plain_requested
 
 /// Whether stdout should emit ANSI color under the current environment.
 pub fn stdout_color_enabled() -> bool {
-    color_enabled()
+    !json_mode() && color_enabled()
 }
 
 /// Whether stderr should emit ANSI color under the current environment.
 /// Interactive prompts and their review panel go to stderr, so they need
 /// their own gate rather than borrowing stdout's redirection state.
 pub fn stderr_color_enabled() -> bool {
-    color_enabled_for(stderr_is_tty())
+    !json_mode() && color_enabled_for(stderr_is_tty())
 }
 
 /// Color `text` with `style`, gated by `emit_colors`.

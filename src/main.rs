@@ -5,6 +5,7 @@ mod discovery;
 mod disk;
 mod ignore;
 mod interactive;
+mod json;
 mod output;
 mod progress;
 mod safelist;
@@ -28,29 +29,42 @@ use config::{CliOverrides, Config};
 #[command(name = "offcut", version, about)]
 struct Cli {
     /// Override/append workspace roots (repeatable).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     workspace: Vec<String>,
 
     /// Alternate config file path. Must exist for all subcommands except
     /// `init`, which creates it — an explicit --config target that does not
     /// exist is a hard error for every subcommand other than init; init
     /// refuses to clobber an existing target.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     config: Option<PathBuf>,
 
     /// Force mode: skip all prompts, auto-approve each surfaced item.
     /// Destructive: deletes on approval. Combined with --dry-run it
     /// previews the force run without deleting.
-    #[arg(long)]
+    ///
+    /// Accepted before or after the subcommand (it is a global flag).
+    #[arg(long, global = true)]
     force: bool,
 
     /// Dry-run: show what would be deleted without deleting.
-    #[arg(long)]
+    ///
+    /// Accepted before or after the subcommand (it is a global flag).
+    #[arg(long, global = true)]
     dry_run: bool,
 
     /// Verbose output.
-    #[arg(long)]
+    #[arg(long, global = true)]
     verbose: bool,
+
+    /// Emit one machine-readable JSON document on stdout instead of the
+    /// human-readable rendering. No ANSI sequences, progress rendering,
+    /// prompts, or extra text on stdout; diagnostics stay on stderr. See
+    /// `docs/json-output.md` for the schema and exit behavior.
+    ///
+    /// Accepted before or after the subcommand (it is a global flag).
+    #[arg(long, global = true)]
+    json: bool,
 
     /// Subcommand.
     #[command(subcommand)]
@@ -108,12 +122,22 @@ enum Command {
     /// root active. Idempotent: does not clobber an existing file.
     Init {
         /// Workspace path to populate as a workspace root.
-        workspace: PathBuf,
+        #[arg(value_name = "WORKSPACE")]
+        workspace_path: PathBuf,
     },
 }
 
 fn main() {
     let cli = Cli::parse();
+
+    // Enable JSON mode once, before any run function touches stdout. The
+    // gate suppresses the rich terminal UI, color, and live progress so
+    // stdout carries exactly one JSON document.
+    output::set_json_mode(cli.json);
+
+    if cli.json {
+        std::process::exit(run_json(&cli));
+    }
 
     match &cli.command {
         None => {
@@ -184,8 +208,23 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Command::Init { workspace }) => {
-            if let Err(e) = run_init(&cli, workspace) {
+        Some(Command::Init { workspace_path }) => {
+            // `init <WORKSPACE>` uses the positional exclusively; a global
+            // `--workspace` flag is silently a no-op. Emit one concise stderr
+            // notice (the same treatment `clean <PROJECT_PATH> --workspace`
+            // gets) so a mistyped invocation is not mistaken for adding the
+            // extra root.
+            if !cli.workspace.is_empty() {
+                eprintln!(
+                    "offcut: init <WORKSPACE> uses the positional workspace; --workspace {}",
+                    if cli.workspace.len() == 1 {
+                        format!("{} is ignored", cli.workspace[0])
+                    } else {
+                        format!("({} paths) is ignored", cli.workspace.len())
+                    }
+                );
+            }
+            if let Err(e) = run_init(&cli, workspace_path) {
                 eprintln!("offcut: {e}");
                 std::process::exit(1);
             }
@@ -200,6 +239,547 @@ fn cli_overrides(cli: &Cli) -> CliOverrides {
         dry_run: cli.dry_run,
         verbose: cli.verbose,
     }
+}
+
+/// Exit code returned by a JSON run: 0 success, 1 error, 3
+/// approval-required. Approval-required uses 3 (not 2) so it is distinct
+/// from clap's own usage-error exit code, which fires before `--json` is
+/// even known to the program and produces no JSON document.
+pub const EXIT_OK: i32 = 0;
+pub const EXIT_ERROR: i32 = 1;
+pub const EXIT_APPROVAL_REQUIRED: i32 = 3;
+
+/// Dispatch a `--json` invocation to the matching JSON emitter and return the
+/// exit code. Each emitter prints exactly one JSON document on stdout and
+/// any diagnostics on stderr.
+///
+/// The `--workspace`-ignored notice for a targeted clean still goes to
+/// stderr under JSON mode — it is a diagnostic, not part of the document.
+fn run_json(cli: &Cli) -> i32 {
+    let command = json_command_name(cli);
+    match &cli.command {
+        None => json_clean(cli, None, command),
+        Some(Command::List) => json_listing(cli, command),
+        Some(Command::Config) => json_config(cli, command),
+        Some(Command::Ignore { path }) => json_ignore(path, command),
+        Some(Command::Safelist { path }) => json_safelist(cli, path, command),
+        Some(Command::Discovery) => json_discovery(cli, command),
+        Some(Command::Classification) => json_classification(cli, command),
+        Some(Command::Clean { project_path }) => {
+            if project_path.is_some() && !cli.workspace.is_empty() {
+                eprintln!(
+                    "offcut: clean <PROJECT_PATH> scopes the run to that project; --workspace {}",
+                    if cli.workspace.len() == 1 {
+                        format!("{} is ignored", cli.workspace[0])
+                    } else {
+                        format!("({} paths) is ignored", cli.workspace.len())
+                    }
+                );
+            }
+            json_clean(cli, project_path.as_deref(), command)
+        }
+        Some(Command::Init { workspace_path }) => {
+            if !cli.workspace.is_empty() {
+                eprintln!(
+                    "offcut: init <WORKSPACE> uses the positional workspace; --workspace {}",
+                    if cli.workspace.len() == 1 {
+                        format!("{} is ignored", cli.workspace[0])
+                    } else {
+                        format!("({} paths) is ignored", cli.workspace.len())
+                    }
+                );
+            }
+            json_init(cli, workspace_path, command)
+        }
+    }
+}
+
+/// The `command` field for the JSON envelope. The default run reports
+/// `"clean"` because it runs the clean flow.
+fn json_command_name(cli: &Cli) -> &'static str {
+    match &cli.command {
+        None => "clean",
+        Some(Command::List) => "list",
+        Some(Command::Config) => "config",
+        Some(Command::Ignore { .. }) => "ignore",
+        Some(Command::Safelist { .. }) => "safelist",
+        Some(Command::Discovery) => "discovery",
+        Some(Command::Classification) => "classification",
+        Some(Command::Clean { .. }) => "clean",
+        Some(Command::Init { .. }) => "init",
+    }
+}
+
+/// Print a JSON error document and return the error exit code.
+fn json_err(command: &'static str, e: Box<dyn std::error::Error>) -> i32 {
+    eprintln!("offcut: {e}");
+    json::print(&json::err::<json::ListResult>(command, e.to_string()));
+    EXIT_ERROR
+}
+
+/// `list --json`: each project's status, rank, and (for cleanable rows)
+/// reclaimable size, plus the aggregate.
+fn json_listing(cli: &Cli, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let (_config_path, cfg) = load_cli_config(cli)?;
+        let cfg = cfg.apply_overrides(&cli_overrides(cli));
+        let projects = discovery::discover(&cfg)?;
+        let classified = classify_projects(&projects);
+        let mut rows: Vec<(PathBuf, classify::Status)> =
+            classified.iter().map(|(p, s, _)| (p.clone(), *s)).collect();
+        rows.sort_by_key(|&(_, s)| s);
+        let mut per_project_bytes: Vec<Option<u64>> = vec![None; rows.len()];
+        for (idx, (path, status)) in rows.iter().enumerate() {
+            if *status != classify::Status::Cleanable {
+                continue;
+            }
+            let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let ignore_set = match ignore::IgnoreSet::load(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Ok(items) = clean::dry_run(path, &ignore_set, &safe_set)
+                && let Ok(bytes) = disk::compute_reclaimable_size(path, &items)
+            {
+                per_project_bytes[idx] = Some(bytes);
+            }
+        }
+        let cleanable_count = rows
+            .iter()
+            .filter(|(_, s)| *s == classify::Status::Cleanable)
+            .count();
+        let total: u64 = per_project_bytes.iter().filter_map(|x| *x).sum();
+        let project_rows = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, (path, status))| json::ProjectRow {
+                path: path.clone(),
+                status: json::status_label(*status),
+                rank: status.rank(),
+                reclaimable_bytes: per_project_bytes[idx],
+            })
+            .collect();
+        Ok(json::ok(
+            command,
+            json::ListResult {
+                projects: project_rows,
+                cleanable_count,
+                total_reclaimable_bytes: total,
+            },
+        ))
+    })();
+    match result {
+        Ok(env) => {
+            json::print(&env);
+            EXIT_OK
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// `classification --json`: each project's status and rank, sorted by
+/// severity. No reclaimable size (classification is a read-only status survey).
+fn json_classification(cli: &Cli, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let (_config_path, cfg) = load_cli_config(cli)?;
+        let cfg = cfg.apply_overrides(&cli_overrides(cli));
+        let projects = discovery::discover(&cfg)?;
+        let classified = classify_projects(&projects);
+        let mut rows: Vec<(PathBuf, classify::Status)> =
+            classified.iter().map(|(p, s, _)| (p.clone(), *s)).collect();
+        rows.sort_by_key(|&(_, s)| s);
+        let project_rows = rows
+            .iter()
+            .map(|(path, status)| json::ProjectRow {
+                path: path.clone(),
+                status: json::status_label(*status),
+                rank: status.rank(),
+                reclaimable_bytes: None,
+            })
+            .collect();
+        Ok(json::ok(
+            command,
+            json::ClassificationResult {
+                projects: project_rows,
+            },
+        ))
+    })();
+    match result {
+        Ok(env) => {
+            json::print(&env);
+            EXIT_OK
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// `discovery --json`: each discovered project path and its marker.
+fn json_discovery(cli: &Cli, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let (_config_path, cfg) = load_cli_config(cli)?;
+        let cfg = cfg.apply_overrides(&cli_overrides(cli));
+        let projects = discovery::discover(&cfg)?;
+        let rows = projects
+            .iter()
+            .map(|p| json::DiscoveryProject {
+                path: p.path.clone(),
+                marker: p.marker.clone(),
+            })
+            .collect();
+        Ok(json::ok(command, json::DiscoveryResult { projects: rows }))
+    })();
+    match result {
+        Ok(env) => {
+            json::print(&env);
+            EXIT_OK
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// `config --json`: the resolved configuration plus the per-invocation flags.
+fn json_config(cli: &Cli, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let (config_path, cfg) = load_cli_config(cli)?;
+        let overrides = cli_overrides(cli);
+        let cfg = cfg.apply_overrides(&overrides);
+        Ok(json::ok(
+            command,
+            json::ConfigResult {
+                config_file: config_path,
+                default_mode: cfg.default_mode.to_string(),
+                max_depth: cfg.max_depth,
+                workspace_roots: cfg.workspace_roots,
+                safe_delete: cfg.safe_delete,
+                project_markers: cfg.project_markers,
+                force: overrides.force,
+                dry_run: overrides.dry_run,
+                verbose: overrides.verbose,
+            },
+        ))
+    })();
+    match result {
+        Ok(env) => {
+            json::print(&env);
+            EXIT_OK
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// `ignore --json`: whether `path` is ignored by the loaded `.offcutignore`.
+fn json_ignore(path: &str, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let root = std::env::current_dir()?;
+        let set = ignore::IgnoreSet::load(&root)?;
+        let p = std::path::Path::new(path);
+        let rel = project_relative(&root, p)?;
+        let ignored = set.is_ignored(rel);
+        Ok(json::ok(
+            command,
+            json::IgnoreResult {
+                path: path.to_string(),
+                ignored,
+            },
+        ))
+    })();
+    match result {
+        Ok(env) => {
+            json::print(&env);
+            EXIT_OK
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// `safelist --json`: whether `path` is safe to delete per the loaded catalog.
+fn json_safelist(cli: &Cli, path: &str, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let root = std::env::current_dir()?;
+        let p = std::path::Path::new(path);
+        let rel = project_relative(&root, p)?;
+        let (_config_path, cfg) = load_cli_config(cli)?;
+        let set = safelist::SafeSet::from_config(&root, &cfg)?;
+        let safe = set.is_safe(rel);
+        Ok(json::ok(
+            command,
+            json::SafelistResult {
+                path: path.to_string(),
+                safe,
+            },
+        ))
+    })();
+    match result {
+        Ok(env) => {
+            json::print(&env);
+            EXIT_OK
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// `init --json`: the created config file path.
+fn json_init(cli: &Cli, workspace: &PathBuf, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let target = match &cli.config {
+            Some(p) => p.clone(),
+            None => {
+                config::default_config_path().ok_or("could not determine platform config dir")?
+            }
+        };
+        if target.symlink_metadata().is_ok() {
+            if target.is_file() {
+                return Err(format!("config file already exists: {}", target.display()).into());
+            }
+            return Err(format!("target exists and is not a file: {}", target.display()).into());
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let resolved = if workspace.exists() {
+            std::fs::canonicalize(workspace)?
+                .to_string_lossy()
+                .to_string()
+        } else {
+            workspace.to_string_lossy().to_string()
+        };
+        let template = generate_init_template(&resolved);
+        fs::write(&target, &template)?;
+        Ok(json::ok(
+            command,
+            json::InitResult {
+                config_file: target,
+                created: true,
+            },
+        ))
+    })();
+    match result {
+        Ok(env) => {
+            json::print(&env);
+            EXIT_OK
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// `clean --json` (and the default run): enumerate, classify, and either
+/// preview (`--dry-run`), auto-approve-and-execute (`--force`), or report
+/// `approval_required` (neither) without deleting or prompting.
+///
+/// The compute path mirrors `run_cleaning`'s sizing/classification but emits
+/// JSON instead of the human rendering. Progress is suppressed by the JSON
+/// gate, so no live lines reach stdout.
+fn json_clean(cli: &Cli, project_path: Option<&std::path::Path>, command: &'static str) -> i32 {
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let (_config_path, cfg) = load_cli_config(cli)?;
+        let cfg = cfg.apply_overrides(&cli_overrides(cli));
+        let projects = match project_path {
+            Some(p) => vec![discovery::discover_single(p, &cfg)?],
+            None => discovery::discover(&cfg)?,
+        };
+        let mut all_projects = classify_projects(&projects);
+        all_projects.sort_by_key(|(_, status, _)| *status);
+
+        // Per-cleanable-project sizing + enumeration, mirroring run_cleaning's
+        // single pass. Items and bytes are reused for the result rows.
+        let mut per_project_items: Vec<Option<Vec<clean::CleanItem>>> =
+            vec![None; all_projects.len()];
+        let mut per_project_bytes: Vec<Option<u64>> = vec![None; all_projects.len()];
+        let mut per_project_safe_set: Vec<Option<safelist::SafeSet>> =
+            vec![None; all_projects.len()];
+        for (idx, (path, status, ignore_set)) in all_projects.iter().enumerate() {
+            if *status != classify::Status::Cleanable {
+                continue;
+            }
+            let safe_set = match safelist::SafeSet::from_config(path, &cfg) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "warning: {}: skipped, could not build safe-to-delete set: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            match clean::dry_run(path, ignore_set, &safe_set) {
+                Ok(items) => {
+                    if let Ok(bytes) = disk::compute_reclaimable_size(path, &items) {
+                        per_project_bytes[idx] = Some(bytes);
+                    }
+                    per_project_items[idx] = Some(items);
+                    per_project_safe_set[idx] = Some(safe_set);
+                }
+                Err(e) => eprintln!("warning: {}: dry_run failed: {e}", path.display()),
+            }
+        }
+
+        let interactive = !cli.force && !cli.dry_run;
+
+        let mut project_rows: Vec<json::CleanProjectRow> = Vec::new();
+        // Whether any cleanable project actually survived sizing with enumerable
+        // items. `approval_required` is computed from this — not from the raw
+        // classification pass — so a cleanable project whose safe set or dry-run
+        // failed (malformed `safe_delete`, unreadable tree) does not produce
+        // `approval_required: true` with nothing to act on. Mirrors
+        // `run_cleaning`'s `cleanable_items.is_empty()` no-op check.
+        let mut any_actionable_cleanable = false;
+        for (idx, (path, status, ignore_set)) in all_projects.iter().enumerate() {
+            if *status != classify::Status::Cleanable {
+                project_rows.push(json::CleanProjectRow {
+                    path: path.clone(),
+                    status: json::status_label(*status),
+                    approved: false,
+                    deleted_count: 0,
+                    reclaimable_bytes: None,
+                    items: Vec::new(),
+                });
+                continue;
+            }
+            let (items, safe_set) = match (
+                per_project_items[idx].take(),
+                per_project_safe_set[idx].take(),
+            ) {
+                (Some(items), Some(safe_set)) => (items, safe_set),
+                // The project was classified cleanable but its sizing/enumeration
+                // failed (warning already on stderr). Report it as a cleanable
+                // row with no actionable items rather than dropping it silently,
+                // so a caller can see it was found but nothing is deletable.
+                _ => {
+                    project_rows.push(json::CleanProjectRow {
+                        path: path.clone(),
+                        status: json::status_label(*status),
+                        approved: false,
+                        deleted_count: 0,
+                        reclaimable_bytes: None,
+                        items: Vec::new(),
+                    });
+                    continue;
+                }
+            };
+            any_actionable_cleanable = true;
+
+            // Determine approvals. Under --force every non-Protected item is
+            // approved; under --dry-run nothing is executed (Safe would-delete,
+            // Surfaced would-prompt); under the approval-required path nothing
+            // is approved and nothing is executed.
+            let approved_surfaced: Vec<PathBuf> = if cli.force {
+                items
+                    .iter()
+                    .filter(|i| i.classification == clean::Classification::Surfaced)
+                    .map(|i| i.rel_path.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let will_execute = cli.force && !cli.dry_run;
+
+            let would_delete: Vec<PathBuf> = items
+                .iter()
+                .filter(|item| {
+                    if cli.dry_run && !cli.force {
+                        item.classification == clean::Classification::Safe
+                    } else {
+                        matches!(item.classification, clean::Classification::Safe)
+                            || (item.classification == clean::Classification::Surfaced
+                                && (cli.force || approved_surfaced.contains(&item.rel_path)))
+                    }
+                })
+                .map(|i| i.rel_path.clone())
+                .collect();
+
+            let deleted_count = if will_execute { would_delete.len() } else { 0 };
+
+            // Execute the deletion under --force (no --dry-run). Mirrors
+            // run_cleaning's execution step.
+            if will_execute {
+                let approved = approved_surfaced.clone();
+                let outcome =
+                    clean::clean(path, ignore_set, &safe_set, &approved, cli.force, false);
+                if let Err(e) = outcome {
+                    eprintln!("clean {}: failed: {e}", path.display());
+                }
+            }
+
+            let item_rows = items
+                .iter()
+                .map(|item| json::CleanItemRow {
+                    path: item.rel_path.clone(),
+                    is_dir: item.is_dir,
+                    classification: json::classification_label(item.classification),
+                    fate: clean_item_fate(
+                        item,
+                        &would_delete,
+                        will_execute,
+                        interactive,
+                        cli.dry_run,
+                        cli.force,
+                    ),
+                })
+                .collect();
+
+            project_rows.push(json::CleanProjectRow {
+                path: path.clone(),
+                status: json::status_label(*status),
+                approved: will_execute,
+                deleted_count,
+                reclaimable_bytes: per_project_bytes[idx],
+                items: item_rows,
+            });
+        }
+
+        let approval_required = interactive && any_actionable_cleanable;
+
+        let env = json::Envelope {
+            version: json::VERSION,
+            command,
+            ok: !approval_required,
+            result: Some(json::CleanResult {
+                approval_required,
+                projects: project_rows,
+            }),
+            error: None,
+        };
+        Ok((env, approval_required))
+    })();
+    match result {
+        Ok((env, approval_required)) => {
+            json::print(&env);
+            if approval_required {
+                EXIT_APPROVAL_REQUIRED
+            } else {
+                EXIT_OK
+            }
+        }
+        Err(e) => json_err(command, e),
+    }
+}
+
+/// The fate string for one item in a JSON clean result. Mirrors the human
+/// `item_fate` rule but returns the documented JSON vocabulary.
+fn clean_item_fate(
+    item: &clean::CleanItem,
+    would_delete: &[PathBuf],
+    will_execute: bool,
+    interactive: bool,
+    dry_run: bool,
+    force: bool,
+) -> &'static str {
+    if would_delete.contains(&item.rel_path) {
+        if will_execute {
+            return "deleted";
+        }
+        return "would-delete";
+    }
+    if dry_run && !force && item.classification == clean::Classification::Surfaced {
+        return "would-prompt";
+    }
+    if interactive && item.classification == clean::Classification::Surfaced {
+        return "would-prompt";
+    }
+    "kept"
 }
 
 /// Resolve `p` to a path relative to `root`, rejecting anything that is not
@@ -1762,6 +2342,7 @@ mod init_tests {
                 force: false,
                 dry_run: false,
                 verbose: false,
+                json: false,
                 command: None,
             },
             &PathBuf::from("/tmp/work"),
@@ -1797,6 +2378,7 @@ mod init_tests {
                 force: false,
                 dry_run: false,
                 verbose: false,
+                json: false,
                 command: None,
             },
             &PathBuf::from("/tmp/work"),
@@ -1825,6 +2407,7 @@ mod init_tests {
                 force: false,
                 dry_run: false,
                 verbose: false,
+                json: false,
                 command: None,
             },
             &PathBuf::from("/tmp/injected-workspace"),
@@ -1860,6 +2443,7 @@ mod init_tests {
                 force: false,
                 dry_run: false,
                 verbose: false,
+                json: false,
                 command: None,
             },
             &PathBuf::from("/tmp/work"),
