@@ -64,10 +64,12 @@ interactive clean flow.
 
 ### Top-level flags
 
-Each flag is top-level and must be given *before* the subcommand:
+Each flag is top-level and **global**: it may be given before *or* after
+the subcommand. Both orders are equivalent.
 
 ```sh
 offcut [FLAGS] list              # list projects + statuses
+offcut list [FLAGS]              # same — flags are accepted after the subcommand too
 offcut [FLAGS] clean [PROJECT_PATH]  # interactive clean flow (destructive); PROJECT_PATH scopes to one project
 offcut [FLAGS] config            # print the resolved config
 
@@ -75,6 +77,7 @@ offcut [FLAGS] config            # print the resolved config
   --config <path>                  # alternate config file (must exist; `init` creates it)
   --force                          # skip each prompt, auto-approve each surfaced item (destructive)
   --dry-run                        # show each item's fate, delete nothing
+  --json                           # emit one machine-readable JSON document on stdout (see below)
   --verbose                        # verbose output
   --version                        # print the crate version
 ```
@@ -96,11 +99,44 @@ $ offcut list                  # read-only project listing
 $ offcut clean                 # destructive interactive flow
 $ offcut clean ~/code/looper   # clean ONLY the named project (shell expands ~)
 $ offcut --force clean         # DESTRUCTIVE: each prompt skipped
+$ offcut clean --force         # same — flag after the subcommand
 $ offcut --dry-run clean       # preview only; each item printed
 $ offcut --force --dry-run clean  # preview of the force run; deletes nothing
 $ offcut --verbose clean       # verbose output
 $ offcut --version             # crate version (offcut 0.1.0)
 ```
+
+### JSON output (`--json`)
+
+`--json` switches a result-producing command from its human-readable
+rendering to a single machine-readable JSON document on stdout. It applies
+to `list`, `config`, `discovery`, `classification`, `clean` (and the default
+run), `ignore`, `safelist`, and `init`.
+
+Guarantees:
+
+- **stdout** carries exactly one JSON document (UTF-8, trailing newline),
+  with no ANSI sequences, live progress, prompts, or extra text.
+- **stderr** carries diagnostics only.
+- **exit codes**: `0` success (including a no-op), `1` error,
+  `2` approval required (`clean --json` with neither `--force` nor
+  `--dry-run` — nothing is deleted; the document describes what would need
+  approval).
+
+`--json` never prompts and never broadens deletion authority. A `clean` that
+would need a prompt either runs as a preview (`--dry-run`) or is
+auto-approved (`--force`); without one of those it returns the
+approval-required result and exits `2`.
+
+```sh
+$ offcut list --json                       # one JSON document, no projects array
+$ offcut --json clean --dry-run            # preview as JSON; deletes nothing
+$ offcut clean --json --force              # DESTRUCTIVE: deletes, reports as JSON
+$ offcut clean --json                      # approval required → exit 2, nothing deleted
+```
+
+The full schema, per-command result shapes, and exit behavior are documented
+in [docs/json-output.md](docs/json-output.md).
 
 To get started: `offcut init ~/code` writes a pre-populated config file under
 the platform config dir with `~/code` as the active workspace root, each other
@@ -109,7 +145,8 @@ more workspace roots. `offcut init --help` for details.
 
 See `src/main.rs` for the CLI surface and `src/output.rs` for the
 formatting; `src/clean.rs` for the deletion engine and
-`src/interactive.rs` for the approval state machine.
+`src/interactive.rs` for the approval state machine; `src/json.rs` for the
+JSON output schema.
 
 ### Colors
 

@@ -97,6 +97,7 @@ use glob::Pattern;
 use walkdir::WalkDir;
 
 use crate::config::Config;
+use crate::output;
 use crate::progress::{
     DISCOVERY_RECENT_LIMIT, DiscoveryProgress, DiscoveryProgressProject, ProgressWriter,
 };
@@ -209,9 +210,11 @@ pub fn discover(cfg: &Config) -> Result<Vec<DiscoveredProject>, Box<dyn std::err
     let prune_basenames = build_prune_set(&cfg.safe_delete);
 
     if cfg.workspace_roots.is_empty() {
-        println!(
-            "discovery: no workspace roots configured; nothing to walk — try `offcut init <path>` to create a config file"
-        );
+        if !output::json_mode() {
+            println!(
+                "discovery: no workspace roots configured; nothing to walk — try `offcut init <path>` to create a config file"
+            );
+        }
         return Ok(Vec::new());
     }
 
