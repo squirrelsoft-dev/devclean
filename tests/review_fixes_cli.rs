@@ -268,7 +268,28 @@ fn targeted_clean_workspace_json_separates_notice_and_stdout() {
     std::fs::create_dir_all(target.join("target")).unwrap();
     std::fs::write(target.join("target/bin"), "safe junk").unwrap();
 
+    // The decoy is a real cleanable project (committed + pushed, with
+    // safe-list junk) plus a tracked sentinel file. It is passed via
+    // --workspace, which a targeted clean ignores — so the decoy must never
+    // be discovered or cleaned. The junk surviving proves it was not
+    // cleaned; the sentinel surviving byte-identical proves it was not
+    // modified; and the decoy path never appearing in stdout/stderr proves
+    // it was not discovered. Each of these fails if targeted clean reaches
+    // the decoy.
     let decoy = root_for("f4-decoy");
+    init_repo_with_commit(&decoy);
+    add_pushed_remote(&decoy);
+    std::fs::create_dir_all(decoy.join("target")).unwrap();
+    std::fs::write(decoy.join("target/bin"), "decoy safe junk").unwrap();
+    let sentinel = decoy.join("sentinel.txt");
+    std::fs::write(&sentinel, "decoy-untouched-sentinel").unwrap();
+    git_in(&decoy, &["add", "sentinel.txt"]);
+    git_in(&decoy, &["commit", "-m", "sentinel"]);
+    // Push the sentinel commit so the decoy stays committed+pushed (cleanable):
+    // if a regression discovered it, --force would delete its untracked junk.
+    git_in(&decoy, &["push", "origin", "main"]);
+    let sentinel_bytes = std::fs::read(&sentinel).unwrap();
+
     let home = root_for("home-f4");
     let config = write_config(&home, &[], 2);
     let (status, stdout, stderr) = run_output([
@@ -296,9 +317,28 @@ fn targeted_clean_workspace_json_separates_notice_and_stdout() {
     let v = parse_json(&stdout);
     assert_eq!(v["command"], "clean");
     assert!(!stdout.contains('\u{1b}'));
-    // The targeted project was cleaned; the decoy was not discovered.
+    // The decoy was never discovered: its path appears in neither stream
+    // (the --workspace notice names it on stderr, but the JSON document —
+    // the list of projects acted on — must not).
+    let decoy_canonical = std::fs::canonicalize(&decoy).unwrap();
+    let decoy_str = decoy_canonical.to_string_lossy();
+    assert!(
+        !stdout.contains(decoy_str.as_ref()),
+        "decoy must not appear in the JSON projects list: {stdout}"
+    );
+    // The targeted project was cleaned.
     assert!(!target.join("target").exists());
-    assert!(decoy.join("target").exists() || !decoy.join("target/bin").exists() || true);
+    // The decoy was not cleaned: its safe-list junk survives.
+    assert!(
+        decoy.join("target/bin").is_file(),
+        "decoy safe-list junk must survive — it was not discovered/cleaned"
+    );
+    // The decoy was not modified: the sentinel is byte-identical.
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        sentinel_bytes,
+        "decoy sentinel must be byte-identical — it was not touched"
+    );
 }
 
 /// `--verbose` is accepted before and after every applicable subcommand
@@ -359,6 +399,89 @@ fn verbose_before_and_after_each_subcommand() {
         );
     }
     let _ = std::fs::remove_file(&cfg);
+}
+
+/// `--verbose` is accepted before and after `clean` and `init` too — the two
+/// subcommands that need repo/file fixtures and so were not in the no-fixture
+/// sweep above. `clean` uses `--dry-run` so nothing is deleted; `init` writes
+/// to a throwaway config target. Each assertion fails if the placement
+/// ceased to be accepted (clap exits nonzero with a usage error).
+#[test]
+fn verbose_before_and_after_clean_and_init() {
+    // --- clean: a cleanable project, --dry-run so nothing is deleted ---
+    let root = root_for("f4-verbose-clean");
+    init_repo_with_commit(&root);
+    add_pushed_remote(&root);
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target/bin"), "safe junk").unwrap();
+    let home = root_for("home-f4-verbose-clean");
+    let config = write_config(&home, &[root.to_str().unwrap()], 2);
+    let cfg = config.to_str().unwrap().to_string();
+    for order in [
+        ["--verbose", "--config", cfg.as_str(), "clean", "--dry-run"],
+        ["--config", cfg.as_str(), "clean", "--dry-run", "--verbose"],
+    ] {
+        let out = offcut()
+            .args(order)
+            .env("HOME", "/nonexistent-home")
+            .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "clean --verbose must be accepted (order {:?}): stderr={}",
+            order,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // --dry-run deleted nothing.
+    assert!(
+        root.join("target/bin").is_file(),
+        "--dry-run must not delete"
+    );
+
+    // --- init: a throwaway config target, both orders ---
+    let workspace = root_for("f4-verbose-init-ws");
+    for order_idx in 0..2 {
+        let target = std::env::temp_dir().join(format!(
+            "offcut-fix-verbose-init-{}-{}-{}.toml",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst),
+            order_idx
+        ));
+        let _ = std::fs::remove_file(&target);
+        let args: Vec<String> = if order_idx == 0 {
+            vec![
+                "--verbose".to_string(),
+                "--config".to_string(),
+                target.to_string_lossy().to_string(),
+                "init".to_string(),
+                workspace.to_string_lossy().to_string(),
+            ]
+        } else {
+            vec![
+                "--config".to_string(),
+                target.to_string_lossy().to_string(),
+                "init".to_string(),
+                workspace.to_string_lossy().to_string(),
+                "--verbose".to_string(),
+            ]
+        };
+        let out = offcut()
+            .args(args.iter().map(String::as_str))
+            .env("HOME", "/nonexistent-home")
+            .env("XDG_CONFIG_HOME", "/nonexistent-xdg")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "init --verbose must be accepted (order {order_idx}): stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_file(&target);
+    }
 }
 
 // ---------------------------------------------------------------------------
